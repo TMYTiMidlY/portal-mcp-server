@@ -30,6 +30,13 @@ from server.orchestrator import (ssh_parallel_exec, ssh_rolling_exec, ssh_exec_o
                                   ssh_broadcast, run_playbook, run_playbook_on_group)
 from server.audit import audit_log, get_history, get_audit_stats
 from server.security import get_policy
+from server.remote_text_editor import remote_read as _re_read, remote_patch as _re_patch
+from server.remote_search import remote_grep as _re_grep, remote_glob as _re_glob
+from server.remote_bash import (
+    remote_bash as _re_bash,
+    remote_bash_close as _re_bash_close,
+    remote_bash_status as _re_bash_status,
+)
 
 _log_handlers = [logging.StreamHandler(sys.stderr)]
 try:
@@ -1061,6 +1068,149 @@ async def ssh_health_check_fleet(hosts_json: str = "[]") -> str:
             parsed.append({"raw": str(r)})
     online = sum(1 for p in parsed if p.get("reachable"))
     return json.dumps({"online": online, "total": len(hosts), "hosts": parsed}, indent=2)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 12. REMOTE-MCP EXTENSIONS — agent-feels-local tools
+# ═══════════════════════════════════════════════════════════════════
+# These wrap server.remote_* modules. Designed to be the *primary* tools an
+# AI agent uses when working on a remote host. They share one SSH connection
+# per host (via the connection pool) and provide:
+#   - remote_read / remote_patch :  hash-protected concurrent-safe edits
+#   - remote_grep / remote_glob  :  remote ripgrep / find with structured output
+#   - remote_bash                :  single persistent bash session (cwd + env survive)
+
+@mcp.tool()
+async def remote_read(host: str, path: str, start: int = 1,
+                      end: int | None = None, encoding: str = "utf-8") -> str:
+    """Read a file (or a 1-based line range) from a remote host with SHA-256 hashes.
+
+    Returns JSON with: content, file_hash, range_hash, start, end, total_lines.
+    The file_hash MUST be supplied to remote_patch; if the file changed in
+    between, remote_patch will refuse to overwrite.
+
+    Args:
+        host: SSH host alias (from ~/.ssh/config) or registered host name
+        path: Absolute remote path
+        start: 1-based starting line (default 1)
+        end: 1-based ending line, inclusive (default: end of file)
+        encoding: Text encoding (default utf-8)
+    """
+    err = _gate(host)
+    if err:
+        return f"BLOCKED: {err}"
+    res = await _re_read(host, path, start=start, end=end, encoding=encoding)
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def remote_patch(host: str, path: str, file_hash: str,
+                       patches_json: str, encoding: str = "utf-8") -> str:
+    """Apply patches to a remote file with hash-based conflict detection.
+
+    Workflow:
+      1. Call remote_read to obtain content + file_hash + range_hash for each region.
+      2. Call remote_patch with the SAME file_hash and per-patch range_hash.
+      3. If the file was modified by anyone else in between, this call returns
+         {"result": "error", "reason": "Content hash mismatch ...", "current_file_hash": ...}
+         — re-read and try again. The remote file is untouched.
+
+    patches_json must decode to a list of patch objects:
+      [{"start": int, "end": int|null, "contents": str, "range_hash": str}, ...]
+
+    Notes:
+      - Patches are applied bottom-to-top so line numbers stay valid.
+      - Overlapping patches are rejected.
+      - Writes are atomic (tmp file + rename) and re-hashed after write.
+    """
+    err = _gate(host)
+    if err:
+        return f"BLOCKED: {err}"
+    try:
+        patches = json.loads(patches_json)
+    except Exception as e:
+        return json.dumps({"result": "error", "reason": f"invalid patches_json: {e}"})
+    res = await _re_patch(host, path, file_hash=file_hash, patches=patches, encoding=encoding)
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def remote_grep(host: str, path: str, pattern: str,
+                      glob: str = "", file_type: str = "",
+                      ignore_case: bool = False, max_count: int = 0) -> str:
+    """Search for a regex pattern under a path on a remote host.
+
+    Uses ripgrep when available (fast, structured), else falls back to grep -rn.
+
+    Args:
+        host: SSH host alias
+        path: Absolute remote path to search under
+        pattern: Pattern to find (regex by default)
+        glob: Optional glob filter (e.g. "*.py")
+        file_type: Optional rg --type value (e.g. "py", "rust")
+        ignore_case: Case-insensitive match
+        max_count: Stop after N matches (0 = no limit)
+    """
+    err = _gate(host)
+    if err:
+        return f"BLOCKED: {err}"
+    res = await _re_grep(
+        host, path, pattern,
+        glob=glob or None,
+        type=file_type or None,
+        ignore_case=ignore_case,
+        max_count=max_count if max_count > 0 else None,
+    )
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def remote_glob(host: str, pattern: str, path: str = ".") -> str:
+    """List files matching a glob pattern on a remote host.
+
+    Args:
+        host: SSH host alias
+        pattern: Glob (e.g. "**/*.py", "*.toml")
+        path: Directory to search under (default: cwd)
+    """
+    err = _gate(host)
+    if err:
+        return f"BLOCKED: {err}"
+    res = await _re_glob(host, pattern, path=path)
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def remote_bash(host: str, command: str, timeout: float = 60.0) -> str:
+    """Run a command in the persistent bash session for <host>.
+
+    Behavior:
+      - First call for a host auto-creates a `bash -i` session via SSH.
+      - Subsequent calls reuse the same shell, so cwd and exported env vars survive.
+        Example: `cd /tmp` in one call, `pwd` in the next prints `/tmp`.
+      - Output is sentinel-bounded; PTY echo is disabled so output is clean.
+
+    ⚠️ Safety: by default, write operations should target /tmp/ on the remote
+       unless the user has explicitly approved a different path. This tool does
+       NOT enforce that — it's a convention for the agent's skill prompt.
+    """
+    err = _gate(host, command)
+    if err:
+        return f"BLOCKED: {err}"
+    res = await _re_bash(host, command, timeout=timeout)
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def remote_bash_close(host: str) -> str:
+    """Close the cached default bash session for <host> (next call will reopen)."""
+    return await _re_bash_close(host)
+
+
+@mcp.tool()
+async def remote_bash_status() -> str:
+    """List host -> session_id mappings for cached default bash sessions."""
+    return json.dumps(_re_bash_status(), indent=2)
 
 
 # ═══════════════════════════════════════════════════════════════════
