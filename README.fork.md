@@ -14,24 +14,33 @@
 
 | 改动 | 文件 | 说明 |
 |---|---|---|
-| `~/.ssh/config` 别名解析 | `server/connection_manager.py` | `get_connection(host)` 找不到时自动解析 ssh config 注册；asyncssh 原生处理 HostName/User/Port/IdentityFile/ProxyJump |
-| Hash 编辑核心 | `server/remote_text_editor.py` | 新增。SHA-256 防并发冲突，原子 tmp+rename，写后再 hash 校验 |
-| 远端搜索 | `server/remote_search.py` | 新增。优先用远端 `rg --json`，无则 `grep -rn`；首次连接探测一次缓存 |
-| 持久 bash 包装 | `server/remote_bash.py` | 新增。每 host 自动建一个粘性 session，禁掉 PTY echo + bracketed-paste 让 sentinel 完整工作 |
-| 6 个 `remote_*` MCP 工具 | `server.py` | 新增 `remote_read` / `remote_patch` / `remote_grep` / `remote_glob` / `remote_bash` / `remote_bash_close` / `remote_bash_status` |
+| `~/.ssh/config` 别名解析 | `ssh_remote_mcp/connection_manager.py` | `get_connection(host)` 找不到时自动解析 ssh config 注册；asyncssh 原生处理 HostName/User/Port/IdentityFile/ProxyJump |
+| Hash 编辑核心 | `ssh_remote_mcp/remote_text_editor.py` | 新增。SHA-256 防并发冲突，原子 tmp+rename，写后再 hash 校验 |
+| 远端搜索 | `ssh_remote_mcp/remote_search.py` | 新增。优先用远端 `rg --json`，无则 `grep -rn`；首次连接探测一次缓存 |
+| 持久 bash 包装 | `ssh_remote_mcp/remote_bash.py` | 新增。每 host 自动建一个粘性 session，禁掉 PTY echo + bracketed-paste 让 sentinel 完整工作 |
+| 6 个 `remote_*` MCP 工具 | `ssh_remote_mcp/cli.py` | 新增 `remote_read` / `remote_patch` / `remote_grep` / `remote_glob` / `remote_bash` / `remote_bash_close` / `remote_bash_status` |
+| 打成 PEP 621 包 | `pyproject.toml` | 提供 `ssh-remote-mcp` 入口脚本，可直接 `uvx --from git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git ssh-remote-mcp` 启动 |
 
 ---
 
 ## 安装与项目级注册
 
-### 1. clone & venv
+### 1. 选择安装方式
+
+**A. 直接用 `uvx`（推荐，零安装）**
+
+```bash
+uvx --from git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git ssh-remote-mcp --help
+```
+
+**B. clone 后开发**
 
 ```bash
 git clone git@github.com:TMYTiMidlY/ssh-remote-mcp.git
 cd ssh-remote-mcp
 uv venv --python 3.11 .venv
 source .venv/bin/activate
-uv pip install -r requirements.txt
+uv pip install -e ".[dev]"
 ```
 
 ### 2. 验证（在 1810 别名上跑端到端 demo）
@@ -50,11 +59,21 @@ PYTHONPATH=. python examples/phase6_acceptance.py
 
 ### 3. 注册到 Copilot CLI（项目级，原生 `.mcp.json`）
 
-Copilot CLI **原生支持工作区级 `.mcp.json`**（与 Claude Code / Cursor 同格式），优先级独立于用户级 `~/.copilot/mcp-config.json`。把样例放进目标项目根：
+Copilot CLI **原生支持工作区级 `.mcp.json`**（与 Claude Code / Cursor 同格式），优先级独立于用户级 `~/.copilot/mcp-config.json`。最简单的项目级配置（推荐用 uvx）：
 
-```bash
-cp <repo>/mcp-config.example.json <project>/.mcp.json
-# 改里面的绝对路径指向你 clone 的位置
+```json
+{
+  "mcpServers": {
+    "ssh-remote": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git",
+        "ssh-remote-mcp"
+      ]
+    }
+  }
+}
 ```
 
 验证：

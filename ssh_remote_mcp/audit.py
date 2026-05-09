@@ -1,14 +1,15 @@
 """
 Audit Logger — structured logging of all agent actions.
-Writes to logs/audit.jsonl and optionally to stdout.
+Writes to <log_dir>/audit.jsonl and optionally to stdout.
 """
 import json
 import logging
 import os
 import time
-from pathlib import Path
 
-_log_dir = Path(os.environ.get("SSH_MCP_LOG_DIR", "logs"))
+from .paths import default_log_dir
+
+_log_dir = default_log_dir()
 _log_dir.mkdir(parents=True, exist_ok=True)
 _audit_file = _log_dir / "audit.jsonl"
 

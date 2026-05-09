@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ssh-remote-mcp"
+version = "0.2.0"
+description = "Production-grade SSH orchestration MCP server (57+ tools) for AI agents"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+    { name = "jaguar999paw-droid" },
+    { name = "TMYTiMidlY" },
+]
+keywords = ["mcp", "ssh", "asyncssh", "ai-agents", "orchestration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = [
+    "asyncssh>=2.14.0",
+    "mcp[cli]>=1.0.0",
+    "pyyaml>=6.0.1",
+    "uvicorn[standard]>=0.29.0",
+    "starlette>=0.37.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+]
+
+[project.scripts]
+ssh-remote-mcp = "ssh_remote_mcp:main"
+
+[project.urls]
+Homepage = "https://github.com/TMYTiMidlY/ssh-remote-mcp"
+Repository = "https://github.com/TMYTiMidlY/ssh-remote-mcp"
+Issues = "https://github.com/TMYTiMidlY/ssh-remote-mcp/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["ssh_remote_mcp"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/ssh_remote_mcp",
+    "/README.md",
+    "/README.fork.md",
+    "/LICENSE",
+    "/SECURITY.md",
+    "/CONTRIBUTING.md",
+    "/config/hosts.example.yaml",
+    "/config/policies.yaml",
+    "/docs",
+    "/tests",
+    "/pytest.ini",
+]

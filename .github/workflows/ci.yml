@@ -24,14 +24,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install ruff pytest
+          pip install -e ".[dev]"
+          pip install ruff
 
       - name: Lint with ruff
-        run: ruff check server.py server/
+        run: ruff check ssh_remote_mcp/
 
-      - name: Check imports resolve
-        run: python -c "import server" || echo "Skipped (requires live SSH config)"
+      - name: Check package imports
+        run: python -c "import ssh_remote_mcp; assert ssh_remote_mcp.main; print('import ok')"
+
+      - name: Verify CLI entrypoint
+        run: ssh-remote-mcp --help
 
       - name: Run tests
         run: |

@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional
 
 import asyncssh
 
-from server.connection_manager import get_manager
+from .connection_manager import get_manager
 
 logger = logging.getLogger("ssh_mcp.remote_editor")
 

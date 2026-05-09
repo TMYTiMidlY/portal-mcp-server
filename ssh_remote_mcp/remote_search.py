@@ -13,7 +13,7 @@ import logging
 import shlex
 from typing import Any, Dict, List, Optional
 
-from server.connection_manager import get_manager
+from .connection_manager import get_manager
 
 logger = logging.getLogger("ssh_mcp.remote_search")
 

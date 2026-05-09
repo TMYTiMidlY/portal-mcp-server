@@ -1,5 +1,5 @@
 """
-ssh-shell-mcp — Production-grade SSH orchestration layer for AI agents.
+ssh-remote-mcp — Production-grade SSH orchestration layer for AI agents.
 Exposes 57+ MCP tools covering: exec, sessions, files, processes,
 system inspection, multi-host orchestration, tunnels, and security.
 """
@@ -10,41 +10,38 @@ import os
 import sys
 import time
 
-# Resolve config paths relative to this file
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-os.chdir(BASE_DIR)
-
 from mcp.server.fastmcp import FastMCP
-from server.connection_manager import get_manager
-from server.session_manager import get_session_manager
-from server.shell_engine import ssh_exec, ssh_exec_batch, ssh_exec_script, ssh_exec_with_env
-from server.file_ops import (ssh_upload_file, ssh_download_file, ssh_list_directory,
+from .paths import default_log_dir
+from .connection_manager import get_manager
+from .session_manager import get_session_manager
+from .shell_engine import ssh_exec, ssh_exec_batch, ssh_exec_script, ssh_exec_with_env
+from .file_ops import (ssh_upload_file, ssh_download_file, ssh_list_directory,
                               ssh_read_file, ssh_write_file, ssh_delete_file, ssh_sync_directory)
-from server.process_manager import (ssh_process_list, ssh_kill_process, ssh_start_process,
+from .process_manager import (ssh_process_list, ssh_kill_process, ssh_start_process,
                                     ssh_background_process, ssh_monitor_process)
-from server.system_inspector import (ssh_system_info, ssh_disk_usage, ssh_memory_usage,
+from .system_inspector import (ssh_system_info, ssh_disk_usage, ssh_memory_usage,
                                      ssh_network_status, ssh_service_status, ssh_logs,
                                      ssh_docker_status)
-from server.network_tools import get_tunnel_manager
-from server.orchestrator import (ssh_parallel_exec, ssh_rolling_exec, ssh_exec_on_group,
+from .network_tools import get_tunnel_manager
+from .orchestrator import (ssh_parallel_exec, ssh_rolling_exec, ssh_exec_on_group,
                                   ssh_broadcast, run_playbook, run_playbook_on_group)
-from server.audit import audit_log, get_history, get_audit_stats
-from server.security import get_policy
-from server.remote_text_editor import remote_read as _re_read, remote_patch as _re_patch
-from server.remote_search import remote_grep as _re_grep, remote_glob as _re_glob
-from server.remote_bash import (
+from .audit import audit_log, get_history, get_audit_stats
+from .security import get_policy
+from .remote_text_editor import remote_read as _re_read, remote_patch as _re_patch
+from .remote_search import remote_grep as _re_grep, remote_glob as _re_glob
+from .remote_bash import (
     remote_bash as _re_bash,
     remote_bash_close as _re_bash_close,
     remote_bash_status as _re_bash_status,
 )
 
-_log_handlers = [logging.StreamHandler(sys.stderr)]
+_log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
 try:
-    _log_file = os.path.join(BASE_DIR, "logs", "server.log")
-    os.makedirs(os.path.dirname(_log_file), exist_ok=True)
-    _log_handlers.append(logging.FileHandler(_log_file, encoding="utf-8"))
+    _log_dir = default_log_dir()
+    _log_dir.mkdir(parents=True, exist_ok=True)
+    _log_handlers.append(logging.FileHandler(_log_dir / "server.log", encoding="utf-8"))
 except Exception as _log_err:
-    print(f"[ssh-shell-mcp] WARNING: could not open log file: {_log_err}", file=sys.stderr)
+    print(f"[ssh-remote-mcp] WARNING: could not open log file: {_log_err}", file=sys.stderr)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ssh_mcp")
 
-mcp = FastMCP("ssh-shell-mcp")
+mcp = FastMCP("ssh-remote-mcp")
 
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS
@@ -1217,7 +1214,8 @@ async def remote_bash_status() -> str:
 # ENTRYPOINT
 # ═══════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
+def main() -> None:
+    """CLI entrypoint registered as `ssh-remote-mcp`."""
     import argparse
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
@@ -1234,14 +1232,17 @@ if __name__ == "__main__":
                 return Response("Unauthorized", status_code=401)
             return await call_next(request)
 
-    parser = argparse.ArgumentParser(description="ssh-shell-mcp — SSH Orchestration MCP Server")
+    parser = argparse.ArgumentParser(
+        prog="ssh-remote-mcp",
+        description="ssh-remote-mcp — SSH Orchestration MCP Server",
+    )
     parser.add_argument("--transport", choices=["stdio", "streamable_http"], default="stdio",
                         help="MCP transport (default: stdio)")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port (default: 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
     args = parser.parse_args()
 
-    logger.info(f"ssh-shell-mcp starting | transport={args.transport}")
+    logger.info(f"ssh-remote-mcp starting | transport={args.transport}")
 
     if args.transport == "streamable_http":
         import uvicorn
@@ -1254,3 +1255,7 @@ if __name__ == "__main__":
     else:
         logger.info("stdio transport active")
         mcp.run()
+
+
+if __name__ == "__main__":
+    main()

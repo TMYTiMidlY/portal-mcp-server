@@ -1,11 +1,13 @@
 {
-  "_comment": "Sample workspace-level MCP config. Copy to <your-project>/.mcp.json (Copilot CLI / Claude Code / Cursor all use this same format). Edit absolute paths to match your clone location.",
+  "_comment": "Sample workspace-level MCP config. Copy to <your-project>/.mcp.json (Copilot CLI / Claude Code / Cursor all use this same format). Uses uvx so no clone or venv is required.",
   "mcpServers": {
     "ssh-remote": {
       "type": "local",
-      "command": "/home/agony/TiMidlY-projects/ssh-remote-mcp/.venv/bin/python",
+      "command": "uvx",
       "args": [
-        "/home/agony/TiMidlY-projects/ssh-remote-mcp/server.py"
+        "--from",
+        "git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git",
+        "ssh-remote-mcp"
       ],
       "env": {},
       "tools": ["*"]

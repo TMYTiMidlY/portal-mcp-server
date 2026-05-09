@@ -1,12 +1,18 @@
 {
   "mcpServers": {
-    "ssh-shell-mcp": {
-      "command": "/path/to/ssh-shell-mcp/venv/bin/python",
-      "args": ["/path/to/ssh-shell-mcp/server.py", "--transport", "stdio"],
+    "ssh-remote": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git",
+        "ssh-remote-mcp",
+        "--transport",
+        "stdio"
+      ],
       "env": {
-        "SSH_HOSTS_YAML": "/path/to/ssh-shell-mcp/config/hosts.yaml",
-        "SSH_POLICIES_YAML": "/path/to/ssh-shell-mcp/config/policies.yaml",
-        "SSH_MCP_LOG_DIR": "/path/to/ssh-shell-mcp/logs"
+        "SSH_HOSTS_YAML": "/path/to/your/hosts.yaml",
+        "SSH_POLICIES_YAML": "/path/to/your/policies.yaml",
+        "SSH_MCP_LOG_DIR": "/path/to/your/log/dir"
       }
     }
   }

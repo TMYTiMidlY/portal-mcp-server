@@ -77,32 +77,52 @@
 
 ## Quickstart
 
+### Run via `uvx` (no clone required)
+
 ```bash
-git clone https://github.com/jaguar999paw-droid/ssh-shell-mcp.git
-cd ssh-shell-mcp
-
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-cp config.example.json config.json   # fill in your hosts
-python server.py --transport stdio
+uvx --from git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git ssh-remote-mcp
 ```
 
-Add to `claude_desktop_config.json`:
+Add to `claude_desktop_config.json` (or any other MCP client config):
 
 ```json
 {
   "mcpServers": {
-    "ssh-shell": {
-      "command": "/path/to/ssh-shell-mcp/.venv/bin/python",
-      "args": ["server.py", "--transport", "stdio"],
+    "ssh-remote": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git",
+        "ssh-remote-mcp"
+      ],
       "env": {
-        "SSH_HOSTS_YAML": "/path/to/ssh-shell-mcp/config/hosts.yaml"
+        "SSH_HOSTS_YAML": "/path/to/hosts.yaml"
       }
     }
   }
 }
 ```
+
+> Without `SSH_HOSTS_YAML` the server falls back to `$XDG_CONFIG_HOME/ssh-remote-mcp/hosts.yaml`
+> (i.e. `~/.config/ssh-remote-mcp/hosts.yaml`) — copy `config/hosts.example.yaml` there to get started.
+> Audit logs default to `~/.local/state/ssh-remote-mcp/logs/`.
+
+### Develop from a local clone
+
+```bash
+git clone https://github.com/TMYTiMidlY/ssh-remote-mcp.git
+cd ssh-remote-mcp
+
+uv venv --python 3.11 .venv
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+
+cp config/hosts.example.yaml config/hosts.yaml   # fill in your hosts
+ssh-remote-mcp --transport stdio
+```
+
+When invoked from inside a checkout, the legacy `./config/*.yaml` and `./logs/`
+paths still work (they take precedence over the XDG defaults).
 
 ---
 
@@ -163,9 +183,9 @@ policies:
 
 | Variable | Description | Default |
 |---|---|---|
-| `SSH_HOSTS_YAML` | Path to hosts config | `config/hosts.yaml` |
-| `SSH_POLICIES_YAML` | Path to security policy config | `config/policies.yaml` |
-| `SSH_MCP_LOG_DIR` | Directory for audit logs | `logs/` |
+| `SSH_HOSTS_YAML` | Path to hosts config | `./config/hosts.yaml` if present, else `$XDG_CONFIG_HOME/ssh-remote-mcp/hosts.yaml` |
+| `SSH_POLICIES_YAML` | Path to security policy config | `./config/policies.yaml` if present, else `$XDG_CONFIG_HOME/ssh-remote-mcp/policies.yaml` |
+| `SSH_MCP_LOG_DIR` | Directory for audit + server logs | `./logs/` if present, else `$XDG_STATE_HOME/ssh-remote-mcp/logs/` |
 | `MCP_AUTH_TOKEN` | Bearer token for HTTP transport | _(none)_ |
 
 ---
@@ -198,7 +218,7 @@ They use **real SSH connections** — no mocking.
 ## HTTP Transport (remote agents)
 
 ```bash
-MCP_AUTH_TOKEN=your-secret python server.py --transport streamable_http --port 8000
+MCP_AUTH_TOKEN=your-secret ssh-remote-mcp --transport streamable_http --port 8000
 ```
 
 The server exposes `/mcp` with Bearer token authentication. Suitable for remote AI agents over a private network.
@@ -208,23 +228,27 @@ The server exposes `/mcp` with Bearer token authentication. Suitable for remote 
 ## Project Structure
 
 ```
-ssh-shell-mcp/
-├── server.py              # MCP entrypoint — all 57 tools
-├── server/
-│   ├── connection_manager.py   # AsyncSSH connection pool
-│   ├── session_manager.py      # Persistent shell sessions
-│   ├── shell_engine.py         # Core command execution
-│   ├── file_ops.py             # SFTP file operations
-│   ├── process_manager.py      # Process lifecycle
-│   ├── system_inspector.py     # System info, logs, Docker
-│   ├── network_tools.py        # Tunnel manager
-│   ├── orchestrator.py         # Multi-host execution
-│   ├── audit.py                # Audit log
-│   └── security.py             # Policy enforcement
-├── config.example.json
-├── requirements.txt
-├── Dockerfile
-├── docker-compose.yml
+ssh-remote-mcp/
+├── pyproject.toml             # package metadata + `ssh-remote-mcp` script
+├── ssh_remote_mcp/
+│   ├── __init__.py            # exposes main / mcp
+│   ├── __main__.py            # `python -m ssh_remote_mcp`
+│   ├── cli.py                 # MCP entrypoint — all 64 tools
+│   ├── paths.py               # XDG / legacy path resolution
+│   ├── connection_manager.py  # AsyncSSH connection pool
+│   ├── session_manager.py     # Persistent shell sessions
+│   ├── shell_engine.py        # Core command execution
+│   ├── file_ops.py            # SFTP file operations
+│   ├── process_manager.py     # Process lifecycle
+│   ├── system_inspector.py    # System info, logs, Docker
+│   ├── network_tools.py       # Tunnel manager
+│   ├── orchestrator.py        # Multi-host execution
+│   ├── audit.py               # Audit log
+│   ├── security.py            # Policy enforcement
+│   └── remote_*.py            # Hash-protected editor / search / persistent bash
+├── config/
+│   ├── hosts.example.yaml
+│   └── policies.yaml
 └── SECURITY.md
 ```
 

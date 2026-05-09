@@ -16,7 +16,8 @@ logger = logging.getLogger("ssh_mcp.security")
 
 
 class SecurityPolicy:
-    def __init__(self, policies_yaml: str = "config/policies.yaml"):
+    def __init__(self, policies_yaml: str | os.PathLike | None = None):
+        from .paths import policies_yaml_path
         self.host_allowlist: list[str] = []       # empty = all allowed
         self.command_blocklist: list[str] = []    # patterns of blocked commands
         self.command_allowlist: list[str] = []    # if set, only these allowed
@@ -25,7 +26,8 @@ class SecurityPolicy:
         self.connection_timeout: int = 30
         self.sandbox_users: dict[str, str] = {}   # host -> forced username
         self._rate_counters: dict[str, list[float]] = defaultdict(list)
-        self._load(policies_yaml)
+        path = str(policies_yaml) if policies_yaml else str(policies_yaml_path())
+        self._load(path)
 
     def _load(self, path: str):
         p = Path(path)
@@ -98,6 +100,5 @@ _policy: Optional[SecurityPolicy] = None
 def get_policy() -> SecurityPolicy:
     global _policy
     if _policy is None:
-        yaml_path = os.environ.get("SSH_POLICIES_YAML", "config/policies.yaml")
-        _policy = SecurityPolicy(yaml_path)
+        _policy = SecurityPolicy()
     return _policy

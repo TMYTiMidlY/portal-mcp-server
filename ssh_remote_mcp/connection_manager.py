@@ -53,12 +53,13 @@ class ConnectionManager:
     Supports host registry from YAML, dynamic registration, and connection reuse.
     """
 
-    def __init__(self, hosts_yaml: str = "config/hosts.yaml", pool_size: int = 5):
+    def __init__(self, hosts_yaml: str | os.PathLike | None = None, pool_size: int = 5):
+        from .paths import hosts_yaml_path
         self._registry: dict[str, HostConfig] = {}
         self._pool: dict[str, list[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._pool_size = pool_size
-        self._hosts_yaml = hosts_yaml
+        self._hosts_yaml = str(hosts_yaml) if hosts_yaml else str(hosts_yaml_path())
         self._load_registry()
 
     def _load_registry(self):
@@ -267,6 +268,5 @@ _manager: Optional[ConnectionManager] = None
 def get_manager() -> ConnectionManager:
     global _manager
     if _manager is None:
-        hosts_yaml = os.environ.get("SSH_HOSTS_YAML", "config/hosts.yaml")
-        _manager = ConnectionManager(hosts_yaml=hosts_yaml)
+        _manager = ConnectionManager()
     return _manager

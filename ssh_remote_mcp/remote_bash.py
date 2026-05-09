@@ -25,7 +25,7 @@ import logging
 import re
 from typing import Dict
 
-from server.session_manager import get_session_manager
+from .session_manager import get_session_manager
 
 logger = logging.getLogger("ssh_mcp.remote_bash")
 
