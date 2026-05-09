@@ -178,7 +178,8 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_create_and_exec(self):
         """Create a session, run commands, verify state persists."""
-        sm = __import__("server.session_manager", fromlist=["get_session_manager"]).get_session_manager()
+        from ssh_remote_mcp.session_manager import get_session_manager
+        sm = get_session_manager()
         sid = await sm.create_session(TEST_HOST_NAME)
         assert sid, "Session ID must not be empty"
         # CWD change must persist across calls
@@ -190,7 +191,8 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_env_injection(self):
         """Inject env var into session and read it back."""
-        sm = __import__("server.session_manager", fromlist=["get_session_manager"]).get_session_manager()
+        from ssh_remote_mcp.session_manager import get_session_manager
+        sm = get_session_manager()
         sid = await sm.create_session(TEST_HOST_NAME)
         sm.set_env(sid, "MCP_TEST_VAR", "hello123")
         await asyncio.sleep(0.3)
@@ -201,7 +203,8 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_session_list(self):
         """Session appears in list while active, gone after close."""
-        sm = __import__("server.session_manager", fromlist=["get_session_manager"]).get_session_manager()
+        from ssh_remote_mcp.session_manager import get_session_manager
+        sm = get_session_manager()
         sid = await sm.create_session(TEST_HOST_NAME)
         sessions = sm.list_sessions()
         ids = [s["session_id"] for s in sessions]
@@ -214,7 +217,8 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_multi_session_isolation(self):
         """Two concurrent sessions maintain independent CWDs."""
-        sm = __import__("server.session_manager", fromlist=["get_session_manager"]).get_session_manager()
+        from ssh_remote_mcp.session_manager import get_session_manager
+        sm = get_session_manager()
         sid1 = await sm.create_session(TEST_HOST_NAME)
         sid2 = await sm.create_session(TEST_HOST_NAME)
         await sm.execute_in_session(sid1, "cd /tmp")
