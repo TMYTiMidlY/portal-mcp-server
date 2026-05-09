@@ -108,10 +108,23 @@ async def run_playbook(host_name: str, playbook: dict) -> dict:
 
 
 async def run_playbook_on_group(group_tag: str, playbook: dict) -> list[dict]:
-    """Run a playbook against all hosts in a group simultaneously."""
+    """Run a playbook against all hosts in a group simultaneously.
+
+    Per-host failures are surfaced as ``{"host": <h>, "error": str(...)}`` —
+    a single failing host no longer aborts the entire fleet (which was the
+    behavior with ``return_exceptions=False`` and a leaked exception).
+    """
     mgr = get_manager()
     hosts = [h.name for h in mgr._registry.values() if group_tag in h.tags]
     if not hosts:
         return [{"error": f"No hosts with tag '{group_tag}'"}]
     tasks = [run_playbook(h, playbook) for h in hosts]
-    return await asyncio.gather(*tasks, return_exceptions=False)
+    raw = await asyncio.gather(*tasks, return_exceptions=True)
+    out: list[dict] = []
+    for host, r in zip(hosts, raw):
+        if isinstance(r, Exception):
+            out.append({"host": host, "error": str(r),
+                        "playbook": playbook.get("name", "unnamed")})
+        else:
+            out.append(r)
+    return out

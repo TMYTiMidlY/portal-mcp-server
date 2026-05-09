@@ -1,6 +1,16 @@
 """
 Audit Logger — structured logging of all agent actions.
 Writes to <log_dir>/audit.jsonl and optionally to stdout.
+
+Failure-mode policy
+-------------------
+By default a write failure is logged to the runtime logger and the
+operation continues — the audit log is a best-effort record. Set the
+environment variable ``SSH_MCP_AUDIT_FAIL_CLOSED=1`` to instead raise a
+:class:`RuntimeError`, which propagates back to the caller so the failed
+operation is aborted. This is the recommended setting for any deployment
+where the audit log is a compliance requirement (the cybersecurity
+positioning advertised in the README).
 """
 import json
 import logging
@@ -14,6 +24,15 @@ _log_dir.mkdir(parents=True, exist_ok=True)
 _audit_file = _log_dir / "audit.jsonl"
 
 logger = logging.getLogger("ssh_mcp.audit")
+
+_FAIL_CLOSED_ENV = "SSH_MCP_AUDIT_FAIL_CLOSED"
+
+
+def _fail_closed() -> bool:
+    """Read the fail-closed flag at call time so tests / runtime can flip it."""
+    return os.environ.get(_FAIL_CLOSED_ENV, "").lower() in (
+        "1", "true", "yes", "on",
+    )
 
 # In-memory ring buffer for recent operations (for observability tools)
 _HISTORY_LIMIT = 500
@@ -41,6 +60,10 @@ def audit_log(host: str, command: str, result,
             f.write(json.dumps(entry) + "\n")
     except Exception as e:
         logger.warning(f"Audit write failed: {e}")
+        if _fail_closed():
+            raise RuntimeError(
+                f"Audit write failed and {_FAIL_CLOSED_ENV} is set: {e}"
+            ) from e
 
 
 def get_history(limit: int = 50, host_filter: str = "") -> list[dict]:
