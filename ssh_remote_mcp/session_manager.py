@@ -11,6 +11,7 @@ from typing import Optional
 
 import asyncssh
 from .connection_manager import get_manager
+from .safety import quote_shell, validate_env_dict, validate_env_key
 
 logger = logging.getLogger("ssh_mcp.sessions")
 OUTPUT_BUFFER_LINES = 10000
@@ -39,9 +40,9 @@ class SessionManager:
 
     async def create_session(self, host_name: str, env: dict = None) -> str:
         """Spawn a persistent shell session on a remote host."""
+        env = validate_env_dict(env)
         mgr = get_manager()
         conn = await mgr.get_connection(host_name)
-        env = env or {}
         process = await conn.create_process(
             "bash -i", term_type="xterm-256color",
             env=env, request_pty=True,
@@ -81,8 +82,12 @@ class SessionManager:
         """Execute a command inside a persistent shell session."""
         session = self._get(session_id)
         session.touch()
-        # Use a sentinel to detect command completion
-        sentinel = f"__DONE_{uuid.uuid4().hex[:8]}__"
+        # Sentinel uses the FULL 128-bit uuid so a command whose stdout
+        # happens to contain the prefix string can never be mistaken for
+        # completion. The previous 32-bit prefix had a 1-in-4-billion
+        # collision per call, which is fine for an isolated test but a
+        # latent corruption source under bursty multi-host workloads.
+        sentinel = f"__DONE_{uuid.uuid4().hex}__"
         full_cmd = f"{command}\necho {sentinel}\n"
         session.process.stdin.write(full_cmd)
         output_lines = []
@@ -118,9 +123,17 @@ class SessionManager:
 
     def set_env(self, session_id: str, key: str, value: str):
         """Set an environment variable in the session."""
+        validate_env_key(key)
+        if not isinstance(value, str):
+            raise ValueError("value must be a string")
+        if "\x00" in value:
+            raise ValueError("value contains NUL byte")
         session = self._get(session_id)
         session.env[key] = value
-        session.process.stdin.write(f"export {key}={value!r}\n")
+        # Use shlex.quote on the value so an attacker cannot break out of
+        # the export argument with embedded quotes / `$()` / backticks.
+        # ``key`` has already been restricted to [A-Za-z_][A-Za-z0-9_]*.
+        session.process.stdin.write(f"export {key}={quote_shell(value)}\n")
 
     async def close_session(self, session_id: str) -> str:
         """Terminate a persistent shell session."""

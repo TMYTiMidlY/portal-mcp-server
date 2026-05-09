@@ -1,14 +1,34 @@
 """
 Shell Engine — one-off command execution, streaming, and batch operations.
+
+Hardening notes
+---------------
+* ``cwd`` is interpolated through :func:`safety.build_cwd_prefix`, which uses
+  :func:`shlex.quote` so an LLM-supplied ``cwd`` cannot break out of the
+  ``cd`` argument. Before this fix, ``cwd="/tmp; rm -rf /"`` would have
+  expanded to ``cd /tmp; rm -rf / && <cmd>``.
+* ``ssh_exec_with_env`` no longer manually concatenates ``env k=v ...`` —
+  it forwards the validated env dict to ``conn.run(env=...)`` so OpenSSH
+  handles the protocol-level env channel natively. This sidesteps a whole
+  class of value-quoting bugs.
+* ``ssh_exec_script``: the interpreter must be in a fixed allowlist
+  (:data:`safety._ALLOWED_INTERPRETERS`) and the temp-script path is
+  shell-quoted. The cleanup ``rm -f`` runs inside ``finally`` so a failed
+  or timed-out script no longer leaks ``/tmp/_mcp_script_*.sh``.
 """
 import asyncio
 import time
 import logging
 from typing import AsyncGenerator
 
-import asyncssh
 from .connection_manager import get_manager
 from .audit import audit_log
+from .safety import (
+    build_cwd_prefix,
+    quote_shell,
+    validate_env_dict,
+    validate_interpreter,
+)
 
 logger = logging.getLogger("ssh_mcp.shell")
 
@@ -16,15 +36,18 @@ logger = logging.getLogger("ssh_mcp.shell")
 async def ssh_exec(host_name: str, command: str, timeout: int = 60,
                    env: dict = None, cwd: str = None) -> dict:
     """Execute a single command on a remote host and return result."""
+    try:
+        env_clean = validate_env_dict(env)
+        full_cmd = build_cwd_prefix(cwd, command)
+    except ValueError as e:
+        return {"host": host_name, "command": command,
+                "error": f"Invalid input: {e}", "exit_code": -1}
     mgr = get_manager()
     conn = await mgr.get_connection(host_name)
-    full_cmd = command
-    if cwd:
-        full_cmd = f"cd {cwd} && {command}"
     t0 = time.time()
     try:
         result = await asyncio.wait_for(
-            conn.run(full_cmd, env=env or {}, check=False),
+            conn.run(full_cmd, env=env_clean, check=False),
             timeout=timeout,
         )
         elapsed = round(time.time() - t0, 3)
@@ -70,6 +93,7 @@ async def ssh_exec_stream(host_name: str, command: str,
     finally:
         mgr.release_connection(host_name, conn)
 
+
 async def ssh_exec_batch(host_name: str, commands: list[str],
                           stop_on_error: bool = True,
                           timeout: int = 60) -> list[dict]:
@@ -88,17 +112,31 @@ async def ssh_exec_script(host_name: str, script_content: str,
                            interpreter: str = "bash",
                            timeout: int = 120) -> dict:
     """Upload and execute a script on the remote host."""
+    try:
+        interpreter = validate_interpreter(interpreter)
+    except ValueError as e:
+        return {"error": f"Invalid interpreter: {e}", "host": host_name}
+
     remote_path = f"/tmp/_mcp_script_{int(time.time())}.sh"
+    quoted_path = quote_shell(remote_path)
     mgr = get_manager()
     conn = await mgr.get_connection(host_name)
     try:
         async with conn.start_sftp_client() as sftp:
             async with sftp.open(remote_path, "w") as f:
                 await f.write(script_content)
-        result = await ssh_exec(host_name, f"chmod +x {remote_path} && {interpreter} {remote_path}", timeout=timeout)
-        # cleanup
-        await ssh_exec(host_name, f"rm -f {remote_path}", timeout=10)
-        return result
+        try:
+            return await ssh_exec(
+                host_name,
+                f"chmod +x {quoted_path} && {interpreter} {quoted_path}",
+                timeout=timeout,
+            )
+        finally:
+            # cleanup runs even if the inner ssh_exec raised or timed out
+            try:
+                await ssh_exec(host_name, f"rm -f {quoted_path}", timeout=10)
+            except Exception:  # pragma: no cover
+                logger.debug(f"script cleanup failed for {remote_path}")
     except Exception as e:
         return {"error": str(e), "host": host_name}
     finally:
@@ -107,7 +145,10 @@ async def ssh_exec_script(host_name: str, script_content: str,
 
 async def ssh_exec_with_env(host_name: str, command: str,
                              env_vars: dict, timeout: int = 60) -> dict:
-    """Execute a command with injected environment variables."""
-    env_prefix = " ".join(f"{k}={v!r}" for k, v in env_vars.items())
-    full_cmd = f"env {env_prefix} {command}" if env_vars else command
-    return await ssh_exec(host_name, full_cmd, timeout=timeout)
+    """Execute a command with injected environment variables.
+
+    The env dict is forwarded as the protocol-level ``env`` channel, so we
+    avoid the historical ``f"env K={v!r} {command}"`` string concatenation
+    that an attacker could escape from with a crafted key or value.
+    """
+    return await ssh_exec(host_name, command, timeout=timeout, env=env_vars)

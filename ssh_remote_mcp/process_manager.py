@@ -4,6 +4,7 @@ Process Manager — remote process listing, killing, starting, monitoring.
 import asyncio
 import logging
 from .shell_engine import ssh_exec
+from .safety import quote_shell, validate_pid, validate_signal
 
 logger = logging.getLogger("ssh_mcp.processes")
 
@@ -31,6 +32,11 @@ async def ssh_process_list(host_name: str, filter_name: str = "") -> list[dict]:
 
 async def ssh_kill_process(host_name: str, pid: int, signal: str = "TERM") -> str:
     """Send a signal to a remote process by PID."""
+    try:
+        pid = validate_pid(pid)
+        signal = validate_signal(signal)
+    except ValueError as e:
+        return f"Kill rejected: {e}"
     result = await ssh_exec(host_name, f"kill -{signal} {pid}", timeout=10)
     if result.get("exit_code") == 0:
         return f"Sent {signal} to PID {pid} on {host_name}"
@@ -43,7 +49,7 @@ async def ssh_start_process(host_name: str, command: str,
     """Start a process on a remote host."""
     if background:
         log = log_file or "/tmp/mcp_process.log"
-        cmd = f"nohup {command} > {log} 2>&1 & echo $!"
+        cmd = f"nohup {command} > {quote_shell(log)} 2>&1 & echo $!"
     else:
         cmd = command
     result = await ssh_exec(host_name, cmd, timeout=30)
@@ -59,9 +65,14 @@ async def ssh_background_process(host_name: str, command: str,
     """Start a named background process with logging and PID tracking."""
     log = log_file or f"/tmp/{name}.log"
     pid_file = f"/tmp/{name}.pid"
+    # NB: ``command`` is a free-form shell snippet — agents pass things like
+    # ``cd /opt && ./run.sh``. We wrap it through ``bash -c`` with the
+    # quoted form, which is exactly what the original code did, plus we
+    # quote the log/pid paths.
     cmd = (
-        f"nohup bash -c {command!r} > {log} 2>&1 & "
-        f"echo $! | tee {pid_file}"
+        f"nohup bash -c {quote_shell(command)} "
+        f"> {quote_shell(log)} 2>&1 & "
+        f"echo $! | tee {quote_shell(pid_file)}"
     )
     result = await ssh_exec(host_name, cmd, timeout=15)
     pid = result.get("stdout", "").strip()
@@ -74,6 +85,10 @@ async def ssh_background_process(host_name: str, command: str,
 
 async def ssh_monitor_process(host_name: str, pid: int) -> dict:
     """Check if a process is running and get its resource usage."""
+    try:
+        pid = validate_pid(pid)
+    except ValueError as e:
+        return {"pid": pid, "host": host_name, "error": str(e)}
     result = await ssh_exec(host_name, f"ps -p {pid} -o pid,stat,pcpu,pmem,comm --no-headers 2>/dev/null", timeout=10)
     output = result.get("stdout", "").strip()
     if not output:
@@ -86,3 +101,4 @@ async def ssh_monitor_process(host_name: str, pid: int) -> dict:
         "mem%": parts[3] if len(parts) > 3 else "?",
         "command": parts[4] if len(parts) > 4 else "?",
     }
+
