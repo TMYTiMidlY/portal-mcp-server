@@ -27,13 +27,18 @@ from .orchestrator import (ssh_parallel_exec, ssh_rolling_exec, ssh_exec_on_grou
                                   ssh_broadcast, run_playbook, run_playbook_on_group)
 from .audit import audit_log, get_history, get_audit_stats
 from .security import get_policy
-from .remote_text_editor import remote_read as _re_read, remote_patch as _re_patch
+from .remote_text_editor import (
+    remote_read as _re_read,
+    remote_patch as _re_patch,
+    cleanup_orphan_tmps as _re_cleanup_tmps,
+)
 from .remote_search import remote_grep as _re_grep, remote_glob as _re_glob
 from .remote_bash import (
     remote_bash as _re_bash,
     remote_bash_close as _re_bash_close,
     remote_bash_status as _re_bash_status,
 )
+from .safety import quote_shell, validate_tmux_name
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
 try:
@@ -920,6 +925,10 @@ async def ssh_tmux_new(host_name: str, session_name: str) -> str:
     err = _gate(host_name)
     if err:
         return f"BLOCKED: {err}"
+    try:
+        session_name = validate_tmux_name(session_name)
+    except ValueError as e:
+        return f"Invalid session_name: {e}"
     result = await ssh_exec(
         host_name,
         f"tmux new-session -d -s {session_name} 2>&1 || echo 'already exists'",
@@ -940,16 +949,24 @@ async def ssh_tmux_send(host_name: str, session_name: str, command: str) -> str:
     err = _gate(host_name, command)
     if err:
         return f"BLOCKED: {err}"
-    escaped = command.replace("'", "'\\''")
+    try:
+        session_name = validate_tmux_name(session_name)
+    except ValueError as e:
+        return f"Invalid session_name: {e}"
+    # ``command`` is sent verbatim to the tmux pane; tmux handles its own
+    # parsing. We single-source-quote it via shlex.quote so it survives the
+    # outer ``tmux send-keys ... Enter`` shell line, and quote ``session_name``
+    # for completeness even though it's restricted by the regex above.
     await ssh_exec(
         host_name,
-        f"tmux send-keys -t {session_name} '{escaped}' Enter",
-        timeout=10
+        f"tmux send-keys -t {quote_shell(session_name)} "
+        f"{quote_shell(command)} Enter",
+        timeout=10,
     )
     await asyncio.sleep(0.5)
     capture = await ssh_exec(
         host_name,
-        f"tmux capture-pane -t {session_name} -p",
+        f"tmux capture-pane -t {quote_shell(session_name)} -p",
         timeout=10
     )
     return capture.get("stdout", "")
@@ -980,6 +997,10 @@ async def ssh_tmux_kill(host_name: str, session_name: str) -> str:
     err = _gate(host_name)
     if err:
         return f"BLOCKED: {err}"
+    try:
+        session_name = validate_tmux_name(session_name)
+    except ValueError as e:
+        return f"Invalid session_name: {e}"
     result = await ssh_exec(host_name, f"tmux kill-session -t {session_name}", timeout=10)
     return f"Killed tmux session '{session_name}'" if result.get("exit_code") == 0 else result.get("stderr", "")
 
@@ -1102,7 +1123,8 @@ async def remote_read(host: str, path: str, start: int = 1,
 
 @mcp.tool()
 async def remote_patch(host: str, path: str, file_hash: str,
-                       patches_json: str, encoding: str = "utf-8") -> str:
+                       patches_json: str, encoding: str = "utf-8",
+                       auto_newline: bool = False) -> str:
     """Apply patches to a remote file with hash-based conflict detection.
 
     Workflow:
@@ -1119,6 +1141,9 @@ async def remote_patch(host: str, path: str, file_hash: str,
       - Patches are applied bottom-to-top so line numbers stay valid.
       - Overlapping patches are rejected.
       - Writes are atomic (tmp file + rename) and re-hashed after write.
+      - When auto_newline is true, missing trailing newlines on patch
+        contents are auto-appended *only* if the slice they replace ended
+        with one. The result includes a "warnings" list either way.
     """
     err = _gate(host)
     if err:
@@ -1127,7 +1152,34 @@ async def remote_patch(host: str, path: str, file_hash: str,
         patches = json.loads(patches_json)
     except Exception as e:
         return json.dumps({"result": "error", "reason": f"invalid patches_json: {e}"})
-    res = await _re_patch(host, path, file_hash=file_hash, patches=patches, encoding=encoding)
+    res = await _re_patch(host, path, file_hash=file_hash, patches=patches,
+                           encoding=encoding, auto_newline=auto_newline)
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def remote_cleanup_tmps(host: str, directory: str,
+                              max_age_s: int = 3600) -> str:
+    """Remove orphan tmp files left by interrupted remote_patch writes.
+
+    remote_patch writes through ``<path>.mcp_tmp.<12hex>`` and renames into
+    place atomically. If the SSH connection dies after the tmp file is
+    created but before the rename, the tmp file is left on disk. This tool
+    finds and removes those orphans.
+
+    Args:
+        host:      registered host alias
+        directory: absolute remote directory to scan (non-recursive)
+        max_age_s: only remove files older than this many seconds (default
+                   3600). Pass 0 to remove every match unconditionally —
+                   useful in tests, dangerous in production.
+
+    Returns JSON: {"scanned": int, "removed": [str], "skipped": [[str, str]]}.
+    """
+    err = _gate(host)
+    if err:
+        return f"BLOCKED: {err}"
+    res = await _re_cleanup_tmps(host, directory, max_age_s=max_age_s)
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 

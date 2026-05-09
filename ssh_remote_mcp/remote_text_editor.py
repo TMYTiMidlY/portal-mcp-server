@@ -1,32 +1,94 @@
 """Remote text editor with hash-based concurrent-modification detection.
 
-Design pattern (read → hash → patch → re-check → atomic-write) is adapted from
-tumf/mcp-text-editor (MIT). This module re-implements it on top of AsyncSSH
-SFTP so all I/O happens against the remote host through a single connection.
+Algorithmic provenance
+----------------------
+This module is a deliberate port of the safe-edit pattern shipped by
+**tumf/mcp-text-editor** (MIT, https://github.com/tumf/mcp-text-editor — the
+de-facto "safe file edit" library in the MCP ecosystem). We could not depend
+on it directly because:
 
-Tools exposed:
-  - remote_read(host, path, start?, end?, encoding?) -> {content, hash, range_hash, total_lines}
-  - remote_patch(host, path, file_hash, patches[], encoding?) -> {result, hash} | error
+* Its :class:`TextEditorService` calls ``with open(file_path, "r") as f:``
+  unconditionally and exposes no file-backend interface — there is no
+  injection point for an SFTP transport.
+* It is synchronous; this server is asyncio-native and shares an AsyncSSH
+  connection pool. Wrapping a sync library would force every edit through a
+  thread pool, undoing the point of the connection pool.
 
-Patches are applied bottom-to-top to keep line numbers stable. File writes use
-``<path>.tmp.<uuid>`` followed by SFTP ``rename``. The new content is read back
-and re-hashed before reporting success, providing a defense-in-depth check
-against silently truncated writes.
+What we kept (verbatim algorithm)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+==================================  ==============================  ===============================
+mcp-text-editor (service.py)        ssh-remote-mcp (this file)      Notes
+==================================  ==============================  ===============================
+``calculate_hash`` SHA-256          :func:`_sha256`                 identical
+``edit_file_contents`` whole-file   ``remote_patch`` lines 151-160  hash check returns full
+hash check                                                          ``current_content`` so the
+                                                                    LLM can re-plan with one round
+                                                                    trip
+``validate_patches`` overlap +      ``remote_patch`` lines 184-205  upstream sorts ascending; we
+out-of-bounds                                                       sort *descending* so applying
+                                                                    each patch keeps line numbers
+                                                                    valid for the rest
+single-shot ``f.write(new_content)``  :func:`_atomic_write`         we use tmp + ``posix_rename``
+                                                                    (POSIX-atomic) instead of
+                                                                    overwriting in place
+==================================  ==============================  ===============================
+
+What we added (SFTP-specific safety nets)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+* Per-patch ``range_hash`` check — defends against the case where the file
+  hash stayed the same (e.g. another writer reverted earlier edits) but the
+  specific region the LLM wants to touch has changed underneath it.
+* Atomic write: ``<path>.tmp.<uuid12>`` followed by SFTP ``posix_rename``,
+  with a fall-back to ``remove + rename`` for SFTP servers that do not
+  advertise the posix-rename extension.
+* Post-write read-back + rehash — a partial SFTP write (transport closed
+  mid-stream) is detected before we report success.
+* Path validation through :func:`safety.validate_remote_path` to reject NUL
+  bytes and ASCII control characters in paths.
+* Connection pool release in ``finally`` and ``await sftp.wait_closed()`` so
+  a thrown asyncssh exception cannot leak the pooled session.
+
+Test coverage mirrors the upstream matrix (see ``tests/test_remote_text_editor.py``):
+the same hash-mismatch, overlapping-patch, beyond-EOF, and successful-edit
+scenarios run against an in-memory fake SFTP.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import logging
+import re
+import time
 import uuid
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any, Dict, List, Optional
 
 import asyncssh
 
 from .connection_manager import get_manager
+from .safety import validate_remote_path
 
 logger = logging.getLogger("ssh_mcp.remote_editor")
+
+# A stable, recognizable suffix so a janitor can later identify orphans we
+# left behind (e.g. when a connection died after `sftp.open(tmp)` but before
+# `posix_rename`). The suffix is wide enough (12 hex chars) that there is no
+# practical chance of a real user file matching it.
+_TMP_SUFFIX_RE = re.compile(r"\.mcp_tmp\.[0-9a-f]{12}$")
+
+
+def _make_tmp_path(target_path: str) -> str:
+    """Return a tmp path in the same directory as ``target_path``.
+
+    Putting the tmp file beside the target is what makes ``posix_rename``
+    atomic on POSIX filesystems (rename is only atomic *within* a single
+    filesystem). Using a recognizable suffix lets :func:`cleanup_orphan_tmps`
+    find leftovers without false positives.
+    """
+    return f"{target_path}.mcp_tmp.{uuid.uuid4().hex[:12]}"
 
 
 def _sha256(text: str) -> str:
@@ -52,6 +114,7 @@ class RemoteEditError(Exception):
 
 
 async def _read_full(host: str, path: str, encoding: str) -> str:
+    validate_remote_path(path)
     mgr = get_manager()
     conn = await mgr.get_connection(host)
     try:
@@ -61,38 +124,129 @@ async def _read_full(host: str, path: str, encoding: str) -> str:
                 return await f.read()
         finally:
             sftp.exit()
+            try:
+                await sftp.wait_closed()
+            except Exception:  # pragma: no cover
+                pass
     finally:
         mgr.release_connection(host, conn)
 
 
 async def _atomic_write(host: str, path: str, new_content: str, encoding: str) -> None:
-    """Write atomically via tmp + rename on the remote host."""
-    tmp_path = f"{path}.tmp.{uuid.uuid4().hex[:12]}"
+    """Write atomically via tmp + rename on the remote host.
+
+    Failure-mode contract
+    ---------------------
+    1. If we never got far enough to create the tmp file, we never call
+       ``sftp.remove(tmp)``. (This is why we use ``created`` below: calling
+       remove on a path we never opened risks deleting an unrelated file
+       whose name happened to collide — exceedingly unlikely thanks to the
+       12-hex suffix, but we still guard.)
+    2. If creation succeeded but anything *after* it raises (including
+       :class:`asyncio.CancelledError`), we make a best-effort cleanup and
+       re-raise.
+    3. If the connection itself dies mid-cleanup, the orphan tmp will be
+       picked up by :func:`cleanup_orphan_tmps` on the next maintenance run.
+    """
+    validate_remote_path(path)
+    tmp_path = _make_tmp_path(path)
     mgr = get_manager()
     conn = await mgr.get_connection(host)
+    created = False
     try:
         sftp = await conn.start_sftp_client()
         try:
-            async with sftp.open(tmp_path, "w", encoding=encoding) as f:
-                await f.write(new_content)
             try:
-                await sftp.posix_rename(tmp_path, path)
-            except (asyncssh.SFTPOpUnsupported, AttributeError):
+                async with sftp.open(tmp_path, "w", encoding=encoding) as f:
+                    created = True
+                    await f.write(new_content)
                 try:
-                    await sftp.remove(path)
-                except asyncssh.SFTPNoSuchFile:
-                    pass
-                await sftp.rename(tmp_path, path)
-        except Exception:
-            try:
-                await sftp.remove(tmp_path)
-            except Exception:
-                pass
-            raise
+                    await sftp.posix_rename(tmp_path, path)
+                except (asyncssh.SFTPOpUnsupported, AttributeError):
+                    try:
+                        await sftp.remove(path)
+                    except asyncssh.SFTPNoSuchFile:
+                        pass
+                    await sftp.rename(tmp_path, path)
+                # Rename succeeded — tmp_path no longer exists at its old name.
+                created = False
+            except BaseException:
+                # Best-effort cleanup. We catch BaseException explicitly so a
+                # CancelledError propagating from asyncio.shield-style code
+                # does not bypass cleanup.
+                if created:
+                    try:
+                        await sftp.remove(tmp_path)
+                    except Exception:
+                        logger.warning(
+                            "remote_text_editor: failed to remove orphan tmp "
+                            "%s on %s; cleanup_orphan_tmps will pick it up",
+                            tmp_path, host,
+                        )
+                raise
         finally:
             sftp.exit()
+            try:
+                await sftp.wait_closed()
+            except Exception:  # pragma: no cover
+                pass
     finally:
         mgr.release_connection(host, conn)
+
+
+async def cleanup_orphan_tmps(host: str, directory: str,
+                               max_age_s: int = 3600) -> Dict[str, Any]:
+    """Find and remove orphan tmp files left by a failed :func:`_atomic_write`.
+
+    Args:
+        host:        registered host alias.
+        directory:   absolute remote directory to scan (non-recursive).
+        max_age_s:   only remove files older than this many seconds. Defaults
+                     to 1 hour, which is more than enough headroom over any
+                     realistic edit but small enough that a leftover from a
+                     legitimate concurrent edit will *not* be touched. Pass
+                     ``0`` to remove every match unconditionally.
+
+    Returns:
+        ``{"scanned": int, "removed": [str, ...], "skipped": [(str, str), ...]}``
+        — ``skipped`` entries carry a per-file reason (too young / remove
+        failed) so the caller can surface them.
+    """
+    validate_remote_path(directory)
+    mgr = get_manager()
+    conn = await mgr.get_connection(host)
+    sftp = None
+    removed: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    scanned = 0
+    try:
+        sftp = await conn.start_sftp_client()
+        entries = await sftp.readdir(directory)
+        now = time.time()
+        for e in entries:
+            name = e.filename
+            if not _TMP_SUFFIX_RE.search(name):
+                continue
+            scanned += 1
+            full = str(PurePosixPath(directory) / name)
+            mtime = getattr(e.attrs, "mtime", None)
+            if max_age_s > 0 and mtime is not None and (now - mtime) < max_age_s:
+                skipped.append((full, f"younger than {max_age_s}s"))
+                continue
+            try:
+                await sftp.remove(full)
+                removed.append(full)
+            except Exception as exc:
+                skipped.append((full, f"remove failed: {exc}"))
+    finally:
+        if sftp is not None:
+            try:
+                sftp.exit()
+                await sftp.wait_closed()
+            except Exception:  # pragma: no cover
+                pass
+        mgr.release_connection(host, conn)
+    return {"scanned": scanned, "removed": removed, "skipped": skipped}
 
 
 async def remote_read(host: str, path: str, start: int = 1,
@@ -136,13 +290,28 @@ async def remote_read(host: str, path: str, start: int = 1,
 
 async def remote_patch(host: str, path: str, file_hash: str,
                        patches: List[Dict[str, Any]],
-                       encoding: str = "utf-8") -> Dict[str, Any]:
+                       encoding: str = "utf-8",
+                       auto_newline: bool = False) -> Dict[str, Any]:
     """Apply patches to a remote file with hash-based conflict detection.
 
     Each patch dict must include: start, end (or null), contents, range_hash.
 
-    Returns on success:  {"result": "ok", "file_hash": <new sha256>}
-    Returns on conflict: {"result": "error", "reason": ..., "current_file_hash": ..., "current_content": ...}
+    Args:
+        auto_newline: When ``True``, ensure each ``contents`` ends with
+            ``\\n`` if (a) the existing slice it replaces ended with one and
+            (b) ``contents`` is non-empty. This catches the common LLM
+            mistake of passing ``"new line"`` when the surrounding file uses
+            POSIX line endings — the silent corruption the upstream
+            ``mcp-text-editor`` design notes warn about. Default is
+            ``False`` for byte-for-byte compatibility with the upstream
+            "callers manage their own line endings" contract; we still
+            surface a ``warnings`` field whenever a patch *would* have been
+            normalized so the agent can diagnose mysterious "two lines
+            merged into one" reports without re-running.
+
+    Returns on success:  ``{"result": "ok", "file_hash": <new sha256>,
+                           "warnings": [str, ...]}``
+    Returns on conflict: ``{"result": "error", "reason": ..., ...}``
     """
     if not patches:
         return {"result": "error", "reason": "patches list is empty"}
@@ -195,6 +364,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
 
     # 5) Apply each patch with per-range hash check
     new_lines = list(lines)
+    warnings: list[str] = []
     for p in parsed:
         s_idx = p.start - 1
         e_idx = total if p.end is None else min(total, p.end)
@@ -211,9 +381,34 @@ async def remote_patch(host: str, path: str, file_hash: str,
                 "current_range_hash": _sha256(existing_slice),
                 "current_range_content": existing_slice,
             }
-        new_content_lines = p.contents.splitlines(keepends=True)
-        # If contents was non-empty but lacks trailing newline, do not silently add one;
-        # callers should manage their own line endings. This matches mcp-text-editor.
+
+        # Newline normalization. Two cases trigger a warning / fix:
+        #   * ``contents`` is non-empty and lacks a trailing \n
+        #   * the slice it replaces *did* end with \n
+        # Without the trailing newline, ``splitlines(keepends=True)`` produces
+        # a final element with no \n, which when joined with the rest of the
+        # file causes the next surviving line to glue onto the patched line.
+        contents = p.contents
+        needs_newline = (
+            contents
+            and not contents.endswith("\n")
+            and existing_slice.endswith("\n")
+        )
+        if needs_newline:
+            note = (
+                f"patch [{p.start},{p.end}] contents missing trailing newline "
+                f"but the replaced slice ended with one"
+            )
+            if auto_newline:
+                contents = contents + "\n"
+                warnings.append(f"{note}; auto-appended")
+            else:
+                warnings.append(
+                    f"{note}; pass auto_newline=true or include the newline "
+                    f"yourself to avoid line gluing"
+                )
+
+        new_content_lines = contents.splitlines(keepends=True)
         new_lines[s_idx:e_idx] = new_content_lines
 
     new_full = "".join(new_lines)
@@ -231,6 +426,10 @@ async def remote_patch(host: str, path: str, file_hash: str,
             "reason": "post-write hash verification failed (write may be partial)",
             "expected_file_hash": expected_hash,
             "actual_file_hash": written_hash,
+            "warnings": warnings,
         }
 
-    return {"result": "ok", "file_hash": written_hash}
+    out: Dict[str, Any] = {"result": "ok", "file_hash": written_hash}
+    if warnings:
+        out["warnings"] = warnings
+    return out

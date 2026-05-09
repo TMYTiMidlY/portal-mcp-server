@@ -49,3 +49,25 @@ Report security issues privately via one of the following channels:
 
 - Password-based SSH authentication is not supported by design
 - Host key verification uses the system `known_hosts` by default; disabling it weakens MITM protection
+
+## References & Algorithmic Provenance
+
+The hash-protected file editing in `ssh_remote_mcp.remote_text_editor`
+(`remote_read` / `remote_patch`) is a deliberate port of the safe-edit
+pattern from [tumf/mcp-text-editor](https://github.com/tumf/mcp-text-editor)
+(MIT). Concretely:
+
+| Upstream (`mcp-text-editor`) | Here (`remote_text_editor`)              |
+|---|---|
+| Whole-file SHA-256 conflict detection | identical algorithm, runs over SFTP |
+| Line-range patch model | identical model, plus per-patch `range_hash` |
+| Single-shot file overwrite | replaced with tmp-file + `posix_rename` (atomic) |
+| Local `open(...)` + `fcntl.flock` | replaced with AsyncSSH SFTP + connection-pool release |
+
+The upstream library is **not** a Python dependency because its
+`TextEditorService` directly calls `with open(file_path, "r")` and exposes no
+file-backend interface — it cannot be retargeted to SFTP without forking. The
+test suite in `tests/test_remote_text_editor.py` mirrors the upstream test
+matrix (hash mismatch, overlap, beyond-EOF, multi-patch ordering, ...) and
+adds SFTP-specific coverage (`posix_rename` fall-back, post-write rehash,
+connection release on every exit path).
