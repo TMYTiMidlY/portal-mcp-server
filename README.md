@@ -1,3 +1,15 @@
+> **Note (this fork)**: This is `TMYTiMidlY/ssh-remote-mcp`, a fork of the upstream
+> `jaguar999paw-droid/ssh-shell-mcp` that adds **agent-feels-local** tools
+> (`remote_read` / `remote_patch` with SHA-256 conflict detection,
+> `remote_grep` / `remote_glob` over remote `rg`/`find`, persistent-cwd
+> `remote_bash`) and `~/.ssh/config` alias auto-resolution.
+>
+> See [`README.fork.md`](./README.fork.md) for fork-specific docs (install,
+> registration, end-to-end acceptance demo). The upstream README below is
+> preserved unchanged.
+
+---
+
 # ssh-shell-mcp
 
 > **AI-native SSH orchestration for security engineers, DevSecOps, and sysadmins.**  
