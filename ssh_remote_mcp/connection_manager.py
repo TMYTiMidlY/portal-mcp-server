@@ -26,7 +26,7 @@ class HostConfig:
     connect_timeout: int = 30
     # Path to a known_hosts file. ``None`` means "let asyncssh use the
     # default" (which resolves to ``~/.ssh/known_hosts`` and behaves like
-    # OpenSSH's strict mode). Set ``strict_host_key_checking=False`` to
+    # OpenSSH's strict mode). Set to the literal string ``"<disable>"`` to
     # opt out of host-key verification entirely (NOT recommended).
     known_hosts: Optional[str] = None
     strict_host_key_checking: bool = True
@@ -122,15 +122,26 @@ class ConnectionManager:
         ]
 
     def remove_host(self, name: str) -> str:
-        if name in self._registry:
-            del self._registry[name]
-            return f"Host '{name}' removed from registry"
-        return f"Host '{name}' not found"
+        if name not in self._registry:
+            return f"Host '{name}' not found"
+        del self._registry[name]
+        # Drop the lazy lock (otherwise ``_locks`` grows indefinitely if hosts
+        # churn) and close any pooled connections so we do not leak SSH
+        # channels for an alias the caller has explicitly forgotten.
+        self._locks.pop(name, None)
+        pool = self._pool.pop(name, [])
+        for pc in pool:
+            try:
+                pc.conn.close()
+            except Exception:  # pragma: no cover
+                pass
+        return f"Host '{name}' removed from registry"
 
     async def _get_lock(self, name: str) -> asyncio.Lock:
-        if name not in self._locks:
-            self._locks[name] = asyncio.Lock()
-        return self._locks[name]
+        # ``setdefault`` is atomic under the GIL, so two concurrent tasks for
+        # the same host name will always observe the same lock instance even
+        # if both reach this method before the first creates the entry.
+        return self._locks.setdefault(name, asyncio.Lock())
 
     def _known_hosts_arg(self, cfg: HostConfig):
         """Resolve the ``known_hosts`` value to pass to ``asyncssh.connect``.

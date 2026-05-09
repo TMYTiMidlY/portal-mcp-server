@@ -17,6 +17,15 @@ Tools:
   - remote_bash(host, cmd, timeout?) -> {host, session_id, output}
   - remote_bash_close(host) -> close the cached session
   - remote_bash_status() -> list cached sessions
+
+Concurrency note
+----------------
+The pre-fix implementation used a single global ``asyncio.Lock`` to guard
+session lookup. That serialized every ``remote_bash`` call across every
+host: ``remote_bash("a", ...)`` and ``remote_bash("b", ...)`` could not
+proceed concurrently. The lock dict below is per-host, so independent hosts
+no longer block each other while the *first* call for a fresh host pays the
+session-startup cost.
 """
 from __future__ import annotations
 
@@ -31,7 +40,13 @@ logger = logging.getLogger("ssh_mcp.remote_bash")
 
 # host -> session_id mapping for the agent's "default" session per host
 _HOST_SESSIONS: Dict[str, str] = {}
-_LOCK = asyncio.Lock()
+# Per-host async lock; created on first access. setdefault makes the lazy
+# init race-safe under CPython.
+_HOST_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(host: str) -> asyncio.Lock:
+    return _HOST_LOCKS.setdefault(host, asyncio.Lock())
 
 # Match all CSI escape sequences (covers bracketed-paste ?2004l/h, colors, cursor moves)
 _ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
@@ -69,7 +84,7 @@ async def _setup_session(host: str) -> str:
 async def _ensure_session(host: str) -> str:
     """Return a live session_id for the host, creating one if needed."""
     smgr = get_session_manager()
-    async with _LOCK:
+    async with _lock_for(host):
         sid = _HOST_SESSIONS.get(host)
         if sid is not None:
             try:
@@ -97,7 +112,7 @@ async def remote_bash(host: str, cmd: str, timeout: float = 60.0) -> Dict[str, s
 async def remote_bash_close(host: str) -> str:
     """Close the cached default session for a host (next call will reopen)."""
     smgr = get_session_manager()
-    async with _LOCK:
+    async with _lock_for(host):
         sid = _HOST_SESSIONS.pop(host, None)
     if sid is None:
         return f"No cached session for {host}"
