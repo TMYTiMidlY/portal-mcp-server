@@ -16,6 +16,11 @@ hosts:
     user: your-username
     key: ~/.ssh/id_ed25519
     tags: [local]
+    # Host-key verification — defaults to True (strict). Set this to False
+    # ONLY for ephemeral test environments. With strict=true, asyncssh uses
+    # ~/.ssh/known_hosts; you can override the file with `known_hosts:`.
+    # strict_host_key_checking: true
+    # known_hosts: ~/.ssh/known_hosts
 
   # ── Remote web server ────────────────────────────────────────────────────
   web01:

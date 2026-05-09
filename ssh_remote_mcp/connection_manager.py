@@ -24,7 +24,12 @@ class HostConfig:
     key: Optional[str] = None
     password: Optional[str] = None
     connect_timeout: int = 30
+    # Path to a known_hosts file. ``None`` means "let asyncssh use the
+    # default" (which resolves to ``~/.ssh/known_hosts`` and behaves like
+    # OpenSSH's strict mode). Set ``strict_host_key_checking=False`` to
+    # opt out of host-key verification entirely (NOT recommended).
     known_hosts: Optional[str] = None
+    strict_host_key_checking: bool = True
     tags: list = field(default_factory=list)
     # When True, defer everything to ~/.ssh/config (asyncssh.connect resolves
     # HostName/User/Port/IdentityFile/ProxyJump natively from `name`).
@@ -80,6 +85,10 @@ class ConnectionManager:
                 key=self._resolve_path(cfg.get("key")),
                 password=cfg.get("password"),
                 connect_timeout=int(cfg.get("connect_timeout", 30)),
+                known_hosts=cfg.get("known_hosts"),
+                strict_host_key_checking=bool(cfg.get(
+                    "strict_host_key_checking", True
+                )),
                 tags=cfg.get("tags", []),
             )
         logger.info(f"Loaded {len(self._registry)} hosts from registry")
@@ -91,12 +100,16 @@ class ConnectionManager:
 
     def register_host(self, name: str, host: str, user: str = "root",
                       port: int = 22, key: Optional[str] = None,
-                      password: Optional[str] = None, tags: list = None) -> str:
+                      password: Optional[str] = None, tags: list = None,
+                      known_hosts: Optional[str] = None,
+                      strict_host_key_checking: bool = True) -> str:
         """Dynamically register a new host into the registry."""
         self._registry[name] = HostConfig(
             name=name, host=host, port=port, user=user,
             key=self._resolve_path(key), password=password,
-            tags=tags or []
+            tags=tags or [],
+            known_hosts=known_hosts,
+            strict_host_key_checking=strict_host_key_checking,
         )
         logger.info(f"Registered host: {name} ({user}@{host}:{port})")
         return f"Host '{name}' registered: {user}@{host}:{port}"
@@ -119,20 +132,48 @@ class ConnectionManager:
             self._locks[name] = asyncio.Lock()
         return self._locks[name]
 
+    def _known_hosts_arg(self, cfg: HostConfig):
+        """Resolve the ``known_hosts`` value to pass to ``asyncssh.connect``.
+
+        The asyncssh contract:
+          * ``known_hosts=()``        -> use the default ``~/.ssh/known_hosts``
+                                        and reject unknown hosts (strict).
+          * ``known_hosts="path"``    -> load that specific file.
+          * ``known_hosts=None``      -> disable verification entirely (UNSAFE).
+
+        We map our policy onto that:
+          * cfg.strict_host_key_checking == True (default):
+              - cfg.known_hosts is a path -> pass the path
+              - cfg.known_hosts is None   -> pass () so asyncssh defaults apply
+          * cfg.strict_host_key_checking == False:
+              - log a clear warning and pass None to disable verification
+        """
+        if not cfg.strict_host_key_checking:
+            logger.warning(
+                "Host '%s' has strict_host_key_checking=False — SSH host key "
+                "verification is DISABLED for this host (MITM exposure).",
+                cfg.name,
+            )
+            return None
+        if cfg.known_hosts:
+            return self._resolve_path(cfg.known_hosts)
+        # Empty tuple = "use the default known_hosts file(s) and be strict",
+        # which matches OpenSSH StrictHostKeyChecking=yes behaviour.
+        return ()
+
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
         if cfg.use_ssh_config:
-            # Let asyncssh resolve everything from ~/.ssh/config using the alias.
-            # We only override known_hosts to remain permissive (matches default
-            # behavior for explicitly-registered hosts above).
+            # asyncssh resolves everything from ~/.ssh/config using the alias.
+            # Defer host-key behaviour to the same policy as explicit hosts.
             return dict(
                 host=cfg.name,
                 connect_timeout=cfg.connect_timeout,
-                known_hosts=None,
+                known_hosts=self._known_hosts_arg(cfg),
             )
         kwargs = dict(
             host=cfg.host, port=cfg.port, username=cfg.user,
             connect_timeout=cfg.connect_timeout,
-            known_hosts=None,  # permissive by default; override via policies
+            known_hosts=self._known_hosts_arg(cfg),
         )
         if cfg.key:
             kwargs["client_keys"] = [cfg.key]
