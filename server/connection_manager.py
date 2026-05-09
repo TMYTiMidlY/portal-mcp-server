@@ -26,6 +26,9 @@ class HostConfig:
     connect_timeout: int = 30
     known_hosts: Optional[str] = None
     tags: list = field(default_factory=list)
+    # When True, defer everything to ~/.ssh/config (asyncssh.connect resolves
+    # HostName/User/Port/IdentityFile/ProxyJump natively from `name`).
+    use_ssh_config: bool = False
 
 
 @dataclass
@@ -116,6 +119,15 @@ class ConnectionManager:
         return self._locks[name]
 
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
+        if cfg.use_ssh_config:
+            # Let asyncssh resolve everything from ~/.ssh/config using the alias.
+            # We only override known_hosts to remain permissive (matches default
+            # behavior for explicitly-registered hosts above).
+            return dict(
+                host=cfg.name,
+                connect_timeout=cfg.connect_timeout,
+                known_hosts=None,
+            )
         kwargs = dict(
             host=cfg.host, port=cfg.port, username=cfg.user,
             connect_timeout=cfg.connect_timeout,
@@ -137,10 +149,58 @@ class ConnectionManager:
                 kwargs["client_keys"] = default_keys
         return kwargs
 
+    def _try_load_from_ssh_config(self, host_name: str) -> Optional[HostConfig]:
+        """Check whether host_name is defined as an alias in ~/.ssh/config.
+        Returns a synthetic HostConfig (use_ssh_config=True) if found, else None.
+        """
+        ssh_config = Path("~/.ssh/config").expanduser()
+        if not ssh_config.exists():
+            return None
+        try:
+            with open(ssh_config) as f:
+                content = f.read()
+        except OSError:
+            return None
+        # Lightweight scan: look for a `Host <alias>` line that lists host_name
+        # as one of the patterns (excluding wildcard-only entries).
+        import re
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            m = re.match(r"^Host\s+(.+)$", stripped, re.IGNORECASE)
+            if not m:
+                continue
+            patterns = m.group(1).split()
+            # Skip pure wildcard hosts like `Host *` to avoid false positives
+            if all(p in ("*", "?") for p in patterns):
+                continue
+            if host_name in patterns:
+                return HostConfig(
+                    name=host_name,
+                    host=host_name,  # placeholder; asyncssh ignores when use_ssh_config
+                    use_ssh_config=True,
+                    tags=["ssh-config"],
+                )
+        return None
+
     async def get_connection(self, host_name: str) -> asyncssh.SSHClientConnection:
-        """Get or create a pooled connection to a host."""
+        """Get or create a pooled connection to a host.
+        Resolution order:
+          1. Explicitly registered host (registry / hosts.yaml)
+          2. Alias defined in ~/.ssh/config (auto-registered on first use)
+        """
         if host_name not in self._registry:
-            raise ValueError(f"Unknown host: '{host_name}'. Register it first.")
+            ssh_cfg_host = self._try_load_from_ssh_config(host_name)
+            if ssh_cfg_host is not None:
+                self._registry[host_name] = ssh_cfg_host
+                logger.info(f"Auto-registered host '{host_name}' from ~/.ssh/config")
+            else:
+                raise ValueError(
+                    f"Unknown host: '{host_name}'. "
+                    "Register it explicitly, define it in hosts.yaml, "
+                    "or add a Host alias to ~/.ssh/config."
+                )
         cfg = self._registry[host_name]
         lock = await self._get_lock(host_name)
 
