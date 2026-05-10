@@ -58,6 +58,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import logging
 import re
 import time
@@ -93,6 +94,16 @@ def _make_tmp_path(target_path: str) -> str:
 
 def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _hash_eq(a: str, b: str) -> bool:
+    """Constant-time hash comparison via :func:`hmac.compare_digest`.
+
+    Inherited design intent from upstream ``utils.secure_compare_hash``;
+    cheap insurance against timing oracles even though the threat surface
+    is small for an SSH-tunneled local edit tool.
+    """
+    return hmac.compare_digest(a.encode("ascii"), b.encode("ascii"))
 
 
 @dataclass
@@ -319,7 +330,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
     # 1) Re-read remote file and verify whole-file hash
     full = await _read_full(host, path, encoding)
     current_hash = _sha256(full)
-    if current_hash != file_hash:
+    if not _hash_eq(current_hash, file_hash):
         return {
             "result": "error",
             "reason": "Content hash mismatch — file was modified after you read it",
@@ -374,7 +385,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
                 "reason": f"patch start {p.start} is beyond end of file ({total} lines)",
             }
         existing_slice = "".join(lines[s_idx:e_idx])
-        if p.range_hash != "" and _sha256(existing_slice) != p.range_hash:
+        if p.range_hash != "" and not _hash_eq(_sha256(existing_slice), p.range_hash):
             return {
                 "result": "error",
                 "reason": f"range_hash mismatch for [{p.start},{p.end}]",
@@ -420,7 +431,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
     written = await _read_full(host, path, encoding)
     written_hash = _sha256(written)
     expected_hash = _sha256(new_full)
-    if written_hash != expected_hash:
+    if not _hash_eq(written_hash, expected_hash):
         return {
             "result": "error",
             "reason": "post-write hash verification failed (write may be partial)",
