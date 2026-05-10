@@ -13,7 +13,7 @@
 
 Report security issues privately via one of the following channels:
 
-- **GitHub Security Advisories:** Use the [Report a Vulnerability](https://github.com/jaguar999paw-droid/ssh-shell-mcp/security/advisories/new) button on this repo.
+- **GitHub Security Advisories:** Use the [Report a Vulnerability](https://github.com/TMYTiMidlY/ssh-remote-mcp/security/advisories/new) button on this repo.
 - **Email:** Contact the maintainer directly through their GitHub profile.
 
 ### What to include

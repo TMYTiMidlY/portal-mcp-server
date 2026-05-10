@@ -1,58 +1,37 @@
 """Remote text editor with hash-based concurrent-modification detection.
 
-Algorithmic provenance
-----------------------
-This module is a deliberate port of the safe-edit pattern shipped by
-**tumf/mcp-text-editor** (MIT, https://github.com/tumf/mcp-text-editor — the
-de-facto "safe file edit" library in the MCP ecosystem). We could not depend
-on it directly because:
+Algorithm reference: tumf/mcp-text-editor (MIT). See SECURITY.md
+§ "References & Algorithmic Provenance" for the full design diff and the
+reasons we did not vendor the upstream library.
 
-* Its :class:`TextEditorService` calls ``with open(file_path, "r") as f:``
-  unconditionally and exposes no file-backend interface — there is no
-  injection point for an SFTP transport.
-* It is synchronous; this server is asyncio-native and shares an AsyncSSH
-  connection pool. Wrapping a sync library would force every edit through a
-  thread pool, undoing the point of the connection pool.
+Key design decisions a source reader needs to know
+--------------------------------------------------
 
-What we kept (verbatim algorithm)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* **Patches are applied bottom-to-top** (sorted by ``start`` descending) so
+  earlier patches' line-number changes do not invalidate later patches.
+  Overlap detection runs after the sort: each upper patch's start must be
+  strictly greater than the lower patch's end.
 
-==================================  ==============================  ===============================
-mcp-text-editor (service.py)        ssh-remote-mcp (this file)      Notes
-==================================  ==============================  ===============================
-``calculate_hash`` SHA-256          :func:`_sha256`                 identical
-``edit_file_contents`` whole-file   ``remote_patch`` lines 151-160  hash check returns full
-hash check                                                          ``current_content`` so the
-                                                                    LLM can re-plan with one round
-                                                                    trip
-``validate_patches`` overlap +      ``remote_patch`` lines 184-205  upstream sorts ascending; we
-out-of-bounds                                                       sort *descending* so applying
-                                                                    each patch keeps line numbers
-                                                                    valid for the rest
-single-shot ``f.write(new_content)``  :func:`_atomic_write`         we use tmp + ``posix_rename``
-                                                                    (POSIX-atomic) instead of
-                                                                    overwriting in place
-==================================  ==============================  ===============================
+* **Atomic write** = ``<path>.mcp_tmp.<uuid12>`` opened via SFTP, then
+  ``posix_rename`` into place; falls back to ``remove + rename`` for SFTP
+  servers that do not advertise the posix-rename extension. Tmp files
+  carry a recognizable suffix so :func:`cleanup_orphan_tmps` can find
+  leftovers without false positives.
 
-What we added (SFTP-specific safety nets)
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* **Three hash checks** all use :func:`_hash_eq` (constant-time
+  comparison via :func:`hmac.compare_digest`):
+  1. whole-file hash before patching — detects concurrent overwrites,
+  2. per-patch ``range_hash`` — detects the case where the file hash
+     stayed the same but the targeted region changed,
+  3. post-write rehash — detects partial SFTP writes (transport closed
+     mid-stream) before we report success.
 
-* Per-patch ``range_hash`` check — defends against the case where the file
-  hash stayed the same (e.g. another writer reverted earlier edits) but the
-  specific region the LLM wants to touch has changed underneath it.
-* Atomic write: ``<path>.tmp.<uuid12>`` followed by SFTP ``posix_rename``,
-  with a fall-back to ``remove + rename`` for SFTP servers that do not
-  advertise the posix-rename extension.
-* Post-write read-back + rehash — a partial SFTP write (transport closed
-  mid-stream) is detected before we report success.
-* Path validation through :func:`safety.validate_remote_path` to reject NUL
-  bytes and ASCII control characters in paths.
-* Connection pool release in ``finally`` and ``await sftp.wait_closed()`` so
-  a thrown asyncssh exception cannot leak the pooled session.
+* **Connection-pool safety**: every SFTP session is released in a
+  ``finally`` block with ``await sftp.wait_closed()``, so a thrown
+  asyncssh exception cannot leak a pooled session.
 
-Test coverage mirrors the upstream matrix (see ``tests/test_remote_text_editor.py``):
-the same hash-mismatch, overlapping-patch, beyond-EOF, and successful-edit
-scenarios run against an in-memory fake SFTP.
+* **Path validation** via :func:`safety.validate_remote_path` rejects NUL
+  bytes and ASCII control characters.
 """
 from __future__ import annotations
 
