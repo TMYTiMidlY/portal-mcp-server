@@ -80,7 +80,7 @@ def _parse_env(env_json: str) -> dict:
 
 @mcp.tool()
 def ssh_register_host(name: str, host: str, user: str = "root", port: int = 22,
-                       key_path: str = "", password: str = "",
+                       key_path: str = "",
                        tags: str = "") -> str:
     """Register a new SSH host in the registry.
 
@@ -89,14 +89,15 @@ def ssh_register_host(name: str, host: str, user: str = "root", port: int = 22,
         host: IP address or hostname
         user: SSH username (default: root)
         port: SSH port (default: 22)
-        key_path: Path to private key file (e.g. ~/.ssh/id_ed25519)
-        password: SSH password (leave empty to use key auth)
+        key_path: Path to private key file (e.g. ~/.ssh/id_ed25519). If
+                  empty, asyncssh falls back to default keys (~/.ssh/id_*)
+                  or the SSH agent. Password authentication is not supported.
         tags: Comma-separated group tags (e.g. 'web,production')
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
     return get_manager().register_host(
         name=name, host=host, user=user, port=port,
-        key=key_path or None, password=password or None, tags=tag_list
+        key=key_path or None, tags=tag_list
     )
 
 

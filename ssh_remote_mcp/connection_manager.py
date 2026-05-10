@@ -22,7 +22,6 @@ class HostConfig:
     port: int = 22
     user: str = "root"
     key: Optional[str] = None
-    password: Optional[str] = None
     connect_timeout: int = 30
     # Path to a known_hosts file. ``None`` means "let asyncssh use the
     # default" (which resolves to ``~/.ssh/known_hosts`` and behaves like
@@ -77,13 +76,19 @@ class ConnectionManager:
             data = yaml.safe_load(f) or {}
         hosts = data.get("hosts", {})
         for name, cfg in hosts.items():
+            if "password" in cfg:
+                logger.error(
+                    "Host '%s' has 'password' field in hosts.yaml — password "
+                    "auth is not supported (per README/SECURITY.md). The "
+                    "field is being IGNORED. Use key-based auth instead.",
+                    name,
+                )
             self._registry[name] = HostConfig(
                 name=name,
                 host=cfg["host"],
                 port=int(cfg.get("port", 22)),
                 user=cfg.get("user", "root"),
                 key=self._resolve_path(cfg.get("key")),
-                password=cfg.get("password"),
                 connect_timeout=int(cfg.get("connect_timeout", 30)),
                 known_hosts=cfg.get("known_hosts"),
                 strict_host_key_checking=bool(cfg.get(
@@ -100,13 +105,17 @@ class ConnectionManager:
 
     def register_host(self, name: str, host: str, user: str = "root",
                       port: int = 22, key: Optional[str] = None,
-                      password: Optional[str] = None, tags: list = None,
+                      tags: list = None,
                       known_hosts: Optional[str] = None,
                       strict_host_key_checking: bool = True) -> str:
-        """Dynamically register a new host into the registry."""
+        """Dynamically register a new host into the registry.
+
+        Password authentication is intentionally not supported; provide a
+        key file via ``key`` or rely on default SSH key locations / agent.
+        """
         self._registry[name] = HostConfig(
             name=name, host=host, port=port, user=user,
-            key=self._resolve_path(key), password=password,
+            key=self._resolve_path(key),
             tags=tags or [],
             known_hosts=known_hosts,
             strict_host_key_checking=strict_host_key_checking,
@@ -189,8 +198,6 @@ class ConnectionManager:
         if cfg.key:
             kwargs["client_keys"] = [cfg.key]
             kwargs["passphrase"] = None
-        elif cfg.password:
-            kwargs["password"] = cfg.password
         else:
             # Try default SSH agent / key locations
             default_keys = []
