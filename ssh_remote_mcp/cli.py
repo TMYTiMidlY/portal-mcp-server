@@ -66,6 +66,62 @@ def _gate(host: str, command: str = "") -> str | None:
     return get_policy().enforce(host, command)
 
 
+def _gate_many(hosts: list[str], command: str = "") -> str | None:
+    """Multi-host policy gate.
+
+    For each host: check_host + check_rate_limit. The command (if given) is
+    checked once against the blocklist/allowlist (it's the same string for
+    all hosts). Returns the first error found, or None if all checks pass.
+
+    Used by multi-host orchestration tools (ssh_rolling, ssh_group_exec,
+    ssh_broadcast_batch, ssh_playbook_on_group) so they cannot bypass the
+    policy gate that ssh_run / ssh_exec_with_env etc. enforce.
+    """
+    pol = get_policy()
+    if command:
+        err = pol.check_command(command)
+        if err:
+            return err
+    for h in hosts:
+        err = pol.check_host(h)
+        if err:
+            return f"{h}: {err}"
+        err = pol.check_rate_limit(h)
+        if err:
+            return f"{h}: {err}"
+    return None
+
+
+def _resolve_group(group_tag: str) -> list[str]:
+    """Resolve a group tag to the list of registered host names carrying it."""
+    mgr = get_manager()
+    return [h.name for h in mgr._registry.values() if group_tag in h.tags]
+
+
+def _gate_playbook(hosts: list[str], playbook: dict) -> str | None:
+    """Policy gate for playbooks: check every step's command against the
+    blocklist/allowlist on every target host. Rate limit is checked per host
+    once (not per step) to avoid burning the rate-limit budget before the
+    playbook even runs.
+    """
+    pol = get_policy()
+    steps = playbook.get("steps", []) or []
+    for step in steps:
+        if not isinstance(step, str):
+            continue
+        err = pol.check_command(step)
+        if err:
+            return f"step {step[:60]!r}: {err}"
+    for h in hosts:
+        err = pol.check_host(h)
+        if err:
+            return f"{h}: {err}"
+        err = pol.check_rate_limit(h)
+        if err:
+            return f"{h}: {err}"
+    return None
+
+
 def _parse_env(env_json: str) -> dict:
     """Parse a JSON env string into a dict. Returns empty dict on any error."""
     try:
@@ -159,6 +215,12 @@ async def ssh_session_exec(session_id: str, command: str, timeout: float = 30.0)
         timeout: Max seconds to wait for output
     """
     sm = get_session_manager()
+    sess = sm._sessions.get(session_id)
+    if sess is None:
+        return f"Error: session '{session_id}' not found"
+    err = _gate(sess.host_name, command)
+    if err:
+        return f"BLOCKED: {err}"
     try:
         return await sm.execute_in_session(session_id, command, timeout=timeout)
     except KeyError as e:
@@ -627,10 +689,9 @@ async def ssh_parallel(hosts_json: str, command: str, timeout: int = 60) -> str:
         hosts = json.loads(hosts_json)
     except Exception as e:
         return f"Invalid hosts_json: {e}"
-    for h in hosts:
-        err = _gate(h, command)
-        if err:
-            return f"BLOCKED on {h}: {err}"
+    err = _gate_many(hosts, command)
+    if err:
+        return f"BLOCKED: {err}"
     results = await ssh_parallel_exec(hosts, command, timeout=timeout)
     return json.dumps(results, indent=2)
 
@@ -653,6 +714,9 @@ async def ssh_rolling(hosts_json: str, command: str,
         hosts = json.loads(hosts_json)
     except Exception as e:
         return f"Invalid hosts_json: {e}"
+    err = _gate_many(hosts, command)
+    if err:
+        return f"BLOCKED: {err}"
     results = await ssh_rolling_exec(hosts, command, delay_s=delay_s,
                                       stop_on_error=stop_on_error, timeout=timeout)
     return json.dumps(results, indent=2)
@@ -667,6 +731,12 @@ async def ssh_group_exec(group_tag: str, command: str, timeout: int = 60) -> str
         command: Command to run
         timeout: Per-host timeout
     """
+    hosts = _resolve_group(group_tag)
+    if not hosts:
+        return json.dumps([{"error": f"No hosts found with tag '{group_tag}'"}], indent=2)
+    err = _gate_many(hosts, command)
+    if err:
+        return f"BLOCKED: {err}"
     results = await ssh_exec_on_group(group_tag, command, timeout=timeout)
     return json.dumps(results, indent=2)
 
@@ -686,6 +756,14 @@ async def ssh_broadcast_batch(hosts_json: str, commands_json: str,
         commands = json.loads(commands_json)
     except Exception as e:
         return f"Invalid JSON: {e}"
+    if not isinstance(commands, list):
+        return "Invalid commands_json: must be a JSON array of strings"
+    for cmd in commands:
+        if not isinstance(cmd, str):
+            return "Invalid commands_json: all entries must be strings"
+        err = _gate_many(hosts, cmd)
+        if err:
+            return f"BLOCKED on command {cmd[:60]!r}: {err}"
     results = await ssh_broadcast(hosts, commands, timeout=timeout)
     return json.dumps(results, indent=2)
 
@@ -705,13 +783,13 @@ async def ssh_playbook(host_name: str, playbook_json: str) -> str:
         host_name: Target host
         playbook_json: JSON playbook definition
     """
-    err = _gate(host_name)
-    if err:
-        return f"BLOCKED: {err}"
     try:
         playbook = json.loads(playbook_json)
     except Exception as e:
         return f"Invalid playbook_json: {e}"
+    err = _gate_playbook([host_name], playbook)
+    if err:
+        return f"BLOCKED: {err}"
     result = await run_playbook(host_name, playbook)
     return json.dumps(result, indent=2)
 
@@ -728,6 +806,12 @@ async def ssh_playbook_on_group(group_tag: str, playbook_json: str) -> str:
         playbook = json.loads(playbook_json)
     except Exception as e:
         return f"Invalid playbook_json: {e}"
+    hosts = _resolve_group(group_tag)
+    if not hosts:
+        return json.dumps([{"error": f"No hosts with tag '{group_tag}'"}], indent=2)
+    err = _gate_playbook(hosts, playbook)
+    if err:
+        return f"BLOCKED: {err}"
     results = await run_playbook_on_group(group_tag, playbook)
     return json.dumps(results, indent=2)
 
