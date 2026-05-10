@@ -4,9 +4,10 @@ Audit findings addressed
 ------------------------
 * ``run_playbook_on_group`` used ``return_exceptions=False``: a single failing
   host blew up ``asyncio.gather`` and crashed the entire fleet operation.
-* ``audit_log`` only ever logged a warning on write failure. For deployments
-  where the audit log is a compliance requirement, we now offer a fail-closed
-  mode driven by the ``SSH_MCP_AUDIT_FAIL_CLOSED`` env var.
+* ``audit_log`` defaults to fail-closed: a write failure raises
+  ``RuntimeError`` so the caller learns the operation was not recorded.
+  Set ``SSH_MCP_AUDIT_FAIL_OPEN=1`` to opt out (operation continues with a
+  warning) — appropriate for development / test environments.
 """
 from __future__ import annotations
 
@@ -53,14 +54,28 @@ class TestPlaybookOnGroupFailureIsolation:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  audit.audit_log — fail-closed mode raises on write failure
+#  audit.audit_log — default fail-closed; SSH_MCP_AUDIT_FAIL_OPEN=1 → fail-open
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestAuditFailClosed:
-    def test_default_open_swallows_write_error(self, monkeypatch, caplog):
+    def test_default_closed_raises_on_write_error(self, monkeypatch):
         from ssh_remote_mcp import audit
-        monkeypatch.delenv(audit._FAIL_CLOSED_ENV, raising=False)
+        monkeypatch.delenv(audit._FAIL_OPEN_ENV, raising=False)
         # Force the file write to fail.
+        import builtins
+        real_open = builtins.open
+        def fake_open(path, *a, **k):
+            if str(path).endswith("audit.jsonl"):
+                raise OSError("disk full")
+            return real_open(path, *a, **k)
+        monkeypatch.setattr(builtins, "open", fake_open)
+
+        with pytest.raises(RuntimeError, match="Audit write failed"):
+            audit.audit_log("h", "cmd", "ok")
+
+    def test_fail_open_swallows_write_error(self, monkeypatch, caplog):
+        from ssh_remote_mcp import audit
+        monkeypatch.setenv(audit._FAIL_OPEN_ENV, "1")
         import builtins
         real_open = builtins.open
         def fake_open(path, *a, **k):
@@ -72,17 +87,3 @@ class TestAuditFailClosed:
         with caplog.at_level("WARNING"):
             audit.audit_log("h", "cmd", "ok")  # must NOT raise
         assert any("Audit write failed" in rec.message for rec in caplog.records)
-
-    def test_fail_closed_raises(self, monkeypatch):
-        from ssh_remote_mcp import audit
-        monkeypatch.setenv(audit._FAIL_CLOSED_ENV, "1")
-        import builtins
-        real_open = builtins.open
-        def fake_open(path, *a, **k):
-            if str(path).endswith("audit.jsonl"):
-                raise OSError("disk full")
-            return real_open(path, *a, **k)
-        monkeypatch.setattr(builtins, "open", fake_open)
-
-        with pytest.raises(RuntimeError, match="Audit write failed"):
-            audit.audit_log("h", "cmd", "ok")

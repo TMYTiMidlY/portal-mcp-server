@@ -151,10 +151,13 @@ def ssh_register_host(name: str, host: str, user: str = "root", port: int = 22,
         tags: Comma-separated group tags (e.g. 'web,production')
     """
     tag_list = [t.strip() for t in tags.split(",") if t.strip()]
-    return get_manager().register_host(
+    result = get_manager().register_host(
         name=name, host=host, user=user, port=port,
         key=key_path or None, tags=tag_list
     )
+    audit_log(name, f"register:{user}@{host}:{port}", "ok",
+              operation="register_host")
+    return result
 
 
 @mcp.tool()
@@ -171,7 +174,9 @@ def ssh_remove_host(name: str) -> str:
     Args:
         name: Host name to remove
     """
-    return get_manager().remove_host(name)
+    result = get_manager().remove_host(name)
+    audit_log(name, "remove_host", "ok", operation="remove_host")
+    return result
 
 
 @mcp.tool()
@@ -222,9 +227,12 @@ async def ssh_session_exec(session_id: str, command: str, timeout: float = 30.0)
     if err:
         return f"BLOCKED: {err}"
     try:
-        return await sm.execute_in_session(session_id, command, timeout=timeout)
+        result = await sm.execute_in_session(session_id, command, timeout=timeout)
     except KeyError as e:
         return f"Error: {e}"
+    audit_log(sess.host_name, command, f"session:{session_id}",
+              operation="session_exec")
+    return result
 
 
 @mcp.tool()
@@ -249,7 +257,12 @@ async def ssh_close_session(session_id: str) -> str:
     Args:
         session_id: Session ID to close
     """
-    return await get_session_manager().close_session(session_id)
+    sm = get_session_manager()
+    sess = sm._sessions.get(session_id)
+    host = sess.host_name if sess else "unknown"
+    result = await sm.close_session(session_id)
+    audit_log(host, f"close_session:{session_id}", "ok", operation="session")
+    return result
 
 
 @mcp.tool()
@@ -269,8 +282,13 @@ def ssh_session_set_env(session_id: str, key: str, value: str) -> str:
         value: Variable value
     """
     sm = get_session_manager()
+    sess = sm._sessions.get(session_id)
+    host = sess.host_name if sess else "unknown"
     try:
         sm.set_env(session_id, key, value)
+        # Audit: log key only, never the value (may be a secret).
+        audit_log(host, f"set_env:{key} in session:{session_id}",
+                  "ok", operation="session_env")
         return f"Set {key}={value} in session {session_id}"
     except KeyError as e:
         return f"Error: {e}"
@@ -717,6 +735,7 @@ async def ssh_rolling(hosts_json: str, command: str,
     err = _gate_many(hosts, command)
     if err:
         return f"BLOCKED: {err}"
+    audit_log(",".join(hosts), command, "rolling_exec", operation="rolling")
     results = await ssh_rolling_exec(hosts, command, delay_s=delay_s,
                                       stop_on_error=stop_on_error, timeout=timeout)
     return json.dumps(results, indent=2)
@@ -737,6 +756,8 @@ async def ssh_group_exec(group_tag: str, command: str, timeout: int = 60) -> str
     err = _gate_many(hosts, command)
     if err:
         return f"BLOCKED: {err}"
+    audit_log(",".join(hosts), command,
+              f"group:{group_tag}", operation="group_exec")
     results = await ssh_exec_on_group(group_tag, command, timeout=timeout)
     return json.dumps(results, indent=2)
 
@@ -764,6 +785,8 @@ async def ssh_broadcast_batch(hosts_json: str, commands_json: str,
         err = _gate_many(hosts, cmd)
         if err:
             return f"BLOCKED on command {cmd[:60]!r}: {err}"
+    audit_log(",".join(hosts), f"{len(commands)} cmds",
+              "broadcast_batch", operation="broadcast")
     results = await ssh_broadcast(hosts, commands, timeout=timeout)
     return json.dumps(results, indent=2)
 
@@ -812,6 +835,9 @@ async def ssh_playbook_on_group(group_tag: str, playbook_json: str) -> str:
     err = _gate_playbook(hosts, playbook)
     if err:
         return f"BLOCKED: {err}"
+    audit_log(",".join(hosts),
+              f"playbook:{playbook.get('name','unnamed')}",
+              f"group:{group_tag}", operation="playbook_group")
     results = await run_playbook_on_group(group_tag, playbook)
     return json.dumps(results, indent=2)
 
@@ -1239,6 +1265,9 @@ async def remote_patch(host: str, path: str, file_hash: str,
         return json.dumps({"result": "error", "reason": f"invalid patches_json: {e}"})
     res = await _re_patch(host, path, file_hash=file_hash, patches=patches,
                            encoding=encoding, auto_newline=auto_newline)
+    audit_log(host, f"patch:{path}",
+              res.get("result", "?") if isinstance(res, dict) else "?",
+              operation="file_patch")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
@@ -1265,6 +1294,9 @@ async def remote_cleanup_tmps(host: str, directory: str,
     if err:
         return f"BLOCKED: {err}"
     res = await _re_cleanup_tmps(host, directory, max_age_s=max_age_s)
+    removed = res.get("removed", []) if isinstance(res, dict) else []
+    audit_log(host, f"cleanup_tmps:{directory}",
+              f"removed:{len(removed)}", operation="file_cleanup")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
@@ -1332,6 +1364,7 @@ async def remote_bash(host: str, command: str, timeout: float = 60.0) -> str:
     if err:
         return f"BLOCKED: {err}"
     res = await _re_bash(host, command, timeout=timeout)
+    audit_log(host, command, "ok", operation="remote_bash")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 

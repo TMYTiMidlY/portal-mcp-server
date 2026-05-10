@@ -4,13 +4,16 @@ Writes to <log_dir>/audit.jsonl and optionally to stdout.
 
 Failure-mode policy
 -------------------
-By default a write failure is logged to the runtime logger and the
-operation continues — the audit log is a best-effort record. Set the
-environment variable ``SSH_MCP_AUDIT_FAIL_CLOSED=1`` to instead raise a
-:class:`RuntimeError`, which propagates back to the caller so the failed
-operation is aborted. This is the recommended setting for any deployment
-where the audit log is a compliance requirement (the cybersecurity
-positioning advertised in the README).
+By default a write failure raises a :class:`RuntimeError` which propagates
+back to the caller, **aborting the operation**. This fail-closed default
+matches the cybersecurity positioning advertised in the README ("every
+state-changing operation is recorded") — if the audit log cannot be
+written, we refuse to act.
+
+Set the environment variable ``SSH_MCP_AUDIT_FAIL_OPEN=1`` to switch to
+fail-open behaviour (write failure is logged but the operation proceeds).
+This is appropriate for development / test environments where audit
+durability is not required.
 """
 import json
 import logging
@@ -25,12 +28,16 @@ _audit_file = _log_dir / "audit.jsonl"
 
 logger = logging.getLogger("ssh_mcp.audit")
 
-_FAIL_CLOSED_ENV = "SSH_MCP_AUDIT_FAIL_CLOSED"
+_FAIL_OPEN_ENV = "SSH_MCP_AUDIT_FAIL_OPEN"
 
 
 def _fail_closed() -> bool:
-    """Read the fail-closed flag at call time so tests / runtime can flip it."""
-    return os.environ.get(_FAIL_CLOSED_ENV, "").lower() in (
+    """Read the fail-closed flag at call time so tests / runtime can flip it.
+
+    Default is fail-closed (returns True). Setting ``SSH_MCP_AUDIT_FAIL_OPEN``
+    to a truthy value switches to fail-open (returns False).
+    """
+    return os.environ.get(_FAIL_OPEN_ENV, "").lower() not in (
         "1", "true", "yes", "on",
     )
 
@@ -62,7 +69,7 @@ def audit_log(host: str, command: str, result,
         logger.warning(f"Audit write failed: {e}")
         if _fail_closed():
             raise RuntimeError(
-                f"Audit write failed and {_FAIL_CLOSED_ENV} is set: {e}"
+                f"Audit write failed and {_FAIL_OPEN_ENV} is not set: {e}"
             ) from e
 
 
