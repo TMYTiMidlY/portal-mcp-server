@@ -473,6 +473,15 @@ def portal_check(host: str, command: str = "") -> str:
 
     Returns "ALLOWED" or "BLOCKED: <reason>". Does not execute anything.
     Use this before risky multi-host operations to surface policy errors early.
+
+    ⚠️  Default policy is PERMISSIVE — out of the box `policies.yaml` has an
+    empty host_allowlist (any host), empty command_blocklist / allowlist
+    (any command), and only a per-host rate limit. So `portal_check` will
+    return ALLOWED for almost anything until you populate
+    `$XDG_CONFIG_HOME/ssh-remote-mcp/policies.yaml` (or `./config/policies.yaml`)
+    with explicit rules. Use `portal_audit(view="policy")` to inspect what
+    the server actually has loaded. ALLOWED therefore means "no rule
+    currently blocks this", not "this is safe to run".
     """
     err = _gate(host, command)
     if err:
