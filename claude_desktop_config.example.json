@@ -1,10 +1,10 @@
 {
   "mcpServers": {
-    "ssh-remote": {
+    "portal": {
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git",
+        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
         "ssh-remote-mcp",
         "--transport",
         "stdio"

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ssh-remote-mcp"
-version = "0.2.0"
-description = "Production-grade SSH orchestration MCP server (57+ tools) for AI agents"
+version = "0.3.0"
+description = "Portal MCP Server — agent-feels-local SSH orchestration over AsyncSSH + FastMCP (18 tools)"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
@@ -43,11 +43,12 @@ dev = [
 
 [project.scripts]
 ssh-remote-mcp = "ssh_remote_mcp:main"
+portal-mcp-server = "ssh_remote_mcp:main"
 
 [project.urls]
-Homepage = "https://github.com/TMYTiMidlY/ssh-remote-mcp"
-Repository = "https://github.com/TMYTiMidlY/ssh-remote-mcp"
-Issues = "https://github.com/TMYTiMidlY/ssh-remote-mcp/issues"
+Homepage = "https://github.com/TMYTiMidlY/portal-mcp-server"
+Repository = "https://github.com/TMYTiMidlY/portal-mcp-server"
+Issues = "https://github.com/TMYTiMidlY/portal-mcp-server/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["ssh_remote_mcp"]

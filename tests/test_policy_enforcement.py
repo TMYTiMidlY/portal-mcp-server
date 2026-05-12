@@ -73,13 +73,15 @@ class TestGroupExecGate:
 
         called = []
 
-        async def fake_group(*a, **k):
+        async def fake_parallel(*a, **k):
             called.append((a, k))
             return [{"host": "x", "exit_code": 0}]
 
-        monkeypatch.setattr(cli, "ssh_exec_on_group", fake_group)
+        monkeypatch.setattr(cli, "ssh_parallel_exec", fake_parallel)
 
-        result = await cli.ssh_group_exec("fleet", "rm -rf /", timeout=5)
+        result = await cli.portal_multi_exec(mode="parallel",
+                                              group_tag="fleet",
+                                              command="rm -rf /", timeout=5)
         assert "BLOCKED" in result
         assert "blocked by policy" in result.lower()
         assert called == [], "exec must NOT run when command is blocked"
@@ -92,14 +94,16 @@ class TestGroupExecGate:
 
         called = []
 
-        async def fake_group(*a, **k):
+        async def fake_parallel(*a, **k):
             called.append((a, k))
             return []
 
-        monkeypatch.setattr(cli, "ssh_exec_on_group", fake_group)
+        monkeypatch.setattr(cli, "ssh_parallel_exec", fake_parallel)
 
         # 'danger-01' is in the group but not in host_allowlist — must block.
-        result = await cli.ssh_group_exec("fleet", "uptime", timeout=5)
+        result = await cli.portal_multi_exec(mode="parallel",
+                                              group_tag="fleet",
+                                              command="uptime", timeout=5)
         assert "BLOCKED" in result
         assert "danger-01" in result
         assert called == []
@@ -123,8 +127,10 @@ class TestRollingGate:
 
         monkeypatch.setattr(cli, "ssh_rolling_exec", fake_rolling)
 
-        result = await cli.ssh_rolling(
-            json.dumps(["safe-01", "safe-02"]), "rm -rf /tmp/x", timeout=5
+        result = await cli.portal_multi_exec(
+            mode="rolling",
+            hosts_json=json.dumps(["safe-01", "safe-02"]),
+            command="rm -rf /tmp/x", timeout=5
         )
         assert "BLOCKED" in result
         assert called == []
@@ -139,8 +145,10 @@ class TestRollingGate:
 
         monkeypatch.setattr(cli, "ssh_rolling_exec", fake_rolling)
 
-        result = await cli.ssh_rolling(
-            json.dumps(["safe-01", "danger-01"]), "uptime", timeout=5
+        result = await cli.portal_multi_exec(
+            mode="rolling",
+            hosts_json=json.dumps(["safe-01", "danger-01"]),
+            command="uptime", timeout=5
         )
         assert "BLOCKED" in result
         assert "danger-01" in result
@@ -162,9 +170,10 @@ class TestBroadcastBatchGate:
 
         monkeypatch.setattr(cli, "ssh_broadcast", fake_broadcast)
 
-        result = await cli.ssh_broadcast_batch(
-            json.dumps(["safe-01", "safe-02"]),
-            json.dumps(["uptime", "rm -rf /opt"]),
+        result = await cli.portal_multi_exec(
+            mode="broadcast",
+            hosts_json=json.dumps(["safe-01", "safe-02"]),
+            commands_json=json.dumps(["uptime", "rm -rf /opt"]),
             timeout=5,
         )
         assert "BLOCKED" in result
@@ -180,9 +189,10 @@ class TestBroadcastBatchGate:
 
         monkeypatch.setattr(cli, "ssh_broadcast", fake_broadcast)
 
-        result = await cli.ssh_broadcast_batch(
-            json.dumps(["safe-01"]),
-            json.dumps(["uptime", 42]),
+        result = await cli.portal_multi_exec(
+            mode="broadcast",
+            hosts_json=json.dumps(["safe-01"]),
+            commands_json=json.dumps(["uptime", 42]),
             timeout=5,
         )
         assert "Invalid commands_json" in result
@@ -208,7 +218,7 @@ class TestPlaybookGate:
             "name": "evil",
             "steps": ["uptime", "rm -rf /var", "echo done"],
         }
-        result = await cli.ssh_playbook("safe-01", json.dumps(playbook))
+        result = await cli.portal_playbook(json.dumps(playbook), host="safe-01")
         assert "BLOCKED" in result
         assert "rm -rf" in result.lower() or "blocked by policy" in result.lower()
 
@@ -224,48 +234,15 @@ class TestPlaybookGate:
         monkeypatch.setattr(cli, "run_playbook_on_group", fake_run)
 
         playbook = {"name": "ok", "steps": ["uptime"]}
-        result = await cli.ssh_playbook_on_group("fleet", json.dumps(playbook))
+        result = await cli.portal_playbook(json.dumps(playbook), group_tag="fleet")
         assert "BLOCKED" in result
         assert "danger-01" in result
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  ssh_session_exec — gates the command (was a bypass before)
+#  Note: the multi-session ssh_session_* tools were removed in 0.3.0 along with
+#  ssh_run/ssh_run_batch/ssh_run_script/ssh_run_with_env. Use portal_bash for
+#  single persistent session per host (which is policy-gated per-command in
+#  remote_bash.py) or portal_multi_exec for orchestrated parallel/rolling
+#  command execution. The session_manager module remains for any future caller.
 # ════════════════════════════════════════════════════════════════════════════
-
-class TestSessionExecGate:
-    @pytest.mark.asyncio
-    async def test_blocked_command_rejected_inside_session(
-        self, restrictive_policy, populated_manager, monkeypatch
-    ):
-        from ssh_remote_mcp import cli, session_manager
-
-        # Fabricate a fake session pointing at a safe host.
-        sm = session_manager.SessionManager()
-        fake_sess = session_manager.ShellSession(
-            session_id="abc12345",
-            host_name="safe-01",
-            process=None,  # type: ignore
-        )
-        sm._sessions["abc12345"] = fake_sess
-        monkeypatch.setattr(cli, "get_session_manager", lambda: sm)
-
-        async def fake_exec(*a, **k):
-            raise AssertionError("must not be called")
-
-        monkeypatch.setattr(sm, "execute_in_session", fake_exec)
-
-        result = await cli.ssh_session_exec("abc12345", "rm -rf /", timeout=1)
-        assert "BLOCKED" in result
-
-    @pytest.mark.asyncio
-    async def test_unknown_session_returns_error(self, restrictive_policy,
-                                                  populated_manager,
-                                                  monkeypatch):
-        from ssh_remote_mcp import cli, session_manager
-
-        sm = session_manager.SessionManager()
-        monkeypatch.setattr(cli, "get_session_manager", lambda: sm)
-
-        result = await cli.ssh_session_exec("missing", "uptime", timeout=1)
-        assert "not found" in result

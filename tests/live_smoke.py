@@ -1,12 +1,12 @@
-"""Live end-to-end smoke test for the security/audit hardening changes.
+"""Live end-to-end smoke test for the portal-mcp-server tools.
 
 Targets host alias '1810' (or whatever TEST_HOST/PORT/USER point to).
 
 Verifies:
   1. ssh_exec basic round-trip still works (no regression).
-  2. Multi-host policy gate actually fires against a real registered host.
-  3. ssh_session_exec is gated per-command (was a bypass before).
-  4. remote_bash + remote_patch round-trip on /tmp succeeds AND emits audit.
+  2. Multi-host policy gate actually fires via portal_multi_exec.
+  3. portal_bash is gated per-command (per-command policy applies).
+  4. portal_bash + portal_patch round-trip on /tmp succeeds AND emits audit.
   5. hosts.yaml containing 'password:' is loaded without crash and password
      value never reaches HostConfig (one more belt-and-braces against regression).
   6. The new audit entries appear in audit.jsonl with the new operation tags.
@@ -115,111 +115,111 @@ async def main() -> int:
         security._policy = pol  # rebind module-level singleton
 
         # 3a. blocked command on real host → BLOCKED, no exec
-        out = await cli.ssh_group_exec("smoke-fleet", "rm -rf /tmp/x", timeout=5)
+        out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+                                           command="rm -rf /tmp/x", timeout=5)
         if "BLOCKED" not in out:
-            failures.append(f"ssh_group_exec did NOT block 'rm -rf': {out}")
+            failures.append(f"portal_multi_exec(group) did NOT block 'rm -rf': {out}")
         else:
-            print(f"  ✓ ssh_group_exec blocked rm -rf  →  {out[:80]}")
+            print(f"  ✓ portal_multi_exec(group) blocked rm -rf  →  {out[:80]}")
 
         # 3b. allowed command on real host → runs
-        out = await cli.ssh_group_exec("smoke-fleet", "uptime", timeout=5)
+        out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+                                           command="uptime", timeout=5)
         try:
             arr = json.loads(out)
             if not arr or arr[0].get("exit_code") != 0:
-                failures.append(f"ssh_group_exec uptime did not succeed: {out}")
+                failures.append(f"portal_multi_exec uptime did not succeed: {out}")
             else:
-                print(f"  ✓ ssh_group_exec uptime OK on live-1810")
+                print(f"  ✓ portal_multi_exec uptime OK on live-1810")
         except json.JSONDecodeError:
-            failures.append(f"ssh_group_exec output not JSON: {out}")
+            failures.append(f"portal_multi_exec output not JSON: {out}")
 
         # 3c. disallowed host alias → blocked
         mgr.register_host(name="bad-host", host="127.0.0.1",
                           tags=["smoke-fleet"])
-        out = await cli.ssh_group_exec("smoke-fleet", "uptime", timeout=5)
+        out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+                                           command="uptime", timeout=5)
         if "BLOCKED" not in out or "bad-host" not in out:
             failures.append(
-                f"ssh_group_exec should block bad-host (not in allowlist): {out}"
+                f"portal_multi_exec should block bad-host (not in allowlist): {out}"
             )
         else:
-            print(f"  ✓ ssh_group_exec blocked unallowed bad-host  →  {out[:80]}")
+            print(f"  ✓ portal_multi_exec blocked unallowed bad-host  →  {out[:80]}")
         mgr.remove_host("bad-host")
 
-        # 3d. session_exec gate
-        from ssh_remote_mcp.session_manager import get_session_manager
-        sm = get_session_manager()
-        sid = await sm.create_session("live-1810")
-        out = await cli.ssh_session_exec(sid, "rm -rf /tmp/whatever", timeout=2)
+        # 3d. portal_bash gates per-command (was the equivalent of session_exec)
+        out = await cli.portal_bash("live-1810", "rm -rf /tmp/whatever", timeout=2)
         if "BLOCKED" not in out:
-            failures.append(f"ssh_session_exec did NOT block rm -rf: {out}")
+            failures.append(f"portal_bash did NOT block rm -rf: {out}")
         else:
-            print(f"  ✓ ssh_session_exec blocked rm -rf inside session  →  {out[:80]}")
+            print(f"  ✓ portal_bash blocked rm -rf  →  {out[:80]}")
 
-        # 3e. session_exec allowed command runs
-        out = await cli.ssh_session_exec(sid, "echo session-ok && pwd", timeout=5)
+        # 3e. portal_bash allowed command runs
+        out = await cli.portal_bash("live-1810", "echo session-ok && pwd", timeout=5)
         if "session-ok" not in out:
-            failures.append(f"ssh_session_exec allowed cmd failed: {out}")
+            failures.append(f"portal_bash allowed cmd failed: {out}")
         else:
-            print(f"  ✓ ssh_session_exec allowed cmd ran inside session")
-        await sm.close_session(sid)
+            print(f"  ✓ portal_bash allowed cmd ran in persistent session")
+        await cli.portal_bash_close("live-1810")
 
         # Reset policy back to permissive defaults so step 4 isn't blocked.
         security._policy = security.SecurityPolicy()
 
-    # ── (4) remote_bash + remote_patch round-trip on /tmp ─────────────────
-    sect("4. remote_bash + remote_patch round-trip on /tmp/ on live-1810")
+    # ── (4) portal_bash + portal_patch round-trip on /tmp ─────────────────
+    sect("4. portal_bash + portal_patch round-trip on /tmp/ on live-1810")
     # Drive through the cli.* MCP wrappers so audit_log fires.
-    target = f"/tmp/ssh-remote-mcp-smoke-{os.getpid()}.txt"
+    target = f"/tmp/portal-mcp-server-smoke-{os.getpid()}.txt"
     try:
-        # 4a. remote_bash creates the file
-        out = await cli.remote_bash(
+        # 4a. portal_bash creates the file
+        out = await cli.portal_bash(
             "live-1810",
             f"printf 'line-1\\nline-2\\nline-3\\n' > {target}",
             timeout=10,
         )
         d = json.loads(out)
         if d.get("exit_code", 0) not in (0, None):
-            failures.append(f"remote_bash write returned non-zero: {d}")
+            failures.append(f"portal_bash write returned non-zero: {d}")
         else:
-            print(f"  ✓ remote_bash wrote {target}")
+            print(f"  ✓ portal_bash wrote {target}")
 
-        # 4b. remote_read JUST line 2 so range_hash applies to line 2 alone
-        out = await cli.remote_read("live-1810", target, start=2, end=2)
+        # 4b. portal_read JUST line 2 so range_hash applies to line 2 alone
+        out = await cli.portal_read("live-1810", target, start=2, end=2)
         rd = json.loads(out)
         if "file_hash" not in rd or "range_hash" not in rd:
-            failures.append(f"remote_read unexpected: {rd}")
+            failures.append(f"portal_read unexpected: {rd}")
         elif "line-2" not in rd.get("content", ""):
-            failures.append(f"remote_read content unexpected: {rd}")
+            failures.append(f"portal_read content unexpected: {rd}")
         else:
-            print(f"  ✓ remote_read line 2 → file_hash {rd['file_hash'][:12]}…, "
+            print(f"  ✓ portal_read line 2 → file_hash {rd['file_hash'][:12]}…, "
                   f"range_hash {rd['range_hash'][:12]}…")
 
-        # 4c. remote_patch replaces line 2
+        # 4c. portal_patch replaces line 2
         patches = json.dumps([{
             "start": 2, "end": 2,
             "contents": "LINE-2-PATCHED\n",
             "range_hash": rd["range_hash"],
         }])
-        out = await cli.remote_patch("live-1810", target,
+        out = await cli.portal_patch("live-1810", target,
                                       file_hash=rd["file_hash"],
                                       patches_json=patches)
         wr = json.loads(out)
         if wr.get("result") != "ok":
-            failures.append(f"remote_patch failed: {wr}")
+            failures.append(f"portal_patch failed: {wr}")
         else:
-            print(f"  ✓ remote_patch applied, new file_hash "
+            print(f"  ✓ portal_patch applied, new file_hash "
                   f"{wr.get('file_hash','?')[:12]}…")
 
-        # 4d. verify contents via remote_bash
-        out = await cli.remote_bash("live-1810", f"cat {target}", timeout=5)
+        # 4d. verify contents via portal_bash
+        out = await cli.portal_bash("live-1810", f"cat {target}", timeout=5)
         d = json.loads(out)
         body = d.get("output", d.get("stdout", ""))
         if "LINE-2-PATCHED" not in body:
             failures.append(f"patched content not visible: body={body!r}")
         else:
-            print(f"  ✓ patched content visible via remote_bash")
+            print(f"  ✓ patched content visible via portal_bash")
 
         # 4e. patch with stale hash MUST be refused (hash conflict path)
-        out = await cli.remote_patch("live-1810", target,
+        out = await cli.portal_patch("live-1810", target,
                                       file_hash="0" * 64,
                                       patches_json=patches)
         wr2 = json.loads(out)
@@ -229,21 +229,19 @@ async def main() -> int:
             print(f"  ✓ stale-hash patch correctly refused: "
                   f"{wr2.get('reason','?')[:60]}")
     finally:
-        await cli.remote_bash("live-1810", f"rm -f {target}", timeout=5)
-        await cli.remote_bash_close("live-1810")
+        await cli.portal_bash("live-1810", f"rm -f {target}", timeout=5)
+        await cli.portal_bash_close("live-1810")
 
     # ── (5) audit.jsonl received the new operation types ─────────────────
     sect("5. audit.jsonl recorded new operation tags")
-    # Trigger register_host + create_session via the MCP wrappers so the
-    # newly-added audit hooks fire.
-    cli.ssh_register_host(name="live-1810-audit", host=TEST_HOST,
-                           port=TEST_PORT, user=TEST_USER,
-                           key_path=TEST_KEY if os.path.exists(TEST_KEY) else "",
-                           tags="smoke-audit")
-    sid_str = await cli.ssh_create_session("live-1810-audit")
-    # ssh_create_session returns "Session created: <sid>"; close via cli wrapper.
-    sid_id = sid_str.split(":")[-1].strip()
-    await cli.ssh_close_session(sid_id)
+    # Trigger host_register via the MCP wrapper so the audit hook fires.
+    cli.portal_host(action="register", name="live-1810-audit", host=TEST_HOST,
+                     port=TEST_PORT, user=TEST_USER,
+                     key_path=TEST_KEY if os.path.exists(TEST_KEY) else "",
+                     tags="smoke-audit")
+    # portal_bash exercise to fire remote_bash audit operation
+    await cli.portal_bash("live-1810-audit", "echo audit-ok", timeout=5)
+    await cli.portal_bash_close("live-1810-audit")
 
     from ssh_remote_mcp.audit import _audit_file
     if not _audit_file.exists():
@@ -257,8 +255,8 @@ async def main() -> int:
             except json.JSONDecodeError:
                 pass
         expected = {
-            "remote_bash", "file_patch", "session_exec",
-            "group_exec", "register_host", "session",
+            "remote_bash", "file_patch",
+            "parallel_exec", "host_register",
         }
         missing = expected - ops_seen
         if missing:

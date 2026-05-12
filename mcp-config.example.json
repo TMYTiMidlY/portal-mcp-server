@@ -1,12 +1,12 @@
 {
   "_comment": "Sample workspace-level MCP config. Copy to <your-project>/.mcp.json (Copilot CLI / Claude Code / Cursor all use this same format). Uses uvx so no clone or venv is required.",
   "mcpServers": {
-    "ssh-remote": {
+    "portal": {
       "type": "local",
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/TMYTiMidlY/ssh-remote-mcp.git",
+        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
         "ssh-remote-mcp"
       ],
       "env": {},

@@ -42,14 +42,14 @@ def test_connection_manager_register_host_signature_has_no_password():
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  ssh_register_host MCP tool has no password parameter
+#  portal_host(action="register") MCP tool has no password parameter
 # ════════════════════════════════════════════════════════════════════════════
 
-def test_ssh_register_host_tool_signature_has_no_password():
+def test_portal_host_register_signature_has_no_password():
     from ssh_remote_mcp import cli
-    sig = inspect.signature(cli.ssh_register_host)
+    sig = inspect.signature(cli.portal_host)
     assert "password" not in sig.parameters, (
-        "ssh_register_host MCP tool must not expose a password parameter "
+        "portal_host MCP tool must not expose a password parameter "
         "(would let LLMs leak credentials into prompt logs)."
     )
 
