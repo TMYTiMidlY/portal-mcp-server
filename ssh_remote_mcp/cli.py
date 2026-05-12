@@ -1,7 +1,7 @@
 """
-ssh-remote-mcp — Production-grade SSH orchestration layer for AI agents.
-Exposes 57+ MCP tools covering: exec, sessions, files, processes,
-system inspection, multi-host orchestration, tunnels, and security.
+portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
+Exposes 18 portal_* tools covering: read/patch/grep/glob/bash core +
+host/transfer/tunnel/multi_exec/playbook/ping/audit/check.
 """
 import asyncio
 import json
@@ -38,7 +38,7 @@ try:
     _log_dir.mkdir(parents=True, exist_ok=True)
     _log_handlers.append(logging.FileHandler(_log_dir / "server.log", encoding="utf-8"))
 except Exception as _log_err:
-    print(f"[ssh-remote-mcp] WARNING: could not open log file: {_log_err}", file=sys.stderr)
+    print(f"[portal-mcp-server] WARNING: could not open log file: {_log_err}", file=sys.stderr)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,7 +47,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("ssh_mcp")
 
-mcp = FastMCP("ssh-remote-mcp")
+mcp = FastMCP("portal-mcp-server")
 
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS
@@ -478,7 +478,8 @@ def portal_check(host: str, command: str = "") -> str:
     empty host_allowlist (any host), empty command_blocklist / allowlist
     (any command), and only a per-host rate limit. So `portal_check` will
     return ALLOWED for almost anything until you populate
-    `$XDG_CONFIG_HOME/ssh-remote-mcp/policies.yaml` (or `./config/policies.yaml`)
+    `$XDG_CONFIG_HOME/portal-mcp-server/policies.yaml` (or
+    `./config/policies.yaml`)
     with explicit rules. Use `portal_audit(view="policy")` to inspect what
     the server actually has loaded. ALLOWED therefore means "no rule
     currently blocks this", not "this is safe to run".
@@ -735,7 +736,8 @@ async def portal_bash_status() -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    """CLI entrypoint registered as `ssh-remote-mcp`."""
+    """CLI entrypoint registered as `portal-mcp-server` (and the legacy
+    `ssh-remote-mcp` alias for backward compat with existing .mcp.json)."""
     import argparse
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
@@ -753,8 +755,8 @@ def main() -> None:
             return await call_next(request)
 
     parser = argparse.ArgumentParser(
-        prog="ssh-remote-mcp",
-        description="ssh-remote-mcp — SSH Orchestration MCP Server",
+        prog="portal-mcp-server",
+        description="portal-mcp-server — Agent-feels-local SSH orchestration MCP server",
     )
     parser.add_argument("--transport", choices=["stdio", "streamable_http"], default="stdio",
                         help="MCP transport (default: stdio)")
@@ -762,7 +764,7 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
     args = parser.parse_args()
 
-    logger.info(f"ssh-remote-mcp starting | transport={args.transport}")
+    logger.info(f"portal-mcp-server starting | transport={args.transport}")
 
     if args.transport == "streamable_http":
         import uvicorn

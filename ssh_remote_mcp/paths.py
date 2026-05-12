@@ -1,4 +1,4 @@
-"""Default filesystem locations for ssh-remote-mcp.
+"""Default filesystem locations for portal-mcp-server.
 
 Resolution order for each path:
 1. Environment variable override (e.g. SSH_HOSTS_YAML).
@@ -6,26 +6,62 @@ Resolution order for each path:
    (preserves the original developer-checkout layout).
 3. XDG-style user directory (works for `uvx`/`pipx` installs where the
    package source is in an isolated tool cache and not writable).
+
+XDG namespace migration
+-----------------------
+The XDG namespace was renamed from ``ssh-remote-mcp`` to
+``portal-mcp-server`` in v0.3.0. To avoid losing existing user config,
+the resolver still honours legacy locations:
+
+    ``~/.config/ssh-remote-mcp/``        (read-only fallback)
+    ``~/.local/state/ssh-remote-mcp/``   (read-only fallback)
+
+If the new ``portal-mcp-server`` directory does not exist but the
+legacy one does, the legacy path is used and a one-time WARNING is
+logged suggesting ``mv`` to the new location.
 """
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
-_APP = "ssh-remote-mcp"
+_APP = "portal-mcp-server"
+_LEGACY_APP = "ssh-remote-mcp"
+
+_logger = logging.getLogger("ssh_mcp.paths")
+_warned_legacy: set[str] = set()
 
 
-def _xdg_dir(env_var: str, fallback: str) -> Path:
+def _xdg_dir(env_var: str, fallback: str, app: str = _APP) -> Path:
     base = os.environ.get(env_var)
-    return Path(base).expanduser() if base else Path.home() / fallback
+    return (Path(base).expanduser() if base else Path.home() / fallback) / app
+
+
+def _xdg_with_fallback(env_var: str, fallback: str) -> Path:
+    """Return the new XDG dir, but if it doesn't exist and the legacy
+    `ssh-remote-mcp` dir does, return the legacy dir (one-time WARN)."""
+    new = _xdg_dir(env_var, fallback, _APP)
+    if new.exists():
+        return new
+    legacy = _xdg_dir(env_var, fallback, _LEGACY_APP)
+    if legacy.exists():
+        if env_var not in _warned_legacy:
+            _warned_legacy.add(env_var)
+            _logger.warning(
+                "Using legacy XDG dir %s; please `mv %s %s` (or set %s).",
+                legacy, legacy, new, env_var,
+            )
+        return legacy
+    return new
 
 
 def xdg_config_home() -> Path:
-    return _xdg_dir("XDG_CONFIG_HOME", ".config") / _APP
+    return _xdg_with_fallback("XDG_CONFIG_HOME", ".config")
 
 
 def xdg_state_home() -> Path:
-    return _xdg_dir("XDG_STATE_HOME", ".local/state") / _APP
+    return _xdg_with_fallback("XDG_STATE_HOME", ".local/state")
 
 
 def _resolve(env_var: str, legacy: str, xdg_default: Path) -> Path:
