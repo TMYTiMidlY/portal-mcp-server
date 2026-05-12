@@ -8,7 +8,9 @@ Quirks handled:
   - PTY echo is disabled on session creation, otherwise the upstream
     sentinel-based completion detection matches the *echo* of the sentinel
     rather than the actual output.
-  - PS1 / PROMPT_COMMAND / bracketed-paste are silenced to keep stdout clean.
+  - PS1 / PS2 / PROMPT_COMMAND / bracketed-paste are silenced to keep
+    stdout clean. PS2 in particular leaks `> ` markers into output when
+    the agent uses heredocs or unclosed multi-line constructs.
   - Output is post-processed to strip residual ANSI escapes and the two
     bracketed-paste markers (``\\x1b[?2004l`` / ``\\x1b[?2004h``) that bash
     emits even with `stty -echo`.
@@ -73,6 +75,7 @@ async def _setup_session(host: str) -> str:
     s.process.stdin.write(
         "stty -echo 2>/dev/null; "
         "export PS1=''; "
+        "export PS2=''; "
         "export PROMPT_COMMAND=''; "
         "bind 'set enable-bracketed-paste off' 2>/dev/null\n"
     )
