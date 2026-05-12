@@ -94,7 +94,7 @@ class Patch:
 
 
 class RemoteEditError(Exception):
-    """Raised by remote_patch on hash mismatch or unrecoverable I/O failure."""
+    """Raised by portal_patch on hash mismatch or unrecoverable I/O failure."""
 
     def __init__(self, message: str, current_hash: Optional[str] = None,
                  current_content: Optional[str] = None):
@@ -315,7 +315,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
             "reason": "Content hash mismatch — file was modified after you read it",
             "current_file_hash": current_hash,
             "current_content": full,
-            "suggestion": "call remote_read again to get the current hash, then retry",
+            "suggestion": "call portal_read again to get the current hash, then retry",
         }
 
     lines = full.splitlines(keepends=True)
