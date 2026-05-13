@@ -1,143 +1,117 @@
 # Tool Reference
 
-Complete index of all 57 MCP tools exposed by `ssh-shell-mcp`, grouped by category.
+Complete index of all **18 MCP tools** exposed by `portal-mcp-server`.
+Tools are split into two layers:
 
-All tools that target a remote host accept a `host_name` parameter matching a key in `config/hosts.yaml`.
+- **8 portal core** — direct, single-purpose entry points used by the agent for day-to-day work (read / patch / search / persistent bash).
+- **10 portal high-level** — `mode`-switched orchestration tools that consolidate what the upstream `ssh-shell-mcp` exposed as 30+ separate tools.
+
+Every tool that targets a host accepts a `host` parameter. The host can be:
+- a name registered via `portal_host(action="register", ...)`, **or**
+- a `Host` alias from `~/.ssh/config` (auto-resolved on first use; explicit registration is only needed for tag-based grouping).
+
+All state-changing tools write to `logs/audit.jsonl`. Read-only tools are intentionally not audited (see [`SECURITY.md`](../SECURITY.md)).
 
 ---
 
-## 1. Shell Execution
+## Portal Core (8 tools)
 
-| Tool | Description |
+These are the tools an agent should reach for first. They share one SSH connection per host through the in-process pool.
+
+### Hash-protected file editing
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `portal_read` | `(host, path, start=1, end=None, encoding="utf-8")` | Read a remote file (or 1-based line range) and return JSON `{content, file_hash, range_hash, start, end, total_lines}`. The two SHA-256 hashes are required by `portal_patch`. |
+| `portal_patch` | `(host, path, file_hash, patches_json, encoding="utf-8", auto_newline=False)` | Apply a list of line-range patches under hash protection: if the file changed since `portal_read`, the patch is rejected with `{"result":"error","reason":"Content hash mismatch...","current_file_hash":...}` and the file is left untouched. Patches are applied bottom-to-top; overlap is rejected; writes go through `*.mcp_tmp.<hex>` + `posix_rename` (atomic) and are re-hashed after write. |
+| `portal_cleanup_tmps` | `(host, directory, max_age_s=3600)` | Garbage-collect `*.mcp_tmp.*` orphans left by interrupted `portal_patch` writes (e.g. SSH connection death between tmp creation and rename). Pass `max_age_s=0` to remove every match unconditionally. |
+
+`patches_json` decodes to: `[{"start": int, "end": int|null, "contents": str, "range_hash": str}, ...]`
+
+### Remote search
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `portal_grep` | `(host, path, pattern, glob="", file_type="", ignore_case=False, max_count=0)` | Regex search under `path`. Uses `rg --json` if ripgrep is on the remote PATH (cached after first probe), else falls back to `grep -rn`. Returns structured matches. |
+| `portal_glob` | `(host, pattern, path=".")` | Glob match (`**/*.py`, `*.toml`, …) under `path`. Returns matching file list. |
+
+### Persistent bash
+
+| Tool | Signature | Purpose |
+|---|---|---|
+| `portal_bash` | `(host, command, timeout=60.0)` | Run `command` in a sticky `bash -i` for `<host>`. First call auto-creates the session; subsequent calls reuse the same shell so `cwd` and exported env vars survive. PTY echo + bracketed-paste are disabled so sentinel parsing is reliable. ⚠️ Each command is gated by the security policy — a persistent session does not authorise arbitrary commands. |
+| `portal_bash_close` | `(host)` | Close the cached default bash session for `<host>` (next `portal_bash` call reopens). |
+| `portal_bash_status` | `()` | Return the `host → session_id` mapping for all cached default sessions. |
+
+> Convention enforced by the companion [`remote` skill](https://github.com/TMYTiMidlY/skills): write operations should target remote `/tmp/` unless the user has explicitly approved another path. `portal_bash` itself does **not** enforce path scoping — that is a prompt-layer rule.
+
+---
+
+## Portal High-Level (10 tools)
+
+Each tool below takes a `mode`, `direction`, `action`, or `view` parameter that selects the behaviour. This is the consolidation layer that absorbs ~30 upstream tools.
+
+### Host registry
+
+| Tool | Modes | Purpose |
+|---|---|---|
+| `portal_host` | `action=list \| register \| remove` | Manage the runtime host registry. `register` requires `name` + `host`, with optional `user` (default `root`), `port` (default `22`), `key_path`, `tags` (comma-separated, used by `portal_multi_exec`'s group_tag and by `portal_playbook`). `~/.ssh/config` aliases are auto-resolved without registration; explicit registration is only needed for tag grouping. **No password parameter — key-only auth.** |
+
+### File transfer (SFTP)
+
+| Tool | Modes | Purpose |
+|---|---|---|
+| `portal_transfer` | `direction=upload \| download \| sync` | Binary-safe SFTP transfer. `upload` / `download` move a single file; `sync` recursively syncs a local directory tree. For text-only edits prefer `portal_patch` (which is hash-protected). |
+
+### SSH tunnels
+
+| Tool | Modes / args | Purpose |
+|---|---|---|
+| `portal_tunnel_open` | `mode=local \| reverse \| socks` | `local`: forward `localhost:local_port → remote_host:remote_port` via `host`. `reverse`: expose `local_bind:local_port` on `host` as `host:remote_port`. `socks`: SOCKS5 proxy on `localhost:local_port` via `host`. Returns `{tunnel_id, type, host, local, remote}`. |
+| `portal_tunnel_close` | `(tunnel_id)` | Close a tunnel by the ID returned from `portal_tunnel_open`. |
+| `portal_tunnel_list` | `()` | List all currently active tunnels (JSON). Read-only, not audited. |
+
+### Multi-host orchestration
+
+| Tool | Modes / args | Purpose |
+|---|---|---|
+| `portal_multi_exec` | `mode=parallel \| rolling \| broadcast` | `parallel`: same `command` on every host simultaneously (asyncio.gather). `rolling`: `command` sequentially across hosts with `delay_s` between them and `stop_on_error` (zero-downtime restart pattern). `broadcast`: a JSON array of `commands_json` is run on every host in parallel (each host runs the full sequence). Hosts come from `hosts_json` (JSON array) or `group_tag` (parallel mode only). Every command is policy-gated against every target host before execution begins. |
+| `portal_playbook` | `(playbook_json, host="" \| group_tag="")` | Run a multi-step playbook against one host (`host=...`) or a tag group (`group_tag=...`). Playbook schema: `{"name": str, "on_error": "stop"\|"continue", "steps": [str, ...]}`. Every step is gated against the security policy before the playbook starts; one rate-limit consumption per host (not per step). |
+
+### Health & observability
+
+| Tool | Args | Purpose |
+|---|---|---|
+| `portal_ping` | `(hosts_json="")` | SSH connectivity test. Empty `hosts_json` pings every registered host in parallel; `hosts_json='["web01"]'` pings the listed subset. Returns `{"online": N, "total": M, "hosts": [{host, reachable, latency_s, exit_code}, ...]}`. |
+| `portal_check` | `(host, command="")` | Dry-run a host (and optionally a command) through the security policy without executing anything. Returns `"ALLOWED"` or `"BLOCKED: <reason>"`. ⚠️ Default policy is **permissive** — empty allowlists allow everything. `ALLOWED` means "no current rule blocks this", not "this is safe". Use `portal_audit(view="policy")` to inspect what is loaded. |
+| `portal_audit` | `view=snapshot \| history \| stats \| policy` | Read-only introspection. `snapshot` (default): registered hosts, connection pool state, active tunnels, audit aggregates, security summary. `history`: last `limit` audit entries (default 50), filterable by `host_filter`. `stats`: aggregate counts by operation and error rate. `policy`: full security policy detail (allowlists, blocklists, rate limits, sandbox users). |
+
+---
+
+## Tool count summary
+
+| Layer | Count | Replaces upstream |
+|---|---:|---|
+| portal core | 8 | ~20 wrappers (cat/write/ls/exec families) plus the persistent-session family |
+| portal high-level | 10 | ~30 mode-distinguished tools (3 tunnels + 4 multi-host + 4 introspection + 7 sysinfo + …) |
+| **Total** | **18** | upstream ssh-shell-mcp: 57 |
+
+Result: ~7.5k tokens of upstream tool descriptions collapse to ~2.5k. Agents no longer need to disambiguate between semantically overlapping tools.
+
+---
+
+## Where to look in the code
+
+Every tool is registered in `portal_mcp_server/cli.py` with the `@mcp.tool()` decorator. The implementation modules are:
+
+| Module | Backs |
 |---|---|
-| `ssh_run` | Execute a single command on a remote host; returns stdout/stderr/exit code |
-| `ssh_run_batch` | Run a sequence of commands sequentially (stop-on-error supported) |
-| `ssh_run_script` | Upload and execute a local script on a remote host |
-| `ssh_run_with_env` | Execute a command with explicitly injected environment variables |
-| `ssh_exec_retry` | Execute a command with automatic retry on failure |
-
----
-
-## 2. Persistent Shell Sessions
-
-| Tool | Description |
-|---|---|
-| `ssh_create_session` | Open a persistent interactive shell session on a remote host |
-| `ssh_session_exec` | Execute a command inside an existing session (state/CWD preserved) |
-| `ssh_session_read_buffer` | Read recent output from a session's output buffer |
-| `ssh_session_set_env` | Inject an environment variable into a running session |
-| `ssh_session_list` | List all currently active persistent sessions |
-| `ssh_close_session` | Close and destroy a persistent session |
-
----
-
-## 3. File Management
-
-| Tool | Description |
-|---|---|
-| `ssh_upload` | Upload a local file to a remote host via SFTP |
-| `ssh_download` | Download a file from a remote host to local disk |
-| `ssh_ls` | List directory contents on a remote host |
-| `ssh_cat` | Read a remote file's contents |
-| `ssh_write` | Write content to a remote file (overwrites existing) |
-| `ssh_rm` | Delete a file on a remote host |
-| `ssh_sync` | Recursively sync a local directory to a remote host |
-
----
-
-## 4. Process Management
-
-| Tool | Description |
-|---|---|
-| `ssh_ps` | List running processes on a remote host |
-| `ssh_kill` | Send a signal to a remote process by PID |
-| `ssh_start` | Start a process on a remote host (foreground or background) |
-| `ssh_background` | Start a named background process with PID tracking and log file |
-| `ssh_monitor` | Monitor resource usage of a remote process by PID |
-
----
-
-## 5. System Inspection
-
-| Tool | Description |
-|---|---|
-| `ssh_info` | Get comprehensive system info: OS, CPU, memory, uptime, kernel |
-| `ssh_df` | Show disk usage on a remote host |
-| `ssh_free` | Show memory and swap usage |
-| `ssh_netstat` | Show network interfaces, open ports, and routing table |
-| `ssh_service` | Check systemd service status |
-| `ssh_journalctl` | Retrieve systemd journal logs (filterable by unit, PID, time) |
-| `ssh_docker` | List Docker containers and images on a remote host |
-
----
-
-## 6. Fleet Orchestration
-
-| Tool | Description |
-|---|---|
-| `ssh_parallel` | Execute a command simultaneously on multiple hosts |
-| `ssh_rolling` | Execute a command sequentially across hosts with inter-host delay |
-| `ssh_group_exec` | Execute a command on all hosts sharing a group tag |
-| `ssh_broadcast_batch` | Broadcast a sequence of commands to multiple hosts in parallel |
-| `ssh_playbook` | Execute an infrastructure playbook (YAML) on a single host |
-| `ssh_playbook_on_group` | Execute a playbook across all hosts in a group |
-
----
-
-## 7. Tunnels & Proxies
-
-| Tool | Description |
-|---|---|
-| `ssh_port_forward` | Create a local port forward: `localhost:local_port → remote_host:remote_port` |
-| `ssh_reverse_tunnel` | Create a reverse tunnel: `host_name:remote_port → local_host:local_port` |
-| `ssh_socks_proxy` | Open a SOCKS5 dynamic proxy through a remote host |
-| `ssh_close_tunnel` | Close an active SSH tunnel by ID |
-| `ssh_active_tunnels` | List all currently active SSH tunnels |
-
----
-
-## 8. Security Controls
-
-| Tool | Description |
-|---|---|
-| `ssh_check_command` | Dry-run a command through the security policy without executing it |
-| `ssh_check_host_access` | Check whether a host is accessible under the current policy |
-| `ssh_security_status` | Show the current security policy (allowlists, blocklists, rate limits) |
-
----
-
-## 9. Host Registry
-
-| Tool | Description |
-|---|---|
-| `ssh_register_host` | Register a new SSH host in the runtime registry |
-| `ssh_list_hosts` | List all registered hosts with their connection details |
-| `ssh_remove_host` | Remove a host from the registry |
-| `ssh_connection_status` | Show the current state of all pooled SSH connections |
-
----
-
-## 10. Health & Observability
-
-| Tool | Description |
-|---|---|
-| `ssh_ping_host` | Test SSH connectivity to a registered host |
-| `ssh_health_check_fleet` | Ping all hosts (or a subset) in parallel and report status |
-| `ssh_full_status` | Return a complete observability snapshot: connections, sessions, tunnels |
-| `ssh_operation_history` | Show recent SSH operation history from the audit log |
-| `ssh_audit_stats` | Return aggregate statistics from the audit log |
-
----
-
-## 11. tmux
-
-| Tool | Description |
-|---|---|
-| `ssh_tmux_new` | Create a new tmux session on a remote host |
-| `ssh_tmux_send` | Send a command to a named tmux session |
-| `ssh_tmux_list` | List all tmux sessions on a remote host |
-| `ssh_tmux_kill` | Kill a tmux session on a remote host |
-
----
-
-*Total: 57 tools across 11 categories.*
+| `connection_manager.py` | underlying connection pool used by every tool |
+| `remote_text_editor.py` | `portal_read`, `portal_patch`, `portal_cleanup_tmps` |
+| `remote_search.py` | `portal_grep`, `portal_glob` |
+| `remote_bash.py` | `portal_bash`, `portal_bash_close`, `portal_bash_status` |
+| `file_ops.py` | `portal_transfer` |
+| `network_tools.py` | `portal_tunnel_*` |
+| `orchestrator.py` | `portal_multi_exec`, `portal_playbook` |
+| `security.py` | the `_gate()` / `_gate_many()` / `_gate_playbook()` helpers used by every state-changing tool |
+| `audit.py` | `audit_log()` writes used by every state-changing tool, plus `portal_audit` introspection |
