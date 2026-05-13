@@ -1,8 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# ssh-shell-mcp  |  hosts.example.yaml
+# portal-mcp-server  |  hosts.example.yaml
 # Copy this file to hosts.yaml and fill in your own values.
 # NEVER commit hosts.yaml — it contains real credentials.
-# Dynamic registration also available via the ssh_register_host tool.
+# Dynamic registration is also available via the portal_host MCP tool
+# (key-based hosts only — see README §Authentication).
 # ─────────────────────────────────────────────────────────────────────────────
 
 hosts:
@@ -22,7 +23,7 @@ hosts:
     # strict_host_key_checking: true
     # known_hosts: ~/.ssh/known_hosts
 
-  # ── Remote web server ────────────────────────────────────────────────────
+  # ── Remote web server (key auth — RECOMMENDED) ───────────────────────────
   web01:
     host: 10.0.0.10
     port: 22
@@ -46,6 +47,39 @@ hosts:
     key: ~/.ssh/staging_key
     tags: [staging]
 
+  # ── Encrypted private key with ssh-agent (RECOMMENDED for encrypted keys) ─
+  # Run `ssh-add ~/.ssh/encrypted_key` once; asyncssh picks the unlocked key
+  # up via $SSH_AUTH_SOCK automatically — no extra config needed below.
+  # If you cannot use ssh-agent (headless / CI), uncomment passphrase_command:
+  # encrypted-key-host:
+  #   host: 10.0.0.30
+  #   user: deploy
+  #   key: ~/.ssh/encrypted_key
+  #   # passphrase_command: pass show ssh/encrypted_key
+  #   tags: [encrypted-key]
+
+  # ── Password auth (legacy hosts only — see README §Authentication) ───────
+  # Two non-negotiable rules:
+  #   1. NEVER write `password: ...` in this file. Plaintext password
+  #      fields are rejected at startup with an ERROR log.
+  #   2. The MCP `portal_host(action="register", ...)` tool does NOT accept
+  #      a password — yaml is the only entry point, so the secret cannot
+  #      land in LLM tool-call traces.
+  # The `password_command` is a shell command that prints the password to
+  # stdout. Same pattern as Borg's BORG_PASSCOMMAND and restic's
+  # RESTIC_PASSWORD_COMMAND. A single trailing newline is stripped.
+  # legacy-host:
+  #   host: 10.0.0.40
+  #   user: admin
+  #   auth: password
+  #   # CI / env-var pattern (GitHub Secrets, Vault, etc.):
+  #   password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
+  #   # Or pull from a password manager:
+  #   # password_command: pass show ssh/legacy-host
+  #   # password_command: bw get password legacy-host
+  #   # password_command: op read "op://Private/legacy-host/password"
+  #   tags: [legacy]
+
   # ── Jump host / bastion ──────────────────────────────────────────────────
   # bastion:
   #   host: bastion.example.com
@@ -53,3 +87,4 @@ hosts:
   #   user: ops
   #   key: ~/.ssh/id_ed25519
   #   tags: [bastion, jump]
+

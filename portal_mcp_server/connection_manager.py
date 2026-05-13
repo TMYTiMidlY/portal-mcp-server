@@ -5,6 +5,7 @@ Manages persistent AsyncSSH connections to multiple remote hosts.
 import asyncio
 import os
 import logging
+import subprocess
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
@@ -13,6 +14,11 @@ import asyncssh
 import yaml
 
 logger = logging.getLogger("portal_mcp.connections")
+
+# Hard ceiling for password_command / passphrase_command execution. Long enough
+# for an interactive `pass show` (which may unlock the GPG agent) but short
+# enough that a misconfigured command does not silently hang the server.
+SECRET_COMMAND_TIMEOUT_SEC = 10
 
 
 @dataclass
@@ -33,6 +39,19 @@ class HostConfig:
     # When True, defer everything to ~/.ssh/config (asyncssh.connect resolves
     # HostName/User/Port/IdentityFile/ProxyJump natively from `name`).
     use_ssh_config: bool = False
+    # Authentication mode. ``None`` (default) means key-based auth (the
+    # recommended path). ``"password"`` opts the host into password auth and
+    # requires ``password_command`` to be set — see ``_build_connect_kwargs``.
+    auth: Optional[str] = None
+    # Shell command that prints the SSH login password to stdout. Executed
+    # at connection time, never persisted, never logged, never exposed via
+    # any MCP tool parameter. Borg's BORG_PASSCOMMAND / restic's
+    # RESTIC_PASSWORD_COMMAND follow the same pattern.
+    password_command: Optional[str] = None
+    # Shell command that prints the passphrase for an encrypted private key.
+    # Same execution model as ``password_command``. Prefer ssh-agent for
+    # encrypted keys; this is the headless / CI fallback.
+    passphrase_command: Optional[str] = None
 
 
 @dataclass
@@ -78,11 +97,32 @@ class ConnectionManager:
         for name, cfg in hosts.items():
             if "password" in cfg:
                 logger.error(
-                    "Host '%s' has 'password' field in hosts.yaml — password "
-                    "auth is not supported (per README.md § Security). The "
-                    "field is being IGNORED. Use key-based auth instead.",
+                    "Host '%s' has 'password' field in hosts.yaml — plaintext "
+                    "password fields are not supported (would leak credentials "
+                    "into config files and backups). Use 'auth: password' + "
+                    "'password_command:' instead. The 'password' field is "
+                    "being IGNORED.",
                     name,
                 )
+            auth = cfg.get("auth")
+            password_command = cfg.get("password_command")
+            passphrase_command = cfg.get("passphrase_command")
+            if auth == "password" and not password_command:
+                logger.error(
+                    "Host '%s' declares 'auth: password' but has no "
+                    "'password_command' — the host is loaded but connection "
+                    "attempts will fail. Add a 'password_command:' that "
+                    "prints the password to stdout (e.g. 'pass show ssh/%s' "
+                    "or 'printf %%s \"$%s_PASSWORD\"').",
+                    name, name, name.upper(),
+                )
+            if auth not in (None, "password"):
+                logger.error(
+                    "Host '%s' has unknown auth mode '%s'; expected None "
+                    "(key-based) or 'password'. Treating as key-based.",
+                    name, auth,
+                )
+                auth = None
             self._registry[name] = HostConfig(
                 name=name,
                 host=cfg["host"],
@@ -95,6 +135,9 @@ class ConnectionManager:
                     "strict_host_key_checking", True
                 )),
                 tags=cfg.get("tags", []),
+                auth=auth,
+                password_command=password_command,
+                passphrase_command=passphrase_command,
             )
         logger.info(f"Loaded {len(self._registry)} hosts from registry")
 
@@ -181,6 +224,78 @@ class ConnectionManager:
         # which matches OpenSSH StrictHostKeyChecking=yes behaviour.
         return ()
 
+    async def _run_secret_command(
+        self,
+        cmd: str,
+        *,
+        host: str,
+        kind: str,
+    ) -> str:
+        """Execute a user-supplied shell command and return its stdout as a
+        secret string.
+
+        Modeled after Borg's BORG_PASSCOMMAND and restic's
+        RESTIC_PASSWORD_COMMAND. The contract:
+
+          * shell=True so users can write ``pass show ssh/web01``,
+            ``printf '%s' "$WEB01_PASSWORD"``, ``op read op://...`` etc.
+          * stdout is the secret. Trailing newline is stripped (``pass``,
+            ``echo`` and friends almost always emit one).
+          * stderr is captured but never logged or returned — it commonly
+            contains the secret on misconfigured commands.
+          * Hard timeout via ``SECRET_COMMAND_TIMEOUT_SEC`` so a hanging
+            password manager cannot wedge the connection pool.
+          * On failure, we raise ``RuntimeError`` with the host and exit
+            code only — no command string, no output.
+        """
+        loop = asyncio.get_running_loop()
+
+        def _run() -> subprocess.CompletedProcess:
+            return subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                timeout=SECRET_COMMAND_TIMEOUT_SEC,
+                check=False,
+                env=os.environ.copy(),
+            )
+
+        try:
+            result = await loop.run_in_executor(None, _run)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(
+                f"{kind} for host '{host}' timed out after "
+                f"{SECRET_COMMAND_TIMEOUT_SEC}s"
+            ) from None
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"{kind} for host '{host}' exited with code "
+                f"{result.returncode}"
+            )
+
+        try:
+            secret = result.stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            # Don't surface the offending bytes — they may contain the secret
+            # on misconfigured commands (e.g. a binary key file printed by
+            # mistake). Give the operator enough to fix the config.
+            raise RuntimeError(
+                f"{kind} for host '{host}' produced non-UTF-8 output. "
+                "Ensure the command writes a plain-text secret to stdout."
+            ) from None
+        # Most secret stores append a single trailing newline. Strip exactly
+        # one so passwords that legitimately end in whitespace survive.
+        if secret.endswith("\r\n"):
+            secret = secret[:-2]
+        elif secret.endswith("\n"):
+            secret = secret[:-1]
+        if not secret:
+            raise RuntimeError(
+                f"{kind} for host '{host}' produced empty output"
+            )
+        return secret
+
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
         if cfg.use_ssh_config:
             # asyncssh resolves everything from ~/.ssh/config using the alias.
@@ -195,9 +310,31 @@ class ConnectionManager:
             connect_timeout=cfg.connect_timeout,
             known_hosts=self._known_hosts_arg(cfg),
         )
+
+        # ── Password auth (opt-in via `auth: password` + `password_command`) ──
+        # No key is loaded; asyncssh will negotiate `password` (or
+        # keyboard-interactive that prompts for password) using the secret
+        # produced by the user-supplied command.
+        if cfg.auth == "password":
+            if not cfg.password_command:
+                raise RuntimeError(
+                    f"Host '{cfg.name}' has 'auth: password' but no "
+                    "'password_command' configured in hosts.yaml. Refusing "
+                    "to attempt password auth without a password source."
+                )
+            password = await self._run_secret_command(
+                cfg.password_command, host=cfg.name, kind="password_command",
+            )
+            kwargs["password"] = password
+            # Disable client_keys so asyncssh does not silently fall back to
+            # default key locations and, on success, mask a misconfigured
+            # password_command.
+            kwargs["client_keys"] = []
+            return kwargs
+
+        # ── Key-based auth (the default and recommended path) ──
         if cfg.key:
             kwargs["client_keys"] = [cfg.key]
-            kwargs["passphrase"] = None
         else:
             # Try default SSH agent / key locations
             default_keys = []
@@ -207,6 +344,17 @@ class ConnectionManager:
                     default_keys.append(str(kp))
             if default_keys:
                 kwargs["client_keys"] = default_keys
+
+        # Encrypted private keys: if the user supplied a passphrase_command,
+        # run it. Otherwise leave the slot empty so asyncssh can fall back to
+        # ssh-agent (the recommended UX for encrypted keys).
+        if cfg.passphrase_command:
+            kwargs["passphrase"] = await self._run_secret_command(
+                cfg.passphrase_command,
+                host=cfg.name,
+                kind="passphrase_command",
+            )
+
         return kwargs
 
     def _try_load_from_ssh_config(self, host_name: str) -> Optional[HostConfig]:

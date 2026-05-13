@@ -159,8 +159,11 @@ def portal_host(action: str, name: str = "", host: str = "",
         Example: portal_host(action="remove", name="web01")
 
     Hosts already defined in ~/.ssh/config are auto-resolved on first use; explicit
-    registration is only needed for tag-based grouping. Password auth is not
-    supported — keys only.
+    registration is only needed for tag-based grouping. This MCP tool only
+    accepts key-based hosts — password auth is intentionally not exposed
+    here so credentials cannot leak into LLM tool-call traces. To use
+    password auth, declare the host in hosts.yaml with `auth: password` and
+    a `password_command:`. See README §Authentication.
     """
     mgr = get_manager()
     if action == "list":
