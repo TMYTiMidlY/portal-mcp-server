@@ -22,6 +22,11 @@ class ShellSession:
     session_id: str
     host_name: str
     process: asyncssh.SSHClientProcess
+    # The pooled SSH connection that backs ``process``. Stored here so
+    # ``close_session`` can release the pool slot back to ConnectionManager;
+    # without this reference we leak ``in_use`` counters and the pool grows
+    # unboundedly under sustained portal_bash usage.
+    conn: asyncssh.SSHClientConnection
     created_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
     output_buffer: list[str] = field(default_factory=list)
@@ -43,19 +48,27 @@ class SessionManager:
         env = validate_env_dict(env)
         mgr = get_manager()
         conn = await mgr.get_connection(host_name)
-        process = await conn.create_process(
-            "bash -i", term_type="xterm-256color",
-            env=env, request_pty=True,
-        )
-        session_id = str(uuid.uuid4())[:8]
-        session = ShellSession(
-            session_id=session_id,
-            host_name=host_name,
-            process=process,
-            env=env,
-        )
-        # Drain initial prompt
-        await asyncio.wait_for(self._drain(session), timeout=5.0)
+        try:
+            process = await conn.create_process(
+                "bash -i", term_type="xterm-256color",
+                env=env, request_pty=True,
+            )
+            session_id = str(uuid.uuid4())[:8]
+            session = ShellSession(
+                session_id=session_id,
+                host_name=host_name,
+                process=process,
+                conn=conn,
+                env=env,
+            )
+            # Drain initial prompt
+            await asyncio.wait_for(self._drain(session), timeout=5.0)
+        except BaseException:
+            # Release the pool slot we just acquired before re-raising;
+            # otherwise a failed session creation permanently consumes
+            # one ``in_use`` counter and eventually exhausts the pool.
+            mgr.release_connection(host_name, conn)
+            raise
         async with self._lock:
             self._sessions[session_id] = session
         logger.info(f"Session {session_id} created on {host_name}")
@@ -143,6 +156,13 @@ class SessionManager:
             await asyncio.wait_for(session.process.wait(), timeout=3.0)
         except Exception:
             session.process.close()
+        finally:
+            # Release the pool slot regardless of how the bash process
+            # terminated. Without this ``in_use`` keeps creeping up and
+            # ``ConnectionManager`` opens a brand-new TCP connection for
+            # every subsequent ``portal_bash`` call once the per-conn cap
+            # is reached.
+            get_manager().release_connection(session.host_name, session.conn)
         async with self._lock:
             del self._sessions[session_id]
         logger.info(f"Session {session_id} closed")

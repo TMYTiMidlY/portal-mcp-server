@@ -233,6 +233,7 @@ class TestSessionEnvInjection:
         s = ShellSession(
             session_id="x", host_name="h",
             process=_FakeProc(),  # type: ignore[arg-type]
+            conn=object(),  # type: ignore[arg-type]  - never released in this unit test
         )
         sm._sessions["x"] = s
         with pytest.raises(ValueError):
@@ -256,7 +257,8 @@ class TestSessionEnvInjection:
                 self.stdin = _FakeStdin()
 
         s = ShellSession(session_id="x", host_name="h",
-                         process=_FakeProc())  # type: ignore[arg-type]
+                         process=_FakeProc(),  # type: ignore[arg-type]
+                         conn=object())  # type: ignore[arg-type]
         sm._sessions["x"] = s
         sm.set_env("x", "FOO", "$(reboot)")
         # BEFORE the fix the line was:  export FOO='$(reboot)'\n  (via repr)

@@ -61,9 +61,11 @@ def _gate(host: str, command: str = "") -> str | None:
 def _gate_many(hosts: list[str], command: str = "") -> str | None:
     """Multi-host policy gate.
 
-    For each host: check_host + check_rate_limit. The command (if given) is
-    checked once against the blocklist/allowlist (it's the same string for
-    all hosts). Returns the first error found, or None if all checks pass.
+    Two-phase to avoid burning rate-limit quota on hosts that pass when a
+    later host fails: first run all *non-mutating* checks (command +
+    host allowlist) over every host, only commit per-host rate-limit
+    consumption once every host has passed. Returns the first error
+    found, or None if all checks pass.
 
     Used by multi-host orchestration tools (ssh_rolling, ssh_group_exec,
     ssh_broadcast_batch, ssh_playbook_on_group) so they cannot bypass the
@@ -74,10 +76,13 @@ def _gate_many(hosts: list[str], command: str = "") -> str | None:
         err = pol.check_command(command)
         if err:
             return err
+    # Phase 1: validate every host (no mutation).
     for h in hosts:
         err = pol.check_host(h)
         if err:
             return f"{h}: {err}"
+    # Phase 2: commit rate-limit only after every host validated.
+    for h in hosts:
         err = pol.check_rate_limit(h)
         if err:
             return f"{h}: {err}"
@@ -94,20 +99,28 @@ def _gate_playbook(hosts: list[str], playbook: dict) -> str | None:
     """Policy gate for playbooks: check every step's command against the
     blocklist/allowlist on every target host. Rate limit is checked per host
     once (not per step) to avoid burning the rate-limit budget before the
-    playbook even runs.
+    playbook even runs. Same two-phase shape as ``_gate_many`` so a single
+    bad host can't burn rate-limit quota on the others.
     """
     pol = get_policy()
     steps = playbook.get("steps", []) or []
+    # Phase 0: every step must be a string we can actually execute.
     for step in steps:
         if not isinstance(step, str):
-            continue
+            return (f"step {step!r}: invalid type {type(step).__name__}; "
+                    "playbook steps must be shell-command strings")
+    # Phase 1: command blocklist for every step (no mutation).
+    for step in steps:
         err = pol.check_command(step)
         if err:
             return f"step {step[:60]!r}: {err}"
+    # Phase 2: validate every host (no mutation).
     for h in hosts:
         err = pol.check_host(h)
         if err:
             return f"{h}: {err}"
+    # Phase 3: commit rate-limit only after every host validated.
+    for h in hosts:
         err = pol.check_rate_limit(h)
         if err:
             return f"{h}: {err}"
@@ -156,6 +169,14 @@ def portal_host(action: str, name: str = "", host: str = "",
     if action == "register":
         if not name or not host:
             return 'Error: action="register" requires both `name` and `host`.'
+        # Gate against the *target* (the actual host/IP that traffic will
+        # reach), not the alias the agent picked. Otherwise an agent can
+        # register an arbitrary alias pointing at a non-allowlisted host
+        # and then operate on it freely — host_allowlist would only ever
+        # see the alias.
+        err = _gate(host)
+        if err:
+            return f"BLOCKED: {err}"
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         result = mgr.register_host(name=name, host=host, user=user, port=port,
                                     key=key_path or None, tags=tag_list)
@@ -165,6 +186,11 @@ def portal_host(action: str, name: str = "", host: str = "",
     if action == "remove":
         if not name:
             return 'Error: action="remove" requires `name`.'
+        # Gate the alias being removed — same surface as any other
+        # state-changing op against that alias.
+        err = _gate(name)
+        if err:
+            return f"BLOCKED: {err}"
         result = mgr.remove_host(name)
         audit_log(name, "remove_host", "ok", operation="host_remove")
         return result
@@ -272,6 +298,16 @@ async def portal_tunnel_close(tunnel_id: str) -> str:
         tunnel_id: ID returned by portal_tunnel_open.
     """
     tm = get_tunnel_manager()
+    # Look up the originating host so we can run it through the security
+    # gate (consistent with portal_tunnel_open). Without this gate an
+    # agent that lost host access could still dismantle live tunnels.
+    host = next((t["host"] for t in tm.list_tunnels()
+                 if t["tunnel_id"] == tunnel_id), None)
+    if host is None:
+        return f"Tunnel '{tunnel_id}' not found"
+    err = _gate(host)
+    if err:
+        return f"BLOCKED: {err}"
     result = await tm.close_tunnel(tunnel_id)
     audit_log("tunnel", f"close:{tunnel_id}", "ok", operation="tunnel_close")
     return result

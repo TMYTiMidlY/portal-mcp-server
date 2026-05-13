@@ -24,6 +24,11 @@ class ActiveTunnel:
     remote_host: str
     remote_port: int
     listener: object        # asyncssh listener object
+    # Pooled SSH connection that backs ``listener``. We must keep the
+    # reference so ``close_tunnel`` can hand the slot back to the
+    # connection pool — long-lived tunnels otherwise pin one ``in_use``
+    # counter forever and the pool grows unboundedly.
+    conn: "asyncssh.SSHClientConnection"
     created_at: float = field(default_factory=time.time)
     description: str = ""
 
@@ -50,6 +55,7 @@ class TunnelManager:
                 local_host=local_bind, local_port=listener.get_port(),
                 remote_host=remote_host, remote_port=remote_port,
                 listener=listener,
+                conn=conn,
                 description=f"{local_bind}:{listener.get_port()} → {remote_host}:{remote_port}"
             )
             async with self._lock:
@@ -59,6 +65,7 @@ class TunnelManager:
                     "local": f"{local_bind}:{listener.get_port()}",
                     "remote": f"{remote_host}:{remote_port}"}
         except Exception as e:
+            mgr.release_connection(host_name, conn)
             return {"error": str(e)}
 
     async def open_remote_forward(self, host_name: str,
@@ -77,6 +84,7 @@ class TunnelManager:
                 local_host=local_host, local_port=local_port,
                 remote_host="0.0.0.0", remote_port=listener.get_port(),
                 listener=listener,
+                conn=conn,
                 description=f"{host_name}:{listener.get_port()} → {local_host}:{local_port}"
             )
             async with self._lock:
@@ -86,6 +94,7 @@ class TunnelManager:
                     "remote_port": listener.get_port(),
                     "forwards_to": f"{local_host}:{local_port}"}
         except Exception as e:
+            mgr.release_connection(host_name, conn)
             return {"error": str(e)}
 
     async def open_dynamic_proxy(self, host_name: str,
@@ -102,6 +111,7 @@ class TunnelManager:
                 local_host=local_bind, local_port=listener.get_port(),
                 remote_host="*", remote_port=0,
                 listener=listener,
+                conn=conn,
                 description=f"SOCKS5 {local_bind}:{listener.get_port()} via {host_name}"
             )
             async with self._lock:
@@ -111,6 +121,7 @@ class TunnelManager:
                     "socks5": f"socks5://{local_bind}:{listener.get_port()}",
                     "host": host_name}
         except Exception as e:
+            mgr.release_connection(host_name, conn)
             return {"error": str(e)}
 
     async def close_tunnel(self, tunnel_id: str) -> str:
@@ -123,6 +134,10 @@ class TunnelManager:
             await t.listener.wait_closed()
         except Exception:
             pass
+        finally:
+            # Hand the pool slot back. Long-lived tunnels would otherwise
+            # leak ``in_use`` counters until the MCP server restarts.
+            get_manager().release_connection(t.host_name, t.conn)
         logger.info(f"Tunnel {tunnel_id} closed")
         return f"Tunnel {tunnel_id} closed ({t.description})"
 
