@@ -21,7 +21,7 @@ import pytest
 # ════════════════════════════════════════════════════════════════════════════
 
 def test_hostconfig_has_no_password_field():
-    from ssh_remote_mcp.connection_manager import HostConfig
+    from portal_mcp_server.connection_manager import HostConfig
     cfg = HostConfig(name="x", host="1.2.3.4")
     assert not hasattr(cfg, "password"), (
         "HostConfig must not expose a password field; password auth was "
@@ -34,7 +34,7 @@ def test_hostconfig_has_no_password_field():
 # ════════════════════════════════════════════════════════════════════════════
 
 def test_connection_manager_register_host_signature_has_no_password():
-    from ssh_remote_mcp.connection_manager import ConnectionManager
+    from portal_mcp_server.connection_manager import ConnectionManager
     sig = inspect.signature(ConnectionManager.register_host)
     assert "password" not in sig.parameters, (
         "ConnectionManager.register_host must not accept a password kwarg."
@@ -46,7 +46,7 @@ def test_connection_manager_register_host_signature_has_no_password():
 # ════════════════════════════════════════════════════════════════════════════
 
 def test_portal_host_register_signature_has_no_password():
-    from ssh_remote_mcp import cli
+    from portal_mcp_server import cli
     sig = inspect.signature(cli.portal_host)
     assert "password" not in sig.parameters, (
         "portal_host MCP tool must not expose a password parameter "
@@ -60,7 +60,7 @@ def test_portal_host_register_signature_has_no_password():
 # ════════════════════════════════════════════════════════════════════════════
 
 def test_hosts_yaml_password_field_is_logged_and_ignored(tmp_path, caplog):
-    from ssh_remote_mcp.connection_manager import ConnectionManager
+    from portal_mcp_server.connection_manager import ConnectionManager
 
     yml = tmp_path / "hosts.yaml"
     yml.write_text(
@@ -71,7 +71,7 @@ def test_hosts_yaml_password_field_is_logged_and_ignored(tmp_path, caplog):
         "    password: super-secret\n"
     )
 
-    with caplog.at_level(logging.ERROR, logger="ssh_mcp.connections"):
+    with caplog.at_level(logging.ERROR, logger="portal_mcp.connections"):
         m = ConnectionManager(hosts_yaml=yml)
 
     # The host loaded fine, but the password field never reached HostConfig.
@@ -94,7 +94,7 @@ def test_hosts_yaml_password_field_is_logged_and_ignored(tmp_path, caplog):
 
 @pytest.mark.asyncio
 async def test_build_connect_kwargs_never_emits_password(tmp_path):
-    from ssh_remote_mcp.connection_manager import ConnectionManager, HostConfig
+    from portal_mcp_server.connection_manager import ConnectionManager, HostConfig
 
     yml = tmp_path / "hosts.yaml"
     yml.write_text("hosts: {}\n")

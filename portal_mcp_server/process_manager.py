@@ -6,7 +6,7 @@ import logging
 from .shell_engine import ssh_exec
 from .safety import quote_shell, validate_pid, validate_signal
 
-logger = logging.getLogger("ssh_mcp.processes")
+logger = logging.getLogger("portal_mcp.processes")
 
 
 async def ssh_process_list(host_name: str, filter_name: str = "") -> list[dict]:

@@ -13,7 +13,7 @@
 
 Report security issues privately via one of the following channels:
 
-- **GitHub Security Advisories:** Use the [Report a Vulnerability](https://github.com/TMYTiMidlY/ssh-remote-mcp/security/advisories/new) button on this repo.
+- **GitHub Security Advisories:** Use the [Report a Vulnerability](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new) button on this repo.
 - **Email:** Contact the maintainer directly through their GitHub profile.
 
 ### What to include
@@ -52,7 +52,7 @@ Report security issues privately via one of the following channels:
 
 ## References & Algorithmic Provenance
 
-The hash-protected file editing in `ssh_remote_mcp.remote_text_editor`
+The hash-protected file editing in `portal_mcp_server.remote_text_editor`
 (`remote_read` / `remote_patch`) is a deliberate port of the safe-edit
 pattern from [tumf/mcp-text-editor](https://github.com/tumf/mcp-text-editor)
 (MIT). Concretely:

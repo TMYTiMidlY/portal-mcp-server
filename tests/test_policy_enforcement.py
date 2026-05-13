@@ -23,7 +23,7 @@ def restrictive_policy(monkeypatch, tmp_path):
     """Install a policy that blocks ``rm -rf /`` and only allows hosts
     matching ``safe-*``.
     """
-    from ssh_remote_mcp import security, cli, orchestrator
+    from portal_mcp_server import security, cli, orchestrator
 
     policy_yaml = tmp_path / "policies.yaml"
     policy_yaml.write_text(
@@ -47,7 +47,7 @@ def populated_manager(monkeypatch, tmp_path):
     ``_resolve_group`` and the underlying orchestrator agree on which hosts
     belong to the tag.
     """
-    from ssh_remote_mcp import connection_manager, cli, orchestrator
+    from portal_mcp_server import connection_manager, cli, orchestrator
 
     yml = tmp_path / "hosts.yaml"
     yml.write_text("hosts: {}\n")
@@ -69,7 +69,7 @@ class TestGroupExecGate:
     @pytest.mark.asyncio
     async def test_blocked_command_rejected(self, restrictive_policy,
                                              populated_manager, monkeypatch):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         called = []
 
@@ -90,7 +90,7 @@ class TestGroupExecGate:
     async def test_disallowed_host_in_group_rejected(self, restrictive_policy,
                                                       populated_manager,
                                                       monkeypatch):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         called = []
 
@@ -117,7 +117,7 @@ class TestRollingGate:
     @pytest.mark.asyncio
     async def test_blocked_command_rejected(self, restrictive_policy,
                                              populated_manager, monkeypatch):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         called = []
 
@@ -138,7 +138,7 @@ class TestRollingGate:
     @pytest.mark.asyncio
     async def test_disallowed_host_rejected(self, restrictive_policy,
                                              populated_manager, monkeypatch):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         async def fake_rolling(*a, **k):
             raise AssertionError("must not be called")
@@ -163,7 +163,7 @@ class TestBroadcastBatchGate:
     async def test_blocked_command_in_list_rejected(
         self, restrictive_policy, populated_manager, monkeypatch
     ):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         async def fake_broadcast(*a, **k):
             raise AssertionError("must not be called")
@@ -182,7 +182,7 @@ class TestBroadcastBatchGate:
     async def test_non_string_command_rejected(self, restrictive_policy,
                                                 populated_manager,
                                                 monkeypatch):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         async def fake_broadcast(*a, **k):
             raise AssertionError("must not be called")
@@ -207,7 +207,7 @@ class TestPlaybookGate:
     async def test_single_host_playbook_blocks_dangerous_step(
         self, restrictive_policy, populated_manager, monkeypatch
     ):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         async def fake_run(*a, **k):
             raise AssertionError("must not be called")
@@ -226,7 +226,7 @@ class TestPlaybookGate:
     async def test_group_playbook_blocks_disallowed_host(
         self, restrictive_policy, populated_manager, monkeypatch
     ):
-        from ssh_remote_mcp import cli
+        from portal_mcp_server import cli
 
         async def fake_run(*a, **k):
             raise AssertionError("must not be called")

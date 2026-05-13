@@ -4,7 +4,7 @@ Tests all 5 functional areas: exec, file transfer, sessions, orchestration, tunn
 
 HOW TO RUN:
   pip install pytest pytest-asyncio asyncssh
-  pytest tests/test_ssh_mcp.py -v
+  pytest tests/test_live_ssh.py -v
 
 REQUIREMENTS:
   - SSH server accessible at TEST_HOST (default: 127.0.0.1:22)
@@ -31,7 +31,7 @@ TEST_USER      = os.environ.get("TEST_USER", os.environ.get("USER", "root"))
 TEST_KEY       = os.environ.get("TEST_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
 
 # ── Bootstrap: register the test host ─────────────────────────────────────
-from ssh_remote_mcp.connection_manager import get_manager
+from portal_mcp_server.connection_manager import get_manager
 get_manager().register_host(
     name=TEST_HOST_NAME,
     host=TEST_HOST,
@@ -49,7 +49,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_basic_exec(self):
         """Execute a simple command and verify output."""
-        from ssh_remote_mcp.shell_engine import ssh_exec
+        from portal_mcp_server.shell_engine import ssh_exec
         result = await ssh_exec(TEST_HOST_NAME, "echo hello-mcp")
         assert result["exit_code"] == 0, f"Exit code: {result}"
         assert "hello-mcp" in result["stdout"]
@@ -58,7 +58,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_exec_with_cwd(self):
         """Execute command in a specific working directory."""
-        from ssh_remote_mcp.shell_engine import ssh_exec
+        from portal_mcp_server.shell_engine import ssh_exec
         result = await ssh_exec(TEST_HOST_NAME, "pwd", cwd="/tmp")
         assert result["exit_code"] == 0
         assert "/tmp" in result["stdout"]
@@ -66,7 +66,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_exec_batch(self):
         """Run a batch of commands and check all succeed."""
-        from ssh_remote_mcp.shell_engine import ssh_exec_batch
+        from portal_mcp_server.shell_engine import ssh_exec_batch
         cmds = ["echo step1", "echo step2", "echo step3"]
         results = await ssh_exec_batch(TEST_HOST_NAME, cmds)
         assert len(results) == 3
@@ -76,14 +76,14 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_exec_failure_captured(self):
         """Non-zero exit code is captured, not raised."""
-        from ssh_remote_mcp.shell_engine import ssh_exec
+        from portal_mcp_server.shell_engine import ssh_exec
         result = await ssh_exec(TEST_HOST_NAME, "exit 42", timeout=5)
         assert result["exit_code"] == 42
 
     @pytest.mark.asyncio
     async def test_exec_with_env(self):
         """Environment variable injection."""
-        from ssh_remote_mcp.shell_engine import ssh_exec_with_env
+        from portal_mcp_server.shell_engine import ssh_exec_with_env
         result = await ssh_exec_with_env(
             TEST_HOST_NAME, "echo $MY_VAR", {"MY_VAR": "injected"}
         )
@@ -92,7 +92,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_exec_script(self):
         """Upload and run a script."""
-        from ssh_remote_mcp.shell_engine import ssh_exec_script
+        from portal_mcp_server.shell_engine import ssh_exec_script
         script = "#!/bin/bash\necho 'script-output'\ndate\n"
         result = await ssh_exec_script(TEST_HOST_NAME, script)
         assert result["exit_code"] == 0
@@ -101,7 +101,7 @@ class TestCommandExecution:
     @pytest.mark.asyncio
     async def test_exec_stream(self):
         """Stream command output line by line."""
-        from ssh_remote_mcp.shell_engine import ssh_exec_stream
+        from portal_mcp_server.shell_engine import ssh_exec_stream
         lines = []
         async for line in ssh_exec_stream(TEST_HOST_NAME, "seq 1 5"):
             lines.append(line)
@@ -117,7 +117,7 @@ class TestFileTransfer:
     @pytest.mark.asyncio
     async def test_upload_and_download(self):
         """Upload a file and download it back, verify content."""
-        from ssh_remote_mcp.file_ops import ssh_upload_file, ssh_download_file, ssh_delete_file
+        from portal_mcp_server.file_ops import ssh_upload_file, ssh_download_file, ssh_delete_file
         content = "ssh-shell-mcp test file\nline2\n"
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write(content)
@@ -140,7 +140,7 @@ class TestFileTransfer:
     @pytest.mark.asyncio
     async def test_write_and_read(self):
         """Write a file remotely and read it back."""
-        from ssh_remote_mcp.file_ops import ssh_write_file, ssh_read_file, ssh_delete_file
+        from portal_mcp_server.file_ops import ssh_write_file, ssh_read_file, ssh_delete_file
         remote = "/tmp/_mcp_test_write.txt"
         payload = "written by ssh-shell-mcp\n"
         await ssh_write_file(TEST_HOST_NAME, remote, payload)
@@ -151,7 +151,7 @@ class TestFileTransfer:
     @pytest.mark.asyncio
     async def test_list_directory(self):
         """List /tmp and verify it returns entries."""
-        from ssh_remote_mcp.file_ops import ssh_list_directory
+        from portal_mcp_server.file_ops import ssh_list_directory
         entries = await ssh_list_directory(TEST_HOST_NAME, "/tmp")
         assert isinstance(entries, list)
         assert len(entries) > 0
@@ -160,7 +160,7 @@ class TestFileTransfer:
     @pytest.mark.asyncio
     async def test_sync_directory(self):
         """Sync a local temp dir to remote."""
-        from ssh_remote_mcp.file_ops import ssh_sync_directory
+        from portal_mcp_server.file_ops import ssh_sync_directory
         with tempfile.TemporaryDirectory() as d:
             for i in range(3):
                 with open(os.path.join(d, f"file{i}.txt"), "w") as f:
@@ -178,7 +178,7 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_create_and_exec(self):
         """Create a session, run commands, verify state persists."""
-        from ssh_remote_mcp.session_manager import get_session_manager
+        from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
         sid = await sm.create_session(TEST_HOST_NAME)
         assert sid, "Session ID must not be empty"
@@ -191,7 +191,7 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_env_injection(self):
         """Inject env var into session and read it back."""
-        from ssh_remote_mcp.session_manager import get_session_manager
+        from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
         sid = await sm.create_session(TEST_HOST_NAME)
         sm.set_env(sid, "MCP_TEST_VAR", "hello123")
@@ -203,7 +203,7 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_session_list(self):
         """Session appears in list while active, gone after close."""
-        from ssh_remote_mcp.session_manager import get_session_manager
+        from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
         sid = await sm.create_session(TEST_HOST_NAME)
         sessions = sm.list_sessions()
@@ -217,7 +217,7 @@ class TestPersistentSessions:
     @pytest.mark.asyncio
     async def test_multi_session_isolation(self):
         """Two concurrent sessions maintain independent CWDs."""
-        from ssh_remote_mcp.session_manager import get_session_manager
+        from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
         sid1 = await sm.create_session(TEST_HOST_NAME)
         sid2 = await sm.create_session(TEST_HOST_NAME)
@@ -249,7 +249,7 @@ class TestOrchestration:
     @pytest.mark.asyncio
     async def test_parallel_exec(self):
         """Same command on multiple hosts simultaneously."""
-        from ssh_remote_mcp.orchestrator import ssh_parallel_exec
+        from portal_mcp_server.orchestrator import ssh_parallel_exec
         results = await ssh_parallel_exec(["fleet-01", "fleet-02"], "hostname")
         assert len(results) == 2
         for r in results:
@@ -258,7 +258,7 @@ class TestOrchestration:
     @pytest.mark.asyncio
     async def test_rolling_exec(self):
         """Sequential rolling exec with delay."""
-        from ssh_remote_mcp.orchestrator import ssh_rolling_exec
+        from portal_mcp_server.orchestrator import ssh_rolling_exec
         results = await ssh_rolling_exec(["fleet-01", "fleet-02"], "echo rolling", delay_s=0.1)
         assert len(results) == 2
         for r in results:
@@ -267,7 +267,7 @@ class TestOrchestration:
     @pytest.mark.asyncio
     async def test_group_exec(self):
         """Execute on all hosts with a matching tag."""
-        from ssh_remote_mcp.orchestrator import ssh_exec_on_group
+        from portal_mcp_server.orchestrator import ssh_exec_on_group
         results = await ssh_exec_on_group("fleet", "echo tagged")
         assert len(results) >= 1
         for r in results:
@@ -276,7 +276,7 @@ class TestOrchestration:
     @pytest.mark.asyncio
     async def test_playbook(self):
         """Run a multi-step playbook and verify all steps complete."""
-        from ssh_remote_mcp.orchestrator import run_playbook
+        from portal_mcp_server.orchestrator import run_playbook
         playbook = {
             "name": "test_playbook",
             "on_error": "stop",
@@ -296,7 +296,7 @@ class TestTunnels:
     @pytest.mark.asyncio
     async def test_local_port_forward(self):
         """Open a local tunnel and verify it's tracked."""
-        from ssh_remote_mcp.network_tools import get_tunnel_manager
+        from portal_mcp_server.network_tools import get_tunnel_manager
         tm = get_tunnel_manager()
         result = await tm.open_local_forward(
             TEST_HOST_NAME, local_port=0,
@@ -312,7 +312,7 @@ class TestTunnels:
     @pytest.mark.asyncio
     async def test_socks_proxy(self):
         """Open a SOCKS5 proxy and verify it's tracked."""
-        from ssh_remote_mcp.network_tools import get_tunnel_manager
+        from portal_mcp_server.network_tools import get_tunnel_manager
         tm = get_tunnel_manager()
         result = await tm.open_dynamic_proxy(TEST_HOST_NAME, local_port=0)
         assert "socks5" in result, f"SOCKS proxy failed: {result}"
@@ -322,7 +322,7 @@ class TestTunnels:
     @pytest.mark.asyncio
     async def test_tunnel_lifecycle(self):
         """Full lifecycle: open → list → close → gone."""
-        from ssh_remote_mcp.network_tools import get_tunnel_manager
+        from portal_mcp_server.network_tools import get_tunnel_manager
         tm = get_tunnel_manager()
         r = await tm.open_local_forward(TEST_HOST_NAME, 0, "127.0.0.1", 22)
         tid = r["tunnel_id"]
@@ -341,7 +341,7 @@ class TestSecurity:
 
     def test_command_blocklist(self):
         """Blocked commands are rejected."""
-        from ssh_remote_mcp.security import SecurityPolicy
+        from portal_mcp_server.security import SecurityPolicy
         pol = SecurityPolicy.__new__(SecurityPolicy)
         pol.host_allowlist = []
         pol.command_blocklist = ["rm -rf /"]
@@ -353,7 +353,7 @@ class TestSecurity:
 
     def test_host_allowlist(self):
         """Hosts not in allowlist are rejected."""
-        from ssh_remote_mcp.security import SecurityPolicy
+        from portal_mcp_server.security import SecurityPolicy
         pol = SecurityPolicy.__new__(SecurityPolicy)
         pol.host_allowlist = ["allowed-host"]
         pol.command_blocklist = []

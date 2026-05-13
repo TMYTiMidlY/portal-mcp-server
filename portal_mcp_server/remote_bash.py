@@ -38,7 +38,7 @@ from typing import Dict
 
 from .session_manager import get_session_manager
 
-logger = logging.getLogger("ssh_mcp.remote_bash")
+logger = logging.getLogger("portal_mcp.remote_bash")
 
 # host -> session_id mapping for the agent's "default" session per host
 _HOST_SESSIONS: Dict[str, str] = {}

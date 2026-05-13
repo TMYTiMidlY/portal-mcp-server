@@ -23,7 +23,7 @@ import pytest
 class TestGetLockRace:
     @pytest.mark.asyncio
     async def test_concurrent_get_lock_returns_same_instance(self, tmp_path):
-        from ssh_remote_mcp.connection_manager import ConnectionManager
+        from portal_mcp_server.connection_manager import ConnectionManager
         yml = tmp_path / "hosts.yaml"
         yml.write_text("hosts: {}\n")
         m = ConnectionManager(hosts_yaml=yml)
@@ -41,7 +41,7 @@ class TestGetLockRace:
 
 class TestRemoveHostCleanup:
     def test_removes_registry_lock_and_pool(self, tmp_path):
-        from ssh_remote_mcp.connection_manager import ConnectionManager, PooledConnection
+        from portal_mcp_server.connection_manager import ConnectionManager, PooledConnection
         import time as time_mod
 
         yml = tmp_path / "hosts.yaml"
@@ -78,7 +78,7 @@ class TestRemoteBashPerHostLock:
     def test_distinct_hosts_get_distinct_locks(self):
         # Reset the per-host lock dict so this test is hermetic regardless of
         # earlier suite execution order.
-        from ssh_remote_mcp import remote_bash as rb
+        from portal_mcp_server import remote_bash as rb
         rb._HOST_LOCKS.clear()
         a = rb._lock_for("alpha")
         b = rb._lock_for("beta")
@@ -89,7 +89,7 @@ class TestRemoteBashPerHostLock:
     @pytest.mark.asyncio
     async def test_concurrent_lock_creation_idempotent(self):
         # 50 coroutines racing for the same host all see the same lock.
-        from ssh_remote_mcp import remote_bash as rb
+        from portal_mcp_server import remote_bash as rb
         rb._HOST_LOCKS.clear()
         async def _get():
             return rb._lock_for("h")
@@ -106,7 +106,7 @@ class TestRemoteBashPerHostLock:
         two parallel calls on different hosts must stay well under 0.4 s if
         the locks are correctly per-host.
         """
-        from ssh_remote_mcp import remote_bash as rb
+        from portal_mcp_server import remote_bash as rb
         rb._HOST_SESSIONS.clear()
         rb._HOST_LOCKS.clear()
 

@@ -45,7 +45,7 @@ logging.basicConfig(
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
     handlers=_log_handlers,
 )
-logger = logging.getLogger("ssh_mcp")
+logger = logging.getLogger("portal_mcp")
 
 mcp = FastMCP("portal-mcp-server")
 
@@ -737,7 +737,7 @@ async def portal_bash_status() -> str:
 
 def main() -> None:
     """CLI entrypoint registered as `portal-mcp-server` (and the legacy
-    `ssh-remote-mcp` alias for backward compat with existing .mcp.json)."""
+    `portal-mcp-server` alias for backward compat with existing .mcp.json)."""
     import argparse
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request

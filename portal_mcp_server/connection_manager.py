@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 import asyncssh
 import yaml
 
-logger = logging.getLogger("ssh_mcp.connections")
+logger = logging.getLogger("portal_mcp.connections")
 
 
 @dataclass

@@ -1,4 +1,4 @@
-"""Tests for ``ssh_remote_mcp.remote_text_editor``.
+"""Tests for ``portal_mcp_server.remote_text_editor``.
 
 Test matrix
 -----------
@@ -176,7 +176,7 @@ class FakeConn:
 @pytest.fixture
 def fake_remote(monkeypatch):
     """Patch ConnectionManager so remote_text_editor talks to an in-memory FS."""
-    from ssh_remote_mcp import connection_manager
+    from portal_mcp_server import connection_manager
 
     fs = FakeFS()
     sftps: list[FakeSFTP] = []
@@ -215,7 +215,7 @@ class TestHashAndRead:
     async def test_hash_is_sha256_hex_64(self, fake_remote):
         fs, _, _ = fake_remote
         fs.write("/f", "test content")
-        from ssh_remote_mcp.remote_text_editor import remote_read
+        from portal_mcp_server.remote_text_editor import remote_read
         out = await remote_read("h", "/f")
         assert isinstance(out["file_hash"], str)
         assert len(out["file_hash"]) == 64
@@ -225,7 +225,7 @@ class TestHashAndRead:
     async def test_read_full_file(self, fake_remote):
         fs, _, _ = fake_remote
         fs.write("/f", "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n")
-        from ssh_remote_mcp.remote_text_editor import remote_read
+        from portal_mcp_server.remote_text_editor import remote_read
         out = await remote_read("h", "/f")
         assert out["content"] == "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n"
         assert out["start"] == 1
@@ -236,7 +236,7 @@ class TestHashAndRead:
     async def test_read_range(self, fake_remote):
         fs, _, _ = fake_remote
         fs.write("/f", "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n")
-        from ssh_remote_mcp.remote_text_editor import remote_read
+        from portal_mcp_server.remote_text_editor import remote_read
         out = await remote_read("h", "/f", start=2, end=4)
         assert out["content"] == "Line 2\nLine 3\nLine 4\n"
         assert out["start"] == 2
@@ -244,7 +244,7 @@ class TestHashAndRead:
 
     @pytest.mark.asyncio
     async def test_read_path_validation_blocks_nul(self, fake_remote):
-        from ssh_remote_mcp.remote_text_editor import remote_read
+        from portal_mcp_server.remote_text_editor import remote_read
         with pytest.raises(ValueError):
             await remote_read("h", "/etc/passwd\x00fake")
 
@@ -259,7 +259,7 @@ class TestPatchHappyPath:
         fs, _, _ = fake_remote
         original = "line1\nline2\nline3\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{
@@ -278,7 +278,7 @@ class TestPatchHappyPath:
         fs, _, _ = fake_remote
         original = "a\nb\nc\nd\ne\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[
@@ -301,7 +301,7 @@ class TestPatchErrors:
     async def test_hash_mismatch_returns_current_state(self, fake_remote):
         fs, _, _ = fake_remote
         fs.write("/f", "line1\nline2\nline3\n")
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash="incorrect_hash",
             patches=[{"start": 2, "end": 2, "contents": "X\n", "range_hash": ""}],
@@ -318,7 +318,7 @@ class TestPatchErrors:
         fs, _, _ = fake_remote
         original = "alpha\nbeta\ngamma\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{
@@ -337,7 +337,7 @@ class TestPatchErrors:
         fs, _, _ = fake_remote
         original = "a\nb\nc\nd\ne\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[
@@ -353,7 +353,7 @@ class TestPatchErrors:
         fs, _, _ = fake_remote
         original = "a\nb\nc\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{"start": 99, "end": 99, "contents": "X\n", "range_hash": ""}],
@@ -365,7 +365,7 @@ class TestPatchErrors:
     async def test_invalid_patch_keys(self, fake_remote):
         fs, _, _ = fake_remote
         fs.write("/f", "x\n")
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h("x\n"),
             patches=[{"end": 1, "contents": "y\n"}],  # missing 'start'
@@ -375,7 +375,7 @@ class TestPatchErrors:
 
     @pytest.mark.asyncio
     async def test_empty_patches_list(self, fake_remote):
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch("h", "/f", file_hash="x", patches=[])
         assert res["result"] == "error"
         assert "empty" in res["reason"]
@@ -383,7 +383,7 @@ class TestPatchErrors:
     @pytest.mark.asyncio
     async def test_file_not_found_propagates(self, fake_remote):
         # FS is empty, no /missing
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         with pytest.raises(FileNotFoundError):
             await remote_patch("h", "/missing", file_hash="x",
                                patches=[{"start": 1, "contents": "y\n",
@@ -401,7 +401,7 @@ class TestAtomicWriteFallback:
         state["posix"] = False  # simulate server without posix-rename
         original = "v1\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{"start": 1, "end": 1, "contents": "v2\n",
@@ -416,7 +416,7 @@ class TestConnectionRelease:
     async def test_read_releases_connection(self, fake_remote):
         fs, sftps, state = fake_remote
         fs.write("/f", "hi\n")
-        from ssh_remote_mcp.remote_text_editor import remote_read
+        from portal_mcp_server.remote_text_editor import remote_read
         await remote_read("h", "/f")
         assert state["acquired"] == state["released"] == 1
         assert sftps[-1].exit_calls == 1
@@ -429,7 +429,7 @@ class TestConnectionRelease:
         fs, sftps, state = fake_remote
         original = "a\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{"start": 1, "end": 1, "contents": "b\n",
@@ -461,7 +461,7 @@ class TestAutoNewline:
         fs, _, _ = fake_remote
         original = "line1\nline2\nline3\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{
@@ -481,7 +481,7 @@ class TestAutoNewline:
         fs, _, _ = fake_remote
         original = "line1\nline2\nline3\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{
@@ -501,7 +501,7 @@ class TestAutoNewline:
         fs, _, _ = fake_remote
         original = "line1\nline2"  # no trailing newline on file either
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{
@@ -519,7 +519,7 @@ class TestAutoNewline:
         fs, _, _ = fake_remote
         original = "a\nb\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{"start": 1, "end": 1, "contents": "AA\n",
@@ -534,7 +534,7 @@ class TestAutoNewline:
         fs, _, _ = fake_remote
         original = "a\nb\nc\n"
         fs.write("/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
         res = await remote_patch(
             "h", "/f", file_hash=_h(original),
             patches=[{"start": 2, "end": 2, "contents": "",
@@ -561,7 +561,7 @@ class TestOrphanTmpCleanup:
         fs, _, _ = fake_remote
         original = "x\n"
         fs.write("/dir/f", original)
-        from ssh_remote_mcp.remote_text_editor import remote_patch
+        from portal_mcp_server.remote_text_editor import remote_patch
 
         # Trigger fail-on-write so the tmp file is created (open succeeds)
         # then the write itself raises ConnectionError.
@@ -585,7 +585,7 @@ class TestOrphanTmpCleanup:
         fs.write("/dir/realfile.txt", "data\n", mtime=1000.0)
         fs.write("/dir/realfile.txt.mcp_tmp.aaaaaaaaaaaa", "garbage", mtime=100.0)
 
-        from ssh_remote_mcp.remote_text_editor import cleanup_orphan_tmps
+        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
         res = await cleanup_orphan_tmps("h", "/dir", max_age_s=0)
         assert res["scanned"] == 1
         assert res["removed"] == ["/dir/realfile.txt.mcp_tmp.aaaaaaaaaaaa"]
@@ -601,7 +601,7 @@ class TestOrphanTmpCleanup:
         # A "fresh" orphan from a possibly-still-running edit.
         fresh_mtime = time_mod.time() - 5  # 5 seconds old
         fs.write("/dir/file.mcp_tmp.bbbbbbbbbbbb", "garbage", mtime=fresh_mtime)
-        from ssh_remote_mcp.remote_text_editor import cleanup_orphan_tmps
+        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
         res = await cleanup_orphan_tmps("h", "/dir", max_age_s=3600)
         assert res["scanned"] == 1
         assert res["removed"] == []
@@ -616,7 +616,7 @@ class TestOrphanTmpCleanup:
         fs.write("/dir/foo.mcp_tmp.GGGGGGGGGGGG", "data", mtime=100)  # not hex
         fs.write("/dir/foo.tmp.aaaaaaaaaaaa", "data", mtime=100)      # missing .mcp_
         fs.write("/dir/regular.txt", "data", mtime=100)
-        from ssh_remote_mcp.remote_text_editor import cleanup_orphan_tmps
+        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
         res = await cleanup_orphan_tmps("h", "/dir", max_age_s=0)
         assert res["scanned"] == 0
         assert res["removed"] == []
@@ -625,6 +625,6 @@ class TestOrphanTmpCleanup:
 
     @pytest.mark.asyncio
     async def test_cleanup_path_validation(self, fake_remote):
-        from ssh_remote_mcp.remote_text_editor import cleanup_orphan_tmps
+        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
         with pytest.raises(ValueError):
             await cleanup_orphan_tmps("h", "/dir\x00bad", max_age_s=0)

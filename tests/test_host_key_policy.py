@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from ssh_remote_mcp.connection_manager import ConnectionManager, HostConfig
+from portal_mcp_server.connection_manager import ConnectionManager, HostConfig
 
 
 @pytest.fixture

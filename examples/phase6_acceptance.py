@@ -1,20 +1,20 @@
 """End-to-end acceptance test (Phase 6).
 
 Performs the 7-step demo from plan.md against host '1810' (must be a Host
-alias in ~/.ssh/config). All writes are confined to /tmp/ssh-remote-mcp-test/
+alias in ~/.ssh/config). All writes are confined to /tmp/portal-mcp-server-test/
 on the remote. Cleans up at the end.
 """
 import asyncio
 import json
 import sys
 
-from ssh_remote_mcp.connection_manager import get_manager
-from ssh_remote_mcp.remote_bash import remote_bash, remote_bash_close
-from ssh_remote_mcp.remote_search import remote_grep, remote_glob
-from ssh_remote_mcp.remote_text_editor import remote_read, remote_patch
+from portal_mcp_server.connection_manager import get_manager
+from portal_mcp_server.remote_bash import remote_bash, remote_bash_close
+from portal_mcp_server.remote_search import remote_grep, remote_glob
+from portal_mcp_server.remote_text_editor import remote_read, remote_patch
 
 HOST = "1810"
-SANDBOX = "/tmp/ssh-remote-mcp-test"
+SANDBOX = "/tmp/portal-mcp-server-test"
 SAMPLE = f"{SANDBOX}/runner.py"
 SOURCE = "~/SU2-Quantum/tgv/runner.py"
 SU2_ROOT = "~/SU2-Quantum"

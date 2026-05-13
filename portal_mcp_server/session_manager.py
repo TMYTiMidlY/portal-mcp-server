@@ -13,7 +13,7 @@ import asyncssh
 from .connection_manager import get_manager
 from .safety import quote_shell, validate_env_dict, validate_env_key
 
-logger = logging.getLogger("ssh_mcp.sessions")
+logger = logging.getLogger("portal_mcp.sessions")
 OUTPUT_BUFFER_LINES = 10000
 
 

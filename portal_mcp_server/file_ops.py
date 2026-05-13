@@ -31,7 +31,7 @@ import asyncssh
 from .connection_manager import get_manager
 from .safety import validate_remote_path
 
-logger = logging.getLogger("ssh_mcp.files")
+logger = logging.getLogger("portal_mcp.files")
 
 
 @asynccontextmanager

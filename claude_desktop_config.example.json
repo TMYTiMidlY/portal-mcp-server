@@ -5,7 +5,7 @@
       "args": [
         "--from",
         "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "ssh-remote-mcp",
+        "portal-mcp-server",
         "--transport",
         "stdio"
       ],

@@ -10,7 +10,7 @@ from .shell_engine import ssh_exec, ssh_exec_batch
 from .connection_manager import get_manager
 from .audit import audit_log
 
-logger = logging.getLogger("ssh_mcp.orchestrator")
+logger = logging.getLogger("portal_mcp.orchestrator")
 
 
 async def ssh_parallel_exec(host_names: list[str], command: str,

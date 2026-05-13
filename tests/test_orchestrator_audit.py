@@ -21,8 +21,8 @@ import pytest
 class TestPlaybookOnGroupFailureIsolation:
     @pytest.mark.asyncio
     async def test_failing_host_does_not_abort_others(self, monkeypatch, tmp_path):
-        from ssh_remote_mcp import orchestrator
-        from ssh_remote_mcp.connection_manager import ConnectionManager
+        from portal_mcp_server import orchestrator
+        from portal_mcp_server.connection_manager import ConnectionManager
 
         # Build a manager with three hosts in the same tag.
         yml = tmp_path / "hosts.yaml"
@@ -59,7 +59,7 @@ class TestPlaybookOnGroupFailureIsolation:
 
 class TestAuditFailClosed:
     def test_default_closed_raises_on_write_error(self, monkeypatch):
-        from ssh_remote_mcp import audit
+        from portal_mcp_server import audit
         monkeypatch.delenv(audit._FAIL_OPEN_ENV, raising=False)
         # Force the file write to fail.
         import builtins
@@ -74,7 +74,7 @@ class TestAuditFailClosed:
             audit.audit_log("h", "cmd", "ok")
 
     def test_fail_open_swallows_write_error(self, monkeypatch, caplog):
-        from ssh_remote_mcp import audit
+        from portal_mcp_server import audit
         monkeypatch.setenv(audit._FAIL_OPEN_ENV, "1")
         import builtins
         real_open = builtins.open

@@ -26,7 +26,7 @@ _log_dir = default_log_dir()
 _log_dir.mkdir(parents=True, exist_ok=True)
 _audit_file = _log_dir / "audit.jsonl"
 
-logger = logging.getLogger("ssh_mcp.audit")
+logger = logging.getLogger("portal_mcp.audit")
 
 _FAIL_OPEN_ENV = "SSH_MCP_AUDIT_FAIL_OPEN"
 

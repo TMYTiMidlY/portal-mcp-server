@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from .connection_manager import get_manager
 
-logger = logging.getLogger("ssh_mcp.remote_search")
+logger = logging.getLogger("portal_mcp.remote_search")
 
 # Cache: host -> {"rg": bool, "find": bool}
 _TOOL_CACHE: Dict[str, Dict[str, bool]] = {}

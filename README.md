@@ -130,7 +130,7 @@ portal-mcp-server 的 SSH 引擎用 [asyncssh](https://github.com/ronf/asyncssh)
 要在 shell 里手动跑一下试探：
 
 ```bash
-uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git ssh-remote-mcp --help
+uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
 ```
 
 ### 给开发者（要改代码 / 跑测试）
@@ -177,7 +177,7 @@ Copilot CLI 原生支持工作区级 `.mcp.json`（与 Claude Code / Cursor 同�
       "args": [
         "--from",
         "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "ssh-remote-mcp"
+        "portal-mcp-server"
       ]
     }
   }
@@ -207,7 +207,7 @@ VS Code 用不同的 schema（顶层 key 是 `servers` 不是 `mcpServers`）：
       "args": [
         "--from",
         "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "ssh-remote-mcp"
+        "portal-mcp-server"
       ]
     }
   }
@@ -226,9 +226,9 @@ VS Code 用不同的 schema（顶层 key 是 `servers` 不是 `mcpServers`）：
 
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
-| `SSH_HOSTS_YAML` | 主机注册 YAML | `./config/hosts.yaml` 若存在，否则 `$XDG_CONFIG_HOME/ssh-remote-mcp/hosts.yaml` |
-| `SSH_POLICIES_YAML` | 安全策略 YAML | `./config/policies.yaml` 若存在，否则 `$XDG_CONFIG_HOME/ssh-remote-mcp/policies.yaml` |
-| `SSH_MCP_LOG_DIR` | audit + server log 目录 | `./logs/` 若存在，否则 `$XDG_STATE_HOME/ssh-remote-mcp/logs/` |
+| `SSH_HOSTS_YAML` | 主机注册 YAML | `./config/hosts.yaml` 若存在，否则 `$XDG_CONFIG_HOME/portal-mcp-server/hosts.yaml` |
+| `SSH_POLICIES_YAML` | 安全策略 YAML | `./config/policies.yaml` 若存在，否则 `$XDG_CONFIG_HOME/portal-mcp-server/policies.yaml` |
+| `SSH_MCP_LOG_DIR` | audit + server log 目录 | `./logs/` 若存在，否则 `$XDG_STATE_HOME/portal-mcp-server/logs/` |
 | `SSH_MCP_AUDIT_FAIL_OPEN` | 设 `1` → audit 写盘失败时仅 warning 并继续；默认（未设）→ **fail-closed**，audit 写不进则操作 raise 中止 | _(unset)_ |
 | `MCP_AUTH_TOKEN` | HTTP transport 的 Bearer token | _(none)_ |
 
@@ -287,17 +287,17 @@ SSH_MCP_AUDIT_FAIL_OPEN=1 \
     python tests/live_smoke.py
 ```
 
-⚠️ 它会在远端 `/tmp/ssh-remote-mcp-smoke-<pid>.txt` 写一次再删除——只动 `/tmp`。
+⚠️ 它会在远端 `/tmp/portal-mcp-server-smoke-<pid>.txt` 写一次再删除——只动 `/tmp`。
 
 ---
 
 ## ⚠️ "我改了代码，但 agent 调 MCP 时为什么还是旧行为？"
 
-`uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git ssh-remote-mcp` 在 MCP client 启动那一刻去 GitHub 拉本仓库 main 的最新 commit。所以：
+`uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server` 在 MCP client 启动那一刻去 GitHub 拉本仓库 main 的最新 commit。所以：
 
 | 你在哪改 | agent 的 MCP server 看得见吗 |
 |---|---|
-| 本地工作树 (`/home/.../ssh-remote-mcp/`) | ❌ 看不见。uvx 走的是远端 git，不是本地路径 |
+| 本地工作树 (`/home/.../portal-mcp-server/`) | ❌ 看不见。uvx 走的是远端 git，不是本地路径 |
 | 已 commit 但没 push | ❌ 看不见 |
 | commit + push 到 `TMYTiMidlY/portal-mcp-server` main | ✅ 但需要重启 MCP client（uvx 启动时 fetch；同一进程内不会重拉） |
 
@@ -307,7 +307,7 @@ SSH_MCP_AUDIT_FAIL_OPEN=1 \
 # 必须 cd 到一个非项目目录再跑，否则 uvx 会优先认本地工作树
 cd /tmp && uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git \
   --refresh python -c "
-import ssh_remote_mcp.audit as a
+import portal_mcp_server.audit as a
 print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
       'NOT SET — running an OLD/published version'))
 "
@@ -318,7 +318,7 @@ print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
 
 本地调试想让 agent 不 push 也能用上改动，把 `mcp-config.example.json` 里的 `args` 临时改成：
 ```json
-"args": ["--from", "/home/agony/TiMidlY-projects/portal-mcp-server", "ssh-remote-mcp"]
+"args": ["--from", "/home/agony/TiMidlY-projects/portal-mcp-server", "portal-mcp-server"]
 ```
 （路径必须绝对）。这样 uvx 从本地工作树 install，每次重启 MCP client 都会拿到最新代码。**别把这条本地路径 commit 进 example**。
 

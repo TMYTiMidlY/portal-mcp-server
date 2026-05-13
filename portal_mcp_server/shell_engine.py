@@ -30,7 +30,7 @@ from .safety import (
     validate_interpreter,
 )
 
-logger = logging.getLogger("ssh_mcp.shell")
+logger = logging.getLogger("portal_mcp.shell")
 
 
 async def ssh_exec(host_name: str, command: str, timeout: int = 60,

@@ -1,4 +1,4 @@
-"""Unit tests for ssh_remote_mcp.safety.
+"""Unit tests for portal_mcp_server.safety.
 
 These tests cover only the validators / helpers in safety.py and require
 no external SSH server.
@@ -15,7 +15,7 @@ Mapped to the original audit findings:
 """
 import pytest
 
-from ssh_remote_mcp.safety import (
+from portal_mcp_server.safety import (
     build_cwd_prefix,
     quote_shell,
     validate_env_dict,

@@ -51,7 +51,7 @@ import asyncssh
 from .connection_manager import get_manager
 from .safety import validate_remote_path
 
-logger = logging.getLogger("ssh_mcp.remote_editor")
+logger = logging.getLogger("portal_mcp.remote_editor")
 
 # A stable, recognizable suffix so a janitor can later identify orphans we
 # left behind (e.g. when a connection died after `sftp.open(tmp)` but before

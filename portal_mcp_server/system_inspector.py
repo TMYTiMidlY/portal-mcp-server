@@ -5,7 +5,7 @@ import asyncio
 import logging
 from .shell_engine import ssh_exec
 
-logger = logging.getLogger("ssh_mcp.system")
+logger = logging.getLogger("portal_mcp.system")
 
 
 async def ssh_system_info(host_name: str) -> dict:

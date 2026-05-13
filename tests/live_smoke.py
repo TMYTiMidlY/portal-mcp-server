@@ -50,7 +50,7 @@ async def main() -> int:
             log_buffer.append(rec)
 
     cap = _Capture(level=logging.ERROR)
-    logging.getLogger("ssh_mcp.connections").addHandler(cap)
+    logging.getLogger("portal_mcp.connections").addHandler(cap)
 
     with tempfile.TemporaryDirectory() as td:
         yml = Path(td) / "hosts.yaml"
@@ -61,7 +61,7 @@ async def main() -> int:
             "    user: deploy\n"
             "    password: super-secret\n"
         )
-        from ssh_remote_mcp.connection_manager import ConnectionManager
+        from portal_mcp_server.connection_manager import ConnectionManager
         m = ConnectionManager(hosts_yaml=yml)
         cfg = m._registry["legacy"]
         if hasattr(cfg, "password"):
@@ -77,7 +77,7 @@ async def main() -> int:
 
     # ── (2) Real ssh_exec round-trip against 1810 ─────────────────────────
     sect(f"2. ssh_exec round-trip against {TEST_USER}@{TEST_HOST}:{TEST_PORT}")
-    from ssh_remote_mcp.connection_manager import get_manager
+    from portal_mcp_server.connection_manager import get_manager
     mgr = get_manager()
     # Use a deterministic alias so subsequent steps can find it.
     mgr.register_host(
@@ -88,7 +88,7 @@ async def main() -> int:
         key=TEST_KEY if os.path.exists(TEST_KEY) else None,
         tags=["smoke-fleet"],
     )
-    from ssh_remote_mcp.shell_engine import ssh_exec
+    from portal_mcp_server.shell_engine import ssh_exec
     res = await ssh_exec("live-1810", "echo hello-from-smoke && hostname")
     if res.get("exit_code") != 0:
         failures.append(f"ssh_exec failed: {res}")
@@ -100,7 +100,7 @@ async def main() -> int:
     # ── (3) Policy gate on multi-host orchestration ────────────────────────
     sect("3. Multi-host policy gate (rejects blocked command + disallowed host)")
     # Install a restrictive policy programmatically.
-    from ssh_remote_mcp import security, cli
+    from portal_mcp_server import security, cli
     with tempfile.TemporaryDirectory() as td:
         pol_yml = Path(td) / "policies.yaml"
         pol_yml.write_text(
@@ -243,7 +243,7 @@ async def main() -> int:
     await cli.portal_bash("live-1810-audit", "echo audit-ok", timeout=5)
     await cli.portal_bash_close("live-1810-audit")
 
-    from ssh_remote_mcp.audit import _audit_file
+    from portal_mcp_server.audit import _audit_file
     if not _audit_file.exists():
         failures.append(f"audit file missing: {_audit_file}")
     else:

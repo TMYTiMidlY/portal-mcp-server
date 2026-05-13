@@ -1,10 +1,10 @@
-"""Shared pytest configuration / fixtures for ssh-remote-mcp.
+"""Shared pytest configuration / fixtures for portal-mcp-server.
 
 Goals
 -----
 1. Register the ``ssh`` marker so the existing live-SSH tests can be skipped
    in environments without a reachable SSH server (CI, sandbox).
-2. Auto-skip the live tests in ``test_ssh_mcp.py`` if ``SSH_TEST_LIVE`` is
+2. Auto-skip the live tests in ``test_live_ssh.py`` if ``SSH_TEST_LIVE`` is
    not set — they require a real SSH server and credentials.
 3. Reset module-level singletons between tests so independent tests stay
    independent (the previous suite mutated the global ConnectionManager
@@ -32,11 +32,11 @@ def pytest_collection_modifyitems(config, items):
         reason="live SSH test — set SSH_TEST_LIVE=1 to run"
     )
     for item in items:
-        # Anything in the test_ssh_mcp.py module that exercises a real SSH
+        # Anything in the test_live_ssh.py module that exercises a real SSH
         # connection — i.e. all classes EXCEPT TestSecurity which is pure
         # in-memory policy.
         path = str(item.fspath)
-        if path.endswith("test_ssh_mcp.py"):
+        if path.endswith("test_live_ssh.py"):
             cls_name = getattr(item.parent, "name", "")
             if cls_name != "TestSecurity":
                 item.add_marker(skip)
@@ -50,7 +50,7 @@ def _reset_singletons():
     yield
     # Post-test cleanup: clear anything we know to be a process-wide cache.
     try:
-        from ssh_remote_mcp import remote_bash as rb
+        from portal_mcp_server import remote_bash as rb
         rb._HOST_SESSIONS.clear()
         rb._HOST_LOCKS.clear()
     except Exception:

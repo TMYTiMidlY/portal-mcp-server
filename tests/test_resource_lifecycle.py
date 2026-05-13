@@ -105,7 +105,7 @@ class Recorder:
 @pytest.fixture
 def recorder(monkeypatch):
     """Patch ConnectionManager so every public file_op call goes to a counter."""
-    from ssh_remote_mcp import connection_manager
+    from portal_mcp_server import connection_manager
 
     rec = Recorder()
 
@@ -132,7 +132,7 @@ def recorder(monkeypatch):
 class TestFileOpsHappyPath:
     @pytest.mark.asyncio
     async def test_upload_balances(self, recorder, tmp_path):
-        from ssh_remote_mcp.file_ops import ssh_upload_file
+        from portal_mcp_server.file_ops import ssh_upload_file
         local = tmp_path / "x.txt"
         local.write_text("hi")
         await ssh_upload_file("h", str(local), "/tmp/x.txt")
@@ -142,31 +142,31 @@ class TestFileOpsHappyPath:
 
     @pytest.mark.asyncio
     async def test_download_balances(self, recorder):
-        from ssh_remote_mcp.file_ops import ssh_download_file
+        from portal_mcp_server.file_ops import ssh_download_file
         await ssh_download_file("h", "/tmp/x.txt", "/dev/null")
         assert recorder.conn_balance == 0
 
     @pytest.mark.asyncio
     async def test_read_balances(self, recorder):
-        from ssh_remote_mcp.file_ops import ssh_read_file
+        from portal_mcp_server.file_ops import ssh_read_file
         await ssh_read_file("h", "/tmp/x.txt")
         assert recorder.conn_balance == 0
 
     @pytest.mark.asyncio
     async def test_write_balances(self, recorder):
-        from ssh_remote_mcp.file_ops import ssh_write_file
+        from portal_mcp_server.file_ops import ssh_write_file
         await ssh_write_file("h", "/tmp/x.txt", "data")
         assert recorder.conn_balance == 0
 
     @pytest.mark.asyncio
     async def test_delete_balances(self, recorder):
-        from ssh_remote_mcp.file_ops import ssh_delete_file
+        from portal_mcp_server.file_ops import ssh_delete_file
         await ssh_delete_file("h", "/tmp/x.txt")
         assert recorder.conn_balance == 0
 
     @pytest.mark.asyncio
     async def test_list_balances(self, recorder):
-        from ssh_remote_mcp.file_ops import ssh_list_directory
+        from portal_mcp_server.file_ops import ssh_list_directory
         await ssh_list_directory("h", "/tmp")
         assert recorder.conn_balance == 0
 
@@ -179,7 +179,7 @@ class TestFileOpsExceptionPath:
     @pytest.mark.asyncio
     async def test_upload_failure_releases(self, monkeypatch, tmp_path):
         # Start a fresh recorder in fail-inside mode.
-        from ssh_remote_mcp import connection_manager
+        from portal_mcp_server import connection_manager
         rec = Recorder(fail_inside=True)
 
         async def fake_get(self, host_name):
@@ -192,7 +192,7 @@ class TestFileOpsExceptionPath:
         monkeypatch.setattr(connection_manager.ConnectionManager,
                             "release_connection", fake_release)
 
-        from ssh_remote_mcp.file_ops import ssh_upload_file
+        from portal_mcp_server.file_ops import ssh_upload_file
         local = tmp_path / "x.txt"
         local.write_text("hi")
         out = await ssh_upload_file("h", str(local), "/tmp/x.txt")
@@ -208,14 +208,14 @@ class TestFileOpsExceptionPath:
 class TestPathValidationShortCircuits:
     @pytest.mark.asyncio
     async def test_nul_in_remote_path_rejected_no_connection(self, recorder):
-        from ssh_remote_mcp.file_ops import ssh_read_file
+        from portal_mcp_server.file_ops import ssh_read_file
         out = await ssh_read_file("h", "/etc/passwd\x00trick")
         assert "Invalid remote_path" in out
         assert recorder.connection_acquired == 0
 
     @pytest.mark.asyncio
     async def test_empty_path_rejected(self, recorder):
-        from ssh_remote_mcp.file_ops import ssh_write_file
+        from portal_mcp_server.file_ops import ssh_write_file
         out = await ssh_write_file("h", "", "data")
         assert "Invalid remote_path" in out
         assert recorder.connection_acquired == 0

@@ -12,7 +12,7 @@ from typing import Optional
 
 import yaml
 
-logger = logging.getLogger("ssh_mcp.security")
+logger = logging.getLogger("portal_mcp.security")
 
 
 class SecurityPolicy:

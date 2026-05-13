@@ -11,7 +11,7 @@ from typing import Optional
 import asyncssh
 from .connection_manager import get_manager
 
-logger = logging.getLogger("ssh_mcp.network")
+logger = logging.getLogger("portal_mcp.network")
 
 
 @dataclass

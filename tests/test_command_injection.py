@@ -35,7 +35,7 @@ class DummyConn:
 @pytest.fixture
 def dummy_conn(monkeypatch):
     """Replace the connection pool with a recorder. Returns the recorder."""
-    from ssh_remote_mcp import connection_manager
+    from portal_mcp_server import connection_manager
 
     conn = DummyConn()
 
@@ -81,7 +81,7 @@ def _assert_no_unquoted_metas(payload: str, payload_pieces: list[str]):
 class TestCwdInjection:
     @pytest.mark.asyncio
     async def test_normal_cwd_quoted(self, dummy_conn):
-        from ssh_remote_mcp.shell_engine import ssh_exec
+        from portal_mcp_server.shell_engine import ssh_exec
         await ssh_exec("h", "ls", cwd="/var/log")
         cmd, _ = dummy_conn.calls[-1]
         assert cmd == "cd /var/log && ls"
@@ -90,7 +90,7 @@ class TestCwdInjection:
     async def test_metachar_cwd_neutralized(self, dummy_conn):
         # BEFORE the fix this produced:  cd /tmp; rm -rf / && id
         # which would have run `rm -rf /` as a separate command.
-        from ssh_remote_mcp.shell_engine import ssh_exec
+        from portal_mcp_server.shell_engine import ssh_exec
         await ssh_exec("h", "id", cwd="/tmp; rm -rf /")
         cmd, _ = dummy_conn.calls[-1]
         _assert_no_unquoted_metas(cmd, ["; rm -rf /", "&& rm"])
@@ -99,7 +99,7 @@ class TestCwdInjection:
 
     @pytest.mark.asyncio
     async def test_command_substitution_cwd_neutralized(self, dummy_conn):
-        from ssh_remote_mcp.shell_engine import ssh_exec
+        from portal_mcp_server.shell_engine import ssh_exec
         await ssh_exec("h", "id", cwd="$(reboot)")
         cmd, _ = dummy_conn.calls[-1]
         # The dollar-sign / parens must be inside single quotes.
@@ -107,7 +107,7 @@ class TestCwdInjection:
 
     @pytest.mark.asyncio
     async def test_nul_in_cwd_rejected_no_exec(self, dummy_conn):
-        from ssh_remote_mcp.shell_engine import ssh_exec
+        from portal_mcp_server.shell_engine import ssh_exec
         out = await ssh_exec("h", "id", cwd="/tmp\x00/etc")
         assert "Invalid input" in out["error"]
         assert dummy_conn.calls == []  # we never reached conn.run
@@ -125,7 +125,7 @@ class TestEnvInjection:
         # which the remote shell *might* still expand depending on quoting.
         # AFTER: env is passed through asyncssh's env channel — no shell
         # interpolation possible.
-        from ssh_remote_mcp.shell_engine import ssh_exec_with_env
+        from portal_mcp_server.shell_engine import ssh_exec_with_env
         await ssh_exec_with_env("h", "id", {"FOO": "$(reboot)"})
         cmd, env = dummy_conn.calls[-1]
         assert cmd == "id"  # no `env FOO=...` prefix anymore
@@ -133,14 +133,14 @@ class TestEnvInjection:
 
     @pytest.mark.asyncio
     async def test_bad_env_key_rejected_no_exec(self, dummy_conn):
-        from ssh_remote_mcp.shell_engine import ssh_exec_with_env
+        from portal_mcp_server.shell_engine import ssh_exec_with_env
         out = await ssh_exec_with_env("h", "id", {"BAD KEY": "x"})
         assert "Invalid input" in out["error"]
         assert dummy_conn.calls == []
 
     @pytest.mark.asyncio
     async def test_nul_in_env_value_rejected(self, dummy_conn):
-        from ssh_remote_mcp.shell_engine import ssh_exec_with_env
+        from portal_mcp_server.shell_engine import ssh_exec_with_env
         out = await ssh_exec_with_env("h", "id", {"FOO": "x\x00y"})
         assert "Invalid input" in out["error"]
         assert dummy_conn.calls == []
@@ -153,7 +153,7 @@ class TestEnvInjection:
 class TestScriptInjection:
     @pytest.mark.asyncio
     async def test_unknown_interpreter_rejected(self, dummy_conn):
-        from ssh_remote_mcp.shell_engine import ssh_exec_script
+        from portal_mcp_server.shell_engine import ssh_exec_script
         out = await ssh_exec_script("h", "echo hi", interpreter="bash; reboot")
         assert "Invalid interpreter" in out["error"]
         # Must not have opened SFTP / written anything
@@ -161,7 +161,7 @@ class TestScriptInjection:
 
     @pytest.mark.asyncio
     async def test_path_traversal_interpreter_rejected(self, dummy_conn):
-        from ssh_remote_mcp.shell_engine import ssh_exec_script
+        from portal_mcp_server.shell_engine import ssh_exec_script
         out = await ssh_exec_script("h", "echo hi", interpreter="../bash")
         assert "Invalid interpreter" in out["error"]
 
@@ -173,21 +173,21 @@ class TestScriptInjection:
 class TestKillInjection:
     @pytest.mark.asyncio
     async def test_signal_injection_rejected(self, dummy_conn):
-        from ssh_remote_mcp.process_manager import ssh_kill_process
+        from portal_mcp_server.process_manager import ssh_kill_process
         out = await ssh_kill_process("h", 123, "TERM; rm -rf /")
         assert "rejected" in out
         assert dummy_conn.calls == []
 
     @pytest.mark.asyncio
     async def test_negative_pid_rejected(self, dummy_conn):
-        from ssh_remote_mcp.process_manager import ssh_kill_process
+        from portal_mcp_server.process_manager import ssh_kill_process
         out = await ssh_kill_process("h", -1, "TERM")
         assert "rejected" in out
         assert dummy_conn.calls == []
 
     @pytest.mark.asyncio
     async def test_normal_kill_call(self, dummy_conn):
-        from ssh_remote_mcp.process_manager import ssh_kill_process
+        from portal_mcp_server.process_manager import ssh_kill_process
         await ssh_kill_process("h", 1234, "term")
         cmd, _ = dummy_conn.calls[-1]
         assert cmd == "kill -TERM 1234"
@@ -200,7 +200,7 @@ class TestKillInjection:
 class TestBackgroundProcessInjection:
     @pytest.mark.asyncio
     async def test_log_file_quoted(self, dummy_conn):
-        from ssh_remote_mcp.process_manager import ssh_background_process
+        from portal_mcp_server.process_manager import ssh_background_process
         # A log_file with a space + redirect would otherwise re-direct
         # stderr to the wrong place.
         await ssh_background_process(
@@ -216,7 +216,7 @@ class TestBackgroundProcessInjection:
 
 class TestSessionEnvInjection:
     def test_bad_env_key_rejected(self):
-        from ssh_remote_mcp.session_manager import SessionManager, ShellSession
+        from portal_mcp_server.session_manager import SessionManager, ShellSession
 
         sm = SessionManager()
 
@@ -241,7 +241,7 @@ class TestSessionEnvInjection:
         assert s.process.stdin.writes == []
 
     def test_value_with_metachars_quoted(self):
-        from ssh_remote_mcp.session_manager import SessionManager, ShellSession
+        from portal_mcp_server.session_manager import SessionManager, ShellSession
 
         sm = SessionManager()
 
