@@ -19,6 +19,24 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 ---
 
+## Table of contents
+
+- [Overview](#overview)
+- [Highlights](#highlights)
+- [Tools](#tools)
+- [Design notes](#design-notes)
+- [Install](#install)
+- [Client integration](#client-integration)
+- [Configuration](#configuration)
+- [Authentication](#authentication)
+- [Security](#security)
+- [Testing](#testing)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [License & attribution](#license--attribution)
+
+---
+
 ## Overview
 
 `portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 18-tool surface:
@@ -155,7 +173,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
-pytest                        # 144 passed, 22 skipped
+pytest                        # 157 passed, 22 skipped
 ```
 
 If you'd rather not use uv, plain pip editable install works:
@@ -261,11 +279,77 @@ VS Code uses a different schema (top-level key is `servers`, not `mcpServers`). 
 
 `config/hosts.example.yaml` is the schema template. **`hosts.yaml` contains real credentials and is in `.gitignore` — never commit it.**
 
+## Authentication
+
+> Password-auth users start here. Key-auth users skip to [SSH keys (preferred)](#ssh-keys-preferred).
+
+### SSH keys (preferred)
+
+Use ed25519:
+
+```bash
+ssh-keygen -t ed25519 -C "you@example.com"
+ssh-copy-id -i ~/.ssh/id_ed25519.pub user@your-host
+```
+
+The same key works with GitHub — see the official guides: [Generating a new SSH key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent) and [Adding a new SSH key to your GitHub account](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account).
+
+### Encrypted private keys: ssh-agent
+
+Unlock once, reuse for the session — asyncssh picks the unlocked key up via `$SSH_AUTH_SOCK` automatically:
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519        # passphrase prompted once
+```
+
+For headless / CI environments where ssh-agent is impractical, configure `passphrase_command:` in `hosts.yaml` (see below).
+
+### Password auth: opt-in via `password_command`
+
+Provided for legacy hosts that cannot be re-keyed. Two non-negotiable rules:
+
+1. **Never** write `password: <plaintext>` in `hosts.yaml` — startup logs an ERROR and drops the field.
+2. **Never** flow a password through an MCP tool — `portal_host` has no password parameter, so credentials cannot land in LLM tool-call traces.
+
+Configure with `auth: password` plus a shell command that prints the password to stdout — same pattern as Borg's `BORG_PASSCOMMAND`, restic's `RESTIC_PASSWORD_COMMAND`, and msmtp's `passwordeval`:
+
+```yaml
+hosts:
+  legacy-host:
+    host: 10.0.0.40
+    user: admin
+    auth: password
+    # CI / env-var pattern (GitHub Secrets, Vault inject into env, then read):
+    password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
+    # Or pull from a password manager:
+    # password_command: pass show ssh/legacy-host
+    # password_command: bw get password legacy-host
+    # password_command: op read "op://Private/legacy-host/password"
+```
+
+Runtime behaviour: the command runs once per new connection (the pool reuses connections, so it triggers rarely), with a 10-second timeout, exactly one trailing newline stripped, stderr never logged (leak defence), and non-zero exit / empty output / non-UTF-8 output all hard-failing. Design rationale (why `shell=True`, why `client_keys=[]` is forced, why stderr never reaches the logs, …) lives in **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**.
+
+### Encrypted-key passphrases: `passphrase_command`
+
+The same mechanism, applied to private-key passphrases:
+
+```yaml
+hosts:
+  encrypted-key-host:
+    host: 10.0.0.30
+    user: deploy
+    key: ~/.ssh/encrypted_key
+    passphrase_command: pass show ssh/encrypted_key
+```
+
+Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphrase_command:` only in headless / CI environments.
+
 ## Security
 
 - **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).
 - **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate limit; every state-changing tool runs through `_gate` with no side doors (`portal_host(register)` gates against the target IP, not the alias; `portal_tunnel_close` is gated; multi-host gates are two-phase).
-- **Authentication**: SSH keys only — `HostConfig` has no `password` field; stale `password:` keys in `hosts.yaml` are logged at ERROR and ignored at startup.
+- **Authentication**: SSH keys are the default and recommended path; password auth is supported but only via `password_command` in `hosts.yaml`, never exposed through any MCP tool — config in [Authentication](#authentication), security design in [`SECURITY.md` § Authentication](./SECURITY.md#authentication).
 - **Audit**: every state-changing operation is appended to `logs/audit.jsonl`; fail-closed by default (`SSH_MCP_AUDIT_FAIL_OPEN=1` switches to fail-open).
 - **Hash-protected edits**: `portal_read` + `portal_patch` use SHA-256 + per-range hashes + atomic `posix_rename` + post-write rehash to refuse concurrent overwrites.
 
@@ -273,20 +357,21 @@ The full threat model, layer-by-layer defences, operator hygiene, known limitati
 
 Vulnerability disclosure: do **not** open a public issue. Use [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new) instead. Targets: acknowledgement within 48 hours, initial assessment within 7 days, resolution within 30 days for critical issues.
 
+
 ## Testing
 
 ### Unit + security (no real SSH required)
 
 ```bash
 pytest tests/ -v
-# 144 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
+# 157 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
 ```
 
-Coverage: command-injection regression, safety validators, hash-protected editor, concurrency, resource lifecycle, multi-host policy enforcement, no-password-auth invariants, audit fail mode.
+Coverage: command-injection regression, safety validators, hash-protected editor, concurrency, resource lifecycle, multi-host policy enforcement, password_command / passphrase_command safety invariants, audit fail mode.
 
 ### End-to-end live smoke
 
-`tests/live_smoke.py` imports the local working tree and drives a series of real SSH actions: stale `password:` handling in `hosts.yaml`, basic `ssh_exec`, `portal_multi_exec(mode="parallel", group_tag=...)` against real hosts (verifying both blocked-command and not-in-allowlist hosts get rejected), per-command gating in `portal_bash`, a `portal_bash` + `portal_patch` round-trip in remote `/tmp/` (including the stale-hash rejection path), and audit.jsonl ingestion of the new operation tags.
+`tests/live_smoke.py` imports the local working tree and drives a series of real SSH actions: stale `password:` field handling in `hosts.yaml`, basic `ssh_exec`, `portal_multi_exec(mode="parallel", group_tag=...)` against real hosts (verifying both blocked-command and not-in-allowlist hosts get rejected), per-command gating in `portal_bash`, a `portal_bash` + `portal_patch` round-trip in remote `/tmp/` (including the stale-hash rejection path), and audit.jsonl ingestion of the new operation tags.
 
 ```bash
 SSH_MCP_AUDIT_FAIL_OPEN=1 \
@@ -297,8 +382,6 @@ SSH_MCP_AUDIT_FAIL_OPEN=1 \
 ```
 
 ⚠️ It writes one file under remote `/tmp/portal-mcp-server-smoke-<pid>.txt` and removes it at the end. Stays inside `/tmp`.
-
-> The repo also contains `examples/phase6_acceptance.py`, a developer-era end-to-end demo. It **hard-codes host alias `1810` and paths under `~/SU2-Quantum/`** and is kept only as an internal regression script — adapt the host and paths before running.
 
 ## FAQ
 

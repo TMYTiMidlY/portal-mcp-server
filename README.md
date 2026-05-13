@@ -19,6 +19,24 @@
 
 ---
 
+## 目录
+
+- [简介](#简介)
+- [项目特色](#项目特色)
+- [工具列表](#工具列表)
+- [设计理念](#设计理念)
+- [安装](#安装)
+- [接入方式](#接入方式)
+- [配置](#配置)
+- [认证](#认证)
+- [安全](#安全)
+- [测试](#测试)
+- [常见问题](#常见问题)
+- [贡献](#贡献)
+- [协议与致谢](#协议与致谢)
+
+---
+
 ## 简介
 
 `portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 18 个面向 agent 的 `portal_*` 工具：
@@ -155,7 +173,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
-pytest                        # 144 passed, 22 skipped
+pytest                        # 157 passed, 22 skipped
 ```
 
 不想用 uv 也可以走标准 pip editable install：
@@ -261,11 +279,77 @@ VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写
 
 `config/hosts.example.yaml` 给了完整 schema 模板。**`hosts.yaml` 含真实凭据，已在 `.gitignore`，永远别 commit**。
 
+## 认证
+
+> 密码登录的用户从这里开始读。SSH key 用户跳到 [SSH key（首选）](#ssh-key首选) 即可。
+
+### SSH key（首选）
+
+用 ed25519 即可：
+
+```bash
+ssh-keygen -t ed25519 -C "you@example.com"
+ssh-copy-id -i ~/.ssh/id_ed25519.pub user@your-host
+```
+
+GitHub 也接收同一把 key——把公钥加到账号上的官方步骤：[Generating a new SSH key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent) 与 [Adding a new SSH key to your GitHub account](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account)。
+
+### 加密私钥：ssh-agent
+
+一次解锁、长期复用，asyncssh 通过 `$SSH_AUTH_SOCK` 自动认到：
+
+```bash
+eval "$(ssh-agent -s)"
+ssh-add ~/.ssh/id_ed25519        # 输一次 passphrase
+```
+
+headless / CI 跑不动 ssh-agent 时，可在 `hosts.yaml` 写 `passphrase_command:`（见下）。
+
+### 密码登录：opt-in 走 `password_command`
+
+兼容历史不让换 key 的远端机器。两条铁律：
+
+1. **绝不** 在 `hosts.yaml` 写 `password: 明文`——启动会 ERROR 拒绝、字段被丢
+2. **绝不** 通过 MCP 工具传——`portal_host` 没有 password 参数，密码不会进 LLM tool-call trace
+
+写法（hosts.yaml 里 `auth: password` + 一段输出密码到 stdout 的 shell 命令，思路同 Borg 的 `BORG_PASSCOMMAND`、restic 的 `RESTIC_PASSWORD_COMMAND`、msmtp 的 `passwordeval`）：
+
+```yaml
+hosts:
+  legacy-host:
+    host: 10.0.0.40
+    user: admin
+    auth: password
+    # CI / 环境变量（GitHub Secrets、Vault 注入到 env 后直接取）：
+    password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
+    # 或从密码管理器拉：
+    # password_command: pass show ssh/legacy-host
+    # password_command: bw get password legacy-host
+    # password_command: op read "op://Private/legacy-host/password"
+```
+
+运行时行为：每次新建连接执行一次（连接池复用，所以实际很少触发），10 秒超时，结尾换行剥掉一个，stderr 永不进日志（防泄密），非 0 退出 / 空输出 / 非 UTF-8 输出全部硬失败。设计细节（为什么 `shell=True`、为什么强制 `client_keys=[]`、为什么 stderr 不进日志…）见 **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**。
+
+### 加密私钥的 passphrase：`passphrase_command`
+
+同款机制，应用到加密私钥的解锁 passphrase：
+
+```yaml
+hosts:
+  encrypted-key-host:
+    host: 10.0.0.30
+    user: deploy
+    key: ~/.ssh/encrypted_key
+    passphrase_command: pass show ssh/encrypted_key
+```
+
+ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headless / CI 这种没有交互终端的场景下用。
+
 ## 安全
 
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）
-- **认证**：仅支持 SSH key——`HostConfig` 没有 `password` 字段，`hosts.yaml` 里残留 `password:` 会被启动时 ERROR 日志后忽略
+- **认证**：默认且推荐 SSH key；密码登录支持但只走 `hosts.yaml` 的 `password_command`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
 - **审计**：所有状态变更写 `logs/audit.jsonl`；默认 fail-closed（`SSH_MCP_AUDIT_FAIL_OPEN=1` 切 fail-open）
 - **hash 保护编辑**：`portal_read` + `portal_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
 
@@ -273,20 +357,21 @@ VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写
 
 漏洞披露：**不要**开 public issue，请走 [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new)。响应窗口 48 小时确认 / 7 天初评 / 关键问题 30 天修复。
 
+
 ## 测试
 
 ### 单元 + 安全（不需要真实 SSH）
 
 ```bash
 pytest tests/ -v
-# 144 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
+# 157 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
 ```
 
-覆盖：command injection regression、safety validators、hash-protected editor、concurrency、resource lifecycle、multi-host policy enforcement、no-password-auth invariants、audit fail mode。
+覆盖：command injection regression、safety validators、hash-protected editor、concurrency、resource lifecycle、multi-host policy enforcement、password_command/passphrase_command 安全不变量、audit fail mode。
 
 ### 端到端 live smoke
 
-`tests/live_smoke.py` 直接 import 本地工作树驱动一系列真实 SSH 行为：`hosts.yaml` `password:` 残留处理、`ssh_exec` 基础调用、`portal_multi_exec(mode="parallel", group_tag=...)` 在真实主机上的 gate（blocked 命令 + 不在 allowlist 的主机均拦截）、`portal_bash` 单命令的 gate、`portal_bash` + `portal_patch` 在远端 `/tmp/` 的 round-trip（含 stale-hash 拒绝路径）、audit.jsonl 是否吃到新加的 operation tag。
+`tests/live_smoke.py` 直接 import 本地工作树驱动一系列真实 SSH 行为：`hosts.yaml` 残留 `password:` 字段处理、`ssh_exec` 基础调用、`portal_multi_exec(mode="parallel", group_tag=...)` 在真实主机上的 gate（blocked 命令 + 不在 allowlist 的主机均拦截）、`portal_bash` 单命令的 gate、`portal_bash` + `portal_patch` 在远端 `/tmp/` 的 round-trip（含 stale-hash 拒绝路径）、audit.jsonl 是否吃到新加的 operation tag。
 
 ```bash
 SSH_MCP_AUDIT_FAIL_OPEN=1 \
@@ -297,8 +382,6 @@ SSH_MCP_AUDIT_FAIL_OPEN=1 \
 ```
 
 ⚠️ 它会在远端 `/tmp/portal-mcp-server-smoke-<pid>.txt` 写一次再删除——只动 `/tmp`。
-
-> 仓库里另有 `examples/phase6_acceptance.py`，是开发期的端到端 demo，**硬编码了 host alias `1810` 和路径 `~/SU2-Quantum/`**，仅作内部回归参考；新用户跑前需要先按代码改 host 与路径。
 
 ## 常见问题
 
