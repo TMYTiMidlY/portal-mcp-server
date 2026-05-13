@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "portal-mcp-server"
-version = "0.3.0"
+version = "1.0.0"
 description = "Portal MCP Server — agent-feels-local SSH orchestration over AsyncSSH + FastMCP (18 tools)"
 readme = "README.md"
 license = { file = "LICENSE" }
