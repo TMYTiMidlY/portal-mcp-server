@@ -64,7 +64,7 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | Audit log + server introspection |
 | `portal_check` | `host`, optional `command` | Security policy dry-run |
 
-> **Agent conventions**: any remote file change goes `portal_read` (returns `file_hash`) → `portal_patch` (uses the same hash); concurrent modifications are auto-rejected. Writes default to remote `/tmp/`; ask before touching `$HOME` or project source.
+> **Agent conventions**: to change a remote file, call `portal_read` for the `file_hash` first, then `portal_patch` with the same hash; on conflict, `portal_patch` returns the new hash — re-read and retry. Writes default to remote `/tmp/`; ask before touching `$HOME` or project source.
 
 ## Design notes
 
@@ -243,7 +243,7 @@ VS Code uses a different schema (top-level key is `servers`, not `mcpServers`). 
 `portal-mcp-server` only provides tools — it does not enforce how the agent uses them. To make agent behaviour on top of these tools predictable and safe, recommend pinning the following rules in `AGENTS.md` / `CLAUDE.md` or your system prompt:
 
 - **Confirm the host alias first** — if the target host is not in `~/.ssh/config` or `hosts.yaml`, ask the user. Don't just register a new host.
-- **Writes go through read → patch** — every remote file change starts with `portal_read` to obtain `file_hash`, then `portal_patch` with the same hash. Concurrent modifications are auto-rejected with the new hash returned.
+- **Writes go through read → patch** — call `portal_read` for `file_hash` (and `range_hash` per region), then `portal_patch` with the same hashes; on conflict, `portal_patch` returns the new hash — re-read and retry.
 - **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
 - **Don't mix tools within one task** — pick `portal_*` (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
 - **Use the multi-host tools** — `portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`, not a bash loop of `ssh host1; ssh host2; …`.

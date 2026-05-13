@@ -64,7 +64,7 @@
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection |
 | `portal_check` | `host`，optional `command` | 安全策略 dry-run |
 
-> **Agent 使用约定**：写远端文件先 `portal_read` 拿 hash → `portal_patch` 用同一 hash 提交，文件被并发改了 patch 会自动拒绝；写操作默认只到远端 `/tmp/`，改用户家目录或项目代码前先确认。
+> **Agent 使用约定**：改远端文件先 `portal_read` 拿 `file_hash`，再用同一 hash 调 `portal_patch`；冲突时 patch 会返回新 hash，重读重改即可。写默认只到远端 `/tmp/`，改 `$HOME` 或项目代码前先确认。
 
 ## 设计理念
 
@@ -243,7 +243,7 @@ VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写
 `portal-mcp-server` 只提供工具，并不强制 agent 怎么用。如果你希望 agent 在这套工具上行为可预期、不爆炸，建议在 `AGENTS.md` / `CLAUDE.md` 或系统 prompt 里加上以下规约：
 
 - **优先确认 host 别名**——目标主机如果不在 `~/.ssh/config` 或 `hosts.yaml`，先问用户，不要随便注册一个新 host
-- **写文件走 read → patch**——任何远端文件改动都先 `portal_read` 拿 `file_hash`，再用同一 hash 调 `portal_patch`；文件被并发改了 patch 会自动拒绝并返回新 hash
+- **写文件走 read → patch**——先 `portal_read` 拿 `file_hash` 和 `range_hash`，再用同一组 hash 调 `portal_patch`；冲突时 patch 会返回新 hash，重读重改即可
 - **默认沙箱 `/tmp/`**——写操作默认落在远端 `/tmp/` 下；改 `$HOME` 或项目源码前必须先确认
 - **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
 - **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
