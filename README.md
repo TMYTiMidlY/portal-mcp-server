@@ -271,71 +271,15 @@ VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写
 
 ## 安全
 
-### 默认约束
+- **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（由配套 [`remote` skill](https://github.com/TMYTiMidlY/skills) 在 prompt 层强制）
+- **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）
+- **认证**：仅支持 SSH key——`HostConfig` 没有 `password` 字段，`hosts.yaml` 里残留 `password:` 会被启动时 ERROR 日志后忽略
+- **审计**：所有状态变更写 `logs/audit.jsonl`；默认 fail-closed（`SSH_MCP_AUDIT_FAIL_OPEN=1` 切 fail-open）
+- **hash 保护编辑**：`portal_read` + `portal_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
 
-portal-mcp-server 不强制路径白名单——这事交给配套 `remote` skill 在 prompt 层强制：
+完整威胁模型、各防御层细节、运维 hygiene、已知限制、算法引用见 **[`SECURITY.md`](./SECURITY.md)**。
 
-> **默认只可写远端 `/tmp/`；改用户家目录或项目代码目录前必须先问。**
-
-想做机器级强制，就在 `config/policies.yaml` 的 `command_blocklist` 加规则（如 `"rm -rf /home/*"`）。
-
-### 策略闸门
-
-`SecurityPolicy` 检查：host allowlist（fnmatch）、command blocklist/allowlist（fnmatch）、per-host rate limit（sliding window）。所有命令执行类工具走 `_gate(host, command)`；多主机编排（`portal_multi_exec` 的 parallel/rolling/broadcast 模式、`portal_playbook` 的 group 路径）走 `_gate_many(hosts, command)`，playbook 还会遍历 `steps` 逐条过 blocklist。`portal_bash` 也对每条命令 gate（持久 session 不等于授权一切命令）。
-
-每个修改状态的入口都过 gate，没有侧门：
-
-- `portal_host(action="register")` 按**目标 host**（实际 IP / DNS）过 allowlist——agent 不能用别名劫持白名单（注册一个匹配 `safe-*` 的别名指向任意 IP）；`action="remove"` 按**别名**过 gate
-- `portal_tunnel_open` / `portal_tunnel_close` 都按 host gate（关闭前从活动隧道记录里反查 host）
-- `portal_bash` / `portal_bash_close` 按 host (及 bash 命令) gate
-- 多机 gate 是**两阶段**：先把所有 host validate 完，再消耗 per-host rate-limit token——一台 host 失败时其他 host 的配额不被白白烧掉
-
-### 认证
-
-**仅支持 key-based auth**。`HostConfig` 不带 `password` 字段，`portal_host(action="register", ...)` 没有 `password` 参数。`hosts.yaml` 里若残留 `password:` 键会被启动时 ERROR 日志提示并忽略。
-
-### 审计
-
-所有改状态的工具写 `logs/audit.jsonl`（exec / file write / patch / register / tunnel / playbook / multi-host orchestration）。只读类（`portal_read` / `portal_grep` / `portal_glob` / `portal_audit` / `portal_check` / `portal_tunnel_list`）显式不审计以减噪音。
-
-**默认 fail-closed**——audit 写盘失败时操作 raise 中止；设 `SSH_MCP_AUDIT_FAIL_OPEN=1` 切到 fail-open（仅 warning 后继续，适合 dev/test）。
-
-> ⚠️ **Fail-closed 的细节诚实交代**：审计是在工具操作**完成后**写的（拿到了 result 才知道写什么）。所以如果 audit 写盘恰好在操作成功之后失败，agent 看到的是 `RuntimeError`，但远端的 patch / exec / register 已经实际生效了。fail-closed 阻止的是后续操作，**不能回滚已经发生的那一次**。需要严格的 transaction 语义请走外层（例如 OS 级别的 rsyslog 或集中审计）。
-
-### 运维建议
-
-- SSH 私钥 `chmod 600`；`hosts.yaml` 与任何含主机名 / 用户名 / key path 的文件都不要 commit
-- 远端目标尽量走 VPN（如 Tailscale）；MCP server 自身只监听 stdio，不开网络端口
-- 为自动化创建专用 SSH 用户，用 `sshd_config` 的 `AllowUsers` / `Match` / `ForceCommand` 限权，别拿 root 或个人账号
-
-### 已知限制
-
-- 不支持 password-based SSH auth（by design）
-- host key 校验默认走系统 `known_hosts`；关掉它会削弱 MITM 防护
-
-### 算法引用
-
-`portal_mcp_server.remote_text_editor` 里的 hash-protected 编辑路径（`remote_read` / `remote_patch`）是 [tumf/mcp-text-editor](https://github.com/tumf/mcp-text-editor)（MIT）safe-edit 模式的有意 port：
-
-| 上游（`mcp-text-editor`） | 这里（`remote_text_editor`） |
-|---|---|
-| 整文件 SHA-256 冲突检测 | 同算法，运行在 SFTP 之上 |
-| 行范围 patch 模型 | 同模型，外加 per-patch `range_hash` |
-| 单次写整文件 | 替换为 tmp 文件 + `posix_rename`（原子） |
-| 本地 `open(...)` + `portalocker` 文件锁（Linux 下底层走 `fcntl.flock`） | 替换为 AsyncSSH SFTP + 连接池释放 |
-
-上游库**不是** Python 依赖：它的 `TextEditorService` 直接调 `with open(file_path, "r")`，没有暴露 file-backend 接口，无法在不 fork 的前提下重定向到 SFTP。测试套件 `tests/test_remote_text_editor.py` 复刻了上游的测试矩阵（hash mismatch、overlap、beyond-EOF、multi-patch ordering ...），并增加了 SFTP 专有覆盖（`posix_rename` fallback、写后 rehash、所有退出路径都释放连接）。
-
-### 漏洞披露
-
-请勿公开开 issue 报告安全漏洞。请走 [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new) 私下提交。响应窗口：48 小时内确认、7 天内初评、关键问题 30 天内修复。
-
-### 支持版本
-
-| 版本 | 支持情况 |
-|---|---|
-| `main` 分支 | ✅ 持续维护 |
-| 历史 tag | ❌ 不回填补丁 |
+漏洞披露：**不要**开 public issue，请走 [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new)。响应窗口 48 小时确认 / 7 天初评 / 关键问题 30 天修复。
 
 ## 测试
 
@@ -401,14 +345,17 @@ print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
 
 ## 贡献
 
-欢迎 issue 与 PR。提交前请确认：
+欢迎 issue 与 PR。简版要点：
 
-- Python 3.10+，类型注解尽量补齐；I/O 全部 `async/await`，不要引入阻塞调用
-- 不出现硬编码 hostname / username / IP / path——一律从 config 读
-- 新工具写好 docstring（FastMCP 用它作为 MCP description）；必要时更新 `docs/tools.md`
-- 测试覆盖关键路径；`pytest tests/ -v` 通过
-- 不 commit secret、真实主机名、个人凭据；`config/hosts.example.yaml` 是唯一 schema 模板
-- commit message 走 [Conventional Commits](https://www.conventionalcommits.org/)（`feat:` / `fix:` / `docs:` / `chore:` ...）
+- Python 3.10+，I/O 全部 `async/await`，无阻塞调用
+- 不出现硬编码 hostname / username / IP / path
+- 新工具写好 docstring（FastMCP 用作 MCP description）+ 同步 `docs/tools.md`
+- 状态变更工具必须过 `_gate` + 写 `audit_log`
+- 测试覆盖关键路径；`pytest tests/ -v` 必须全绿
+- 不 commit secret；`config/hosts.example.yaml` 是唯一 schema 模板
+- commit message 走 [Conventional Commits](https://www.conventionalcommits.org/)
+
+完整开发流程、新工具开发清单、PR 模板、安全 / 隐私规则见 **[`CONTRIBUTING.md`](./CONTRIBUTING.md)**（[English](./CONTRIBUTING.en.md)）。
 
 ## 协议与致谢
 

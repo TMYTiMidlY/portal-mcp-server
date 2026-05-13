@@ -271,71 +271,15 @@ Install the `remote` skill from [TMYTiMidlY/skills](https://github.com/TMYTiMidl
 
 ## Security
 
-### Default constraints
+- **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (enforced at the prompt layer by the companion [`remote` skill](https://github.com/TMYTiMidlY/skills)).
+- **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate limit; every state-changing tool runs through `_gate` with no side doors (`portal_host(register)` gates against the target IP, not the alias; `portal_tunnel_close` is gated; multi-host gates are two-phase).
+- **Authentication**: SSH keys only — `HostConfig` has no `password` field; stale `password:` keys in `hosts.yaml` are logged at ERROR and ignored at startup.
+- **Audit**: every state-changing operation is appended to `logs/audit.jsonl`; fail-closed by default (`SSH_MCP_AUDIT_FAIL_OPEN=1` switches to fail-open).
+- **Hash-protected edits**: `portal_read` + `portal_patch` use SHA-256 + per-range hashes + atomic `posix_rename` + post-write rehash to refuse concurrent overwrites.
 
-portal-mcp-server does not enforce a path allowlist — that's the job of the companion `remote` skill at the prompt layer:
+The full threat model, layer-by-layer defences, operator hygiene, known limitations, and algorithmic provenance live in **[`SECURITY.md`](./SECURITY.md)**.
 
-> **Writes default to remote `/tmp/`. Always ask before touching `$HOME` or project source directories.**
-
-For machine-level enforcement, add rules to `command_blocklist` in `config/policies.yaml` (e.g. `"rm -rf /home/*"`).
-
-### Policy gate
-
-`SecurityPolicy` checks: host allowlist (fnmatch), command blocklist/allowlist (fnmatch), per-host rate limit (sliding window). Every command-execution tool goes through `_gate(host, command)`; multi-host orchestration (`portal_multi_exec` parallel/rolling/broadcast and `portal_playbook` group path) goes through `_gate_many(hosts, command)`, and `playbook` additionally walks every `step` through the blocklist. `portal_bash` gates each command too — a persistent session does **not** authorise arbitrary commands.
-
-Every state-changing entry point is gated; there are no side doors:
-
-- `portal_host(action="register")` gates against the **target host** (the actual IP / DNS the connection will reach), so an agent cannot launder a non-allowlisted target through an alias whose name happens to match `safe-*`. `action="remove"` gates against the alias.
-- `portal_tunnel_open` and `portal_tunnel_close` both gate the originating host (the close path resolves it from the active-tunnel record).
-- `portal_bash` and `portal_bash_close` both gate the host (and the bash command, for `portal_bash`).
-- Multi-host gates are **two-phase**: every host is validated first, only then are per-host rate-limit tokens consumed — a single failing host cannot burn quota on the others.
-
-### Authentication
-
-**Key-based only.** `HostConfig` has no `password` field; `portal_host(action="register", ...)` has no `password` parameter. Stale `password:` keys in `hosts.yaml` are detected at startup, logged at ERROR level, and ignored.
-
-### Audit
-
-All state-changing tools write `logs/audit.jsonl` (exec / file write / patch / register / tunnel / playbook / multi-host orchestration). Read-only tools (`portal_read` / `portal_grep` / `portal_glob` / `portal_audit` / `portal_check` / `portal_tunnel_list`) explicitly do not audit, to keep the log readable.
-
-**Default is fail-closed** — audit-write failure raises and aborts the operation. Set `SSH_MCP_AUDIT_FAIL_OPEN=1` to switch to fail-open (warning only, suitable for dev / test).
-
-> ⚠️ **Honest disclosure on fail-closed semantics**: audit entries are written *after* the underlying operation completes (we need its result to know what to log). So if the disk write fails right after a successful operation, the agent sees a `RuntimeError` even though the remote patch / exec / register has already happened. Fail-closed prevents *subsequent* operations; it cannot roll back the one that just succeeded. For strict transactional auditing, fan out to an OS-level facility (rsyslog, central log collector) downstream.
-
-### Operator hygiene
-
-- Keep SSH private keys at `chmod 600`. Never commit `hosts.yaml` or any file that contains hostnames, usernames, or key paths.
-- Run remote targets behind a VPN (e.g. Tailscale) where possible. The MCP server itself only speaks stdio; it opens no network ports.
-- Create dedicated SSH users for automated access rather than reusing `root` or personal accounts. Lock them down with `AllowUsers` / `Match` / `ForceCommand` in `sshd_config`.
-
-### Known limitations
-
-- Password-based SSH authentication is not supported by design.
-- Host key verification uses the system `known_hosts` by default; disabling it weakens MITM protection.
-
-### Algorithmic provenance
-
-The hash-protected file editing in `portal_mcp_server.remote_text_editor` (`remote_read` / `remote_patch`) is a deliberate port of the safe-edit pattern from [tumf/mcp-text-editor](https://github.com/tumf/mcp-text-editor) (MIT):
-
-| Upstream (`mcp-text-editor`) | Here (`remote_text_editor`) |
-|---|---|
-| Whole-file SHA-256 conflict detection | identical algorithm, runs over SFTP |
-| Line-range patch model | identical model, plus per-patch `range_hash` |
-| Single-shot file overwrite | replaced with tmp-file + `posix_rename` (atomic) |
-| Local `open(...)` + `portalocker` advisory lock (calls `fcntl.flock` on Linux) | replaced with AsyncSSH SFTP + connection-pool release |
-
-The upstream library is **not** a Python dependency because its `TextEditorService` directly calls `with open(file_path, "r")` and exposes no file-backend interface — it cannot be retargeted to SFTP without forking. The test suite in `tests/test_remote_text_editor.py` mirrors the upstream test matrix (hash mismatch, overlap, beyond-EOF, multi-patch ordering, …) and adds SFTP-specific coverage (`posix_rename` fall-back, post-write rehash, connection release on every exit path).
-
-### Reporting a vulnerability
-
-Please do not open a public GitHub issue for security vulnerabilities. Use [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new) instead. Targets: acknowledgement within 48 hours, initial assessment within 7 days, resolution within 30 days for critical issues.
-
-### Supported versions
-
-| Version | Supported |
-|---|---|
-| `main` branch | ✅ Active |
-| Older tags | ❌ No backports |
+Vulnerability disclosure: do **not** open a public issue. Use [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new) instead. Targets: acknowledgement within 48 hours, initial assessment within 7 days, resolution within 30 days for critical issues.
 
 ## Testing
 
@@ -401,14 +345,17 @@ For local debugging without pushing, point your `.mcp.json`'s `args` at your wor
 
 ## Contributing
 
-Issues and PRs welcome. Before opening a PR, please:
+Issues and PRs welcome. Quick rules:
 
-- Target Python 3.10+; add type hints where practical and keep all I/O `async/await` — no blocking calls
-- Don't hardcode hostnames / usernames / IPs / paths — always read from config
-- Write docstrings for every new tool (FastMCP uses the docstring as the MCP description) and update `docs/tools.md` when relevant
-- Cover the new path with tests; `pytest tests/ -v` must pass
-- Never commit secrets, real hostnames, or personal data; `config/hosts.example.yaml` is the only schema template
-- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (`feat:` / `fix:` / `docs:` / `chore:` …)
+- Python 3.10+, all I/O `async/await`, no blocking calls
+- No hardcoded hostnames / usernames / IPs / paths
+- Every new tool needs a docstring (FastMCP uses it as the MCP description) and an entry in `docs/tools.md`
+- State-changing tools must call `_gate` and emit `audit_log`
+- `pytest tests/ -v` must be green
+- Never commit secrets; `config/hosts.example.yaml` is the only schema template
+- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages
+
+The full development setup, new-tool checklist, PR template, and security & privacy rules are in **[`CONTRIBUTING.en.md`](./CONTRIBUTING.en.md)** ([中文](./CONTRIBUTING.md)).
 
 ## License & attribution
 

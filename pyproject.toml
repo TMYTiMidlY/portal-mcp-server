@@ -61,6 +61,7 @@ include = [
     "/NOTICE",
     "/SECURITY.md",
     "/CONTRIBUTING.md",
+    "/CONTRIBUTING.en.md",
     "/config/hosts.example.yaml",
     "/config/policies.yaml",
     "/docs",
