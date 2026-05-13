@@ -23,7 +23,7 @@
 
 `portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 18 个面向 agent 的 `portal_*` 工具：
 
-- **2 个** hash-protected 的远端文件编辑工具（`portal_read` / `portal_patch`），算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT，clean-room 重写）
+- **2 个** hash-protected 的远端文件编辑工具（`portal_read` / `portal_patch`），算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT），针对 SFTP 重写
 - **6 个** 核心 IO / 搜索 / 持久 bash 工具
 - **10 个** 用 `mode` 字段合并的高层工具（隧道、文件传输、多机编排、playbook、审计 ...）
 
@@ -64,7 +64,7 @@
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection |
 | `portal_check` | `host`，optional `command` | 安全策略 dry-run |
 
-> 配套的 [`remote` skill](https://github.com/TMYTiMidlY/skills) 教 agent 何时按 read → patch 流程改远端代码、何时把 `/tmp` 当沙箱、何时该问。
+> **Agent 使用约定**：写远端文件先 `portal_read` 拿 hash → `portal_patch` 用同一 hash 提交，文件被并发改了 patch 会自动拒绝；写操作默认只到远端 `/tmp/`，改用户家目录或项目代码前先确认。
 
 ## 设计理念
 
@@ -238,9 +238,16 @@ VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写
 
 > 两种格式不兼容。同时用 Copilot CLI 和 VS Code 时需各维护一份。
 
-### 配套 skill
+### 给 agent 的使用约定
 
-在 [TMYTiMidlY/skills](https://github.com/TMYTiMidlY/skills) 安装 `remote` skill（按 `manage-skills` 流程软链到 `<target>/.agents/skills/`）。Agent 收到「在 1810 上 ...」之类指令时会自动遵循 hash-check 流程和 `/tmp` 默认沙箱规则。
+`portal-mcp-server` 只提供工具，并不强制 agent 怎么用。如果你希望 agent 在这套工具上行为可预期、不爆炸，建议在 `AGENTS.md` / `CLAUDE.md` 或系统 prompt 里加上以下规约：
+
+- **优先确认 host 别名**——目标主机如果不在 `~/.ssh/config` 或 `hosts.yaml`，先问用户，不要随便注册一个新 host
+- **写文件走 read → patch**——任何远端文件改动都先 `portal_read` 拿 `file_hash`，再用同一 hash 调 `portal_patch`；文件被并发改了 patch 会自动拒绝并返回新 hash
+- **默认沙箱 `/tmp/`**——写操作默认落在远端 `/tmp/` 下；改 `$HOME` 或项目源码前必须先确认
+- **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
+- **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
+- **sudo 走交互**——需要交互式 sudo 的操作 `portal_bash` 处理不了，让用户在 terminal 里 `ssh -t host sudo ...`
 
 ## 配置
 
@@ -256,7 +263,7 @@ VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写
 
 ## 安全
 
-- **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（由配套 [`remote` skill](https://github.com/TMYTiMidlY/skills) 在 prompt 层强制）
+- **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）
 - **认证**：仅支持 SSH key——`HostConfig` 没有 `password` 字段，`hosts.yaml` 里残留 `password:` 会被启动时 ERROR 日志后忽略
 - **审计**：所有状态变更写 `logs/audit.jsonl`；默认 fail-closed（`SSH_MCP_AUDIT_FAIL_OPEN=1` 切 fail-open）
@@ -349,6 +356,6 @@ Apache License 2.0（见 [`LICENSE`](LICENSE)）。
 衍生关系与 third-party 算法引用见 [`NOTICE`](NOTICE)：
 
 - **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）**——git ancestry，底层模块（asyncssh 引擎、连接池、tunnel 管理、orchestrator、安全策略）沿用；上层 18 个 `portal_*` 工具是新设计
-- **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT）**——`remote_text_editor.py` 的 SHA-256 hash-protected edit 算法参考来源（clean-room 重写，无源码复制）
+- **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT）**——`remote_text_editor.py` 的 SHA-256 hash-protected edit 算法参考来源，针对 AsyncSSH SFTP 重写
 
-> ⚠️ 本工具给 agent 提供对远端系统的程序化 SSH 访问。**仅在你拥有或获得明确书面授权的系统上使用。** 未授权访问在多数司法辖区均属违法。
+> ⚠️ 本工具让 agent 拥有对远端系统的 SSH 访问能力。请只在你拥有或被授权的系统上使用。

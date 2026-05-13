@@ -23,7 +23,7 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 `portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 18-tool surface:
 
-- **2** hash-protected remote file editing tools (`portal_read` / `portal_patch`), with the SHA-256 conflict-detection algorithm referenced from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT, clean-room reimplementation)
+- **2** hash-protected remote file editing tools (`portal_read` / `portal_patch`), with the SHA-256 conflict-detection algorithm referenced from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT), reimplemented for SFTP
 - **6** core IO / search / persistent bash tools
 - **10** higher-level tools consolidated via a single `mode` parameter (tunnels, file transfer, multi-host orchestration, playbooks, audit, …)
 
@@ -64,7 +64,7 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | Audit log + server introspection |
 | `portal_check` | `host`, optional `command` | Security policy dry-run |
 
-> The companion [`remote` skill](https://github.com/TMYTiMidlY/skills) teaches the agent the read → patch flow, when to default to `/tmp` as a sandbox, and when it should ask first.
+> **Agent conventions**: any remote file change goes `portal_read` (returns `file_hash`) → `portal_patch` (uses the same hash); concurrent modifications are auto-rejected. Writes default to remote `/tmp/`; ask before touching `$HOME` or project source.
 
 ## Design notes
 
@@ -238,9 +238,16 @@ VS Code uses a different schema (top-level key is `servers`, not `mcpServers`). 
 
 > The two formats are not interchangeable. If you use both Copilot CLI and VS Code you'll need to maintain both files.
 
-### Companion skill
+### Agent-side conventions
 
-Install the `remote` skill from [TMYTiMidlY/skills](https://github.com/TMYTiMidlY/skills) (follow the `manage-skills` flow to symlink it into `<target>/.agents/skills/`). The agent will then automatically follow the read → hash-check → patch flow and the `/tmp`-by-default sandbox rule when it sees instructions like "do X on host 1810…".
+`portal-mcp-server` only provides tools — it does not enforce how the agent uses them. To make agent behaviour on top of these tools predictable and safe, recommend pinning the following rules in `AGENTS.md` / `CLAUDE.md` or your system prompt:
+
+- **Confirm the host alias first** — if the target host is not in `~/.ssh/config` or `hosts.yaml`, ask the user. Don't just register a new host.
+- **Writes go through read → patch** — every remote file change starts with `portal_read` to obtain `file_hash`, then `portal_patch` with the same hash. Concurrent modifications are auto-rejected with the new hash returned.
+- **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
+- **Don't mix tools within one task** — pick `portal_*` (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
+- **Use the multi-host tools** — `portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`, not a bash loop of `ssh host1; ssh host2; …`.
+- **Interactive sudo goes outside MCP** — operations that require an interactive sudo password can't go through `portal_bash`. Have the user run `ssh -t host sudo …` in a terminal instead.
 
 ## Configuration
 
@@ -256,7 +263,7 @@ Install the `remote` skill from [TMYTiMidlY/skills](https://github.com/TMYTiMidl
 
 ## Security
 
-- **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (enforced at the prompt layer by the companion [`remote` skill](https://github.com/TMYTiMidlY/skills)).
+- **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).
 - **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate limit; every state-changing tool runs through `_gate` with no side doors (`portal_host(register)` gates against the target IP, not the alias; `portal_tunnel_close` is gated; multi-host gates are two-phase).
 - **Authentication**: SSH keys only — `HostConfig` has no `password` field; stale `password:` keys in `hosts.yaml` are logged at ERROR and ignored at startup.
 - **Audit**: every state-changing operation is appended to `logs/audit.jsonl`; fail-closed by default (`SSH_MCP_AUDIT_FAIL_OPEN=1` switches to fail-open).
@@ -349,6 +356,6 @@ Apache License 2.0 (see [`LICENSE`](LICENSE)).
 Lineage and third-party algorithmic references are tracked in [`NOTICE`](NOTICE):
 
 - **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0)** — git ancestor; the lower-level modules (asyncssh engine, connection pool, tunnel manager, orchestrator, security policy) are inherited. The 18-tool `portal_*` upper layer is new.
-- **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT)** — algorithmic reference for the SHA-256 hash-protected edit semantics in `remote_text_editor.py` (clean-room reimplementation, no source code copied).
+- **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT)** — algorithmic reference for the SHA-256 hash-protected edit semantics in `remote_text_editor.py`, reimplemented for AsyncSSH SFTP.
 
-> ⚠️ This tool gives an agent programmatic SSH access to remote systems. **Use only on systems you own or have explicit written authorisation to access.** Unauthorised access is illegal in most jurisdictions.
+> ⚠️ This tool gives an agent SSH access to remote systems. Use it only on systems you own or are authorised to access.

@@ -46,7 +46,7 @@ The defences below are layered:
 
 | Layer                 | Where                          | What it does                                                                 |
 |-----------------------|--------------------------------|------------------------------------------------------------------------------|
-| Prompt-layer skill    | The companion `remote` skill   | Tells the agent to default writes to remote `/tmp/` and to ask before touching `$HOME` or project source |
+| Prompt-layer rules    | Agent system prompt / `AGENTS.md` | The agent is expected to default writes to remote `/tmp/`, ask before touching `$HOME` or project source, and never mix `portal_*` calls with raw `ssh`/`scp` in the same task. See the README's *Agent-side conventions* section. |
 | Server-side policy    | `config/policies.yaml`         | Host allowlist, command blocklist / allowlist, per-host rate limit           |
 | Per-tool gate         | `cli.py:_gate*`                | Every state-changing tool runs the policy on every call                      |
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
@@ -57,13 +57,15 @@ The defences below are layered:
 
 ### Default constraint: sandbox `/tmp/`
 
-`portal-mcp-server` does not enforce a path allowlist itself — that is
-the companion `remote` skill's job at the prompt layer:
+`portal-mcp-server` does not enforce a path allowlist itself. The
+discipline lives at the prompt layer:
 
-> **Default writes go to remote `/tmp/`. The agent must ask before
+> **Writes default to remote `/tmp/`. The agent must ask before
 > touching `$HOME` or project source directories.**
 
-For machine-level enforcement, add explicit rules to
+Pin this rule in your agent's system prompt or `AGENTS.md` (a sample
+set of rules ships in the README's *Agent-side conventions* section).
+For machine-level enforcement, add explicit patterns to
 `command_blocklist` in `config/policies.yaml` (e.g.
 `"rm -rf /home/*"`).
 
@@ -143,11 +145,10 @@ to guarantee the on-disk state matches what was written.
 ### Algorithmic provenance
 
 The hash-protected edit semantics in
-`portal_mcp_server/remote_text_editor.py` are a deliberate port of the
-safe-edit pattern from
+`portal_mcp_server/remote_text_editor.py` are a port of the safe-edit
+pattern from
 [tumf/mcp-text-editor](https://github.com/tumf/mcp-text-editor) (MIT,
-Copyright (c) 2024 tumf). No source code was copied; the
-implementation is original and targets AsyncSSH SFTP. The diff:
+Copyright (c) 2024 tumf), reimplemented for AsyncSSH SFTP. The diff:
 
 | Upstream (`mcp-text-editor`)                             | Here (`remote_text_editor`)                              |
 |----------------------------------------------------------|----------------------------------------------------------|

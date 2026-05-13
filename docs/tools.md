@@ -43,7 +43,7 @@ These are the tools an agent should reach for first. They share one SSH connecti
 | `portal_bash_close` | `(host)` | Close the cached default bash session for `<host>` (next `portal_bash` call reopens). |
 | `portal_bash_status` | `()` | Return the `host → session_id` mapping for all cached default sessions. |
 
-> Convention enforced by the companion [`remote` skill](https://github.com/TMYTiMidlY/skills): write operations should target remote `/tmp/` unless the user has explicitly approved another path. `portal_bash` itself does **not** enforce path scoping — that is a prompt-layer rule.
+> Prompt-layer convention (not enforced in code): write operations should target remote `/tmp/` unless the user has explicitly approved another path. `portal_bash` itself does **not** scope paths — see the README's *Agent-side conventions* section for the recommended ruleset.
 
 ---
 
