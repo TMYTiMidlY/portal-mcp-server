@@ -758,6 +758,9 @@ async def portal_bash(host: str, command: str, timeout: float = 60.0) -> str:
 @mcp.tool()
 async def portal_bash_close(host: str) -> str:
     """Close the cached default bash session for <host> (next call will reopen)."""
+    err = _gate(host)
+    if err:
+        return f"BLOCKED: {err}"
     return await _re_bash_close(host)
 
 

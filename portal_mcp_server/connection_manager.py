@@ -79,7 +79,7 @@ class ConnectionManager:
             if "password" in cfg:
                 logger.error(
                     "Host '%s' has 'password' field in hosts.yaml — password "
-                    "auth is not supported (per README/SECURITY.md). The "
+                    "auth is not supported (per README.md § Security). The "
                     "field is being IGNORED. Use key-based auth instead.",
                     name,
                 )

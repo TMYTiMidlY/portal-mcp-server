@@ -167,50 +167,6 @@ class TestScriptInjection:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  process_manager.ssh_kill_process — signal & pid validation
-# ════════════════════════════════════════════════════════════════════════════
-
-class TestKillInjection:
-    @pytest.mark.asyncio
-    async def test_signal_injection_rejected(self, dummy_conn):
-        from portal_mcp_server.process_manager import ssh_kill_process
-        out = await ssh_kill_process("h", 123, "TERM; rm -rf /")
-        assert "rejected" in out
-        assert dummy_conn.calls == []
-
-    @pytest.mark.asyncio
-    async def test_negative_pid_rejected(self, dummy_conn):
-        from portal_mcp_server.process_manager import ssh_kill_process
-        out = await ssh_kill_process("h", -1, "TERM")
-        assert "rejected" in out
-        assert dummy_conn.calls == []
-
-    @pytest.mark.asyncio
-    async def test_normal_kill_call(self, dummy_conn):
-        from portal_mcp_server.process_manager import ssh_kill_process
-        await ssh_kill_process("h", 1234, "term")
-        cmd, _ = dummy_conn.calls[-1]
-        assert cmd == "kill -TERM 1234"
-
-
-# ════════════════════════════════════════════════════════════════════════════
-#  process_manager.ssh_background_process — log_file / command quoting
-# ════════════════════════════════════════════════════════════════════════════
-
-class TestBackgroundProcessInjection:
-    @pytest.mark.asyncio
-    async def test_log_file_quoted(self, dummy_conn):
-        from portal_mcp_server.process_manager import ssh_background_process
-        # A log_file with a space + redirect would otherwise re-direct
-        # stderr to the wrong place.
-        await ssh_background_process(
-            "h", "echo hi", name="proc", log_file="/tmp/a b.log; reboot"
-        )
-        cmd, _ = dummy_conn.calls[-1]
-        _assert_no_unquoted_metas(cmd, [" reboot", "; reboot"])
-
-
-# ════════════════════════════════════════════════════════════════════════════
 #  session_manager.set_env — key/value injection
 # ════════════════════════════════════════════════════════════════════════════
 

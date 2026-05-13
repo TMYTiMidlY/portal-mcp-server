@@ -1,9 +1,9 @@
-"""Verify password authentication has been removed (alignment with README
-and SECURITY.md, both of which state "key-based auth only").
+"""Verify password authentication has been removed (alignment with the
+"Authentication" section of README.md, which states "key-based auth only").
 
 Original audit finding
 ----------------------
-README/SECURITY.md said password auth was unsupported, but the code fully
+The README said password auth was unsupported, but the code fully
 supported it via ``HostConfig.password``, ``ssh_register_host(password=...)``
 and a ``cfg.password`` branch in ``_build_connect_kwargs``. The fork has
 since deleted all three; these tests pin that decision so it cannot regress.

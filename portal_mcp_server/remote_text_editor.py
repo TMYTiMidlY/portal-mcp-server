@@ -1,7 +1,7 @@
 """Remote text editor with hash-based concurrent-modification detection.
 
-Algorithm reference: tumf/mcp-text-editor (MIT). See SECURITY.md
-§ "References & Algorithmic Provenance" for the full design diff and the
+Algorithm reference: tumf/mcp-text-editor (MIT). See README.md
+§ "Security · Algorithmic provenance" for the full design diff and the
 reasons we did not vendor the upstream library.
 
 Key design decisions a source reader needs to know

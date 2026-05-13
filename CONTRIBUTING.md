@@ -1,65 +1,25 @@
-# Contributing to ssh-shell-mcp
+# Contributing
 
-Thanks for your interest! Here's how to contribute effectively.
+The contribution guide is consolidated into the project README:
 
-## Development Setup
+> 👉 **[README · 贡献](./README.md#%E8%B4%A1%E7%8C%AE)** (Chinese)
+> 👉 **[README · Contributing](./README.en.md#contributing)** (English)
 
-```bash
-git clone https://github.com/jaguar999paw-droid/ssh-shell-mcp.git
-cd ssh-shell-mcp
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp config.example.json config.json   # fill in your test hosts
-```
+Highlights (the full list lives in the README):
 
-## Adding a New Tool
+- Python 3.10+, type-annotated where reasonable; everything I/O is
+  `async/await` — no blocking calls.
+- No hardcoded hostnames, usernames, IPs, or paths — always read from
+  config.
+- Every new tool needs a clear docstring (FastMCP uses it as the MCP
+  tool description) and an entry in
+  [`docs/tools.md`](./docs/tools.md).
+- Cover the critical paths with tests; `pytest tests/ -v` must pass.
+- Don't commit secrets, real hostnames, or personal credentials;
+  `config/hosts.example.yaml` is the only schema template.
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)
+  (`feat:` / `fix:` / `docs:` / `chore:` / …).
 
-1. Identify which module it belongs to (`tools/shell.py`, `tools/files.py`, etc.)
-2. Add the function with a `@mcp.tool()` decorator
-3. Include a clear docstring — the docstring becomes the tool's MCP description
-4. Add the tool to `docs/tools.md`
-5. Write a test in `tests/`
-
-**Docstring format:**
-
-```python
-@mcp.tool()
-async def my_new_tool(host: str, param: str) -> str:
-    """
-    One-line summary of what this tool does.
-
-    Args:
-        host: Name of the configured SSH host to connect to.
-        param: Description of what this parameter controls.
-
-    Returns:
-        Human-readable result string.
-    """
-```
-
-## Coding Standards
-
-- Python 3.10+, typed where possible
-- `async/await` throughout — no blocking I/O
-- No hardcoded hostnames, usernames, IPs, or paths — always read from config
-- Keep each tool focused on one operation
-- Handle SSH exceptions gracefully and return descriptive error strings
-
-## Pull Request Checklist
-
-- [ ] No secrets, real hostnames, or personal details in any file
-- [ ] `config.example.json` updated if new config keys added
-- [ ] Docstrings written for all new tools
-- [ ] `docs/tools.md` updated
-- [ ] `requirements.txt` updated if new deps added
-
-## Commit Messages
-
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-feat: add docker container exec tool
-fix: handle broken pipe on long-running commands
-docs: update Claude Desktop integration example
-chore: bump asyncssh to 2.15.0
-```
+This file exists so that GitHub auto-discovers the contribution guide
+and surfaces a *Contribute* nudge in the issue / PR creation flow; the
+canonical content lives in the README.

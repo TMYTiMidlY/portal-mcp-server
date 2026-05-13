@@ -1,22 +1,6 @@
-ssh-remote-mcp
-==============
+portal-mcp-server
+Copyright 2025 TMYTiMidlY
 
-Copyright 2024 jaguar999paw-droid (upstream ssh-shell-mcp)
-Copyright 2025 TMYTiMidlY (fork: agent-feels-local extensions
-                           and security hardening)
-
-Licensed under the Apache License, Version 2.0 (see LICENSE).
-
-The fork extends the upstream with new "remote_*" MCP tools, ssh-config
-alias auto-resolution, and security alignment fixes; see README.md for
-the user-facing summary and git log for commit-level history.
-
-Third-party algorithmic reference
----------------------------------
-ssh_remote_mcp/remote_text_editor.py reuses the safe-edit algorithm
-(SHA-256 conflict detection + line-range patch model) from
-tumf/mcp-text-editor (MIT, Copyright (c) 2024 tumf,
-https://github.com/tumf/mcp-text-editor). No source code was copied;
-the implementation is original and targets AsyncSSH SFTP. See
-SECURITY.md § "References & Algorithmic Provenance" for the design
-diff and the rationale.
+This product includes software developed in the ssh-shell-mcp project
+(https://github.com/jaguar999paw-droid/ssh-shell-mcp), Copyright 2024
+jaguar999paw-droid, licensed under the Apache License, Version 2.0.

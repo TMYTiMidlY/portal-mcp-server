@@ -1,67 +1,63 @@
+<div align="center">
+
 # portal-mcp-server
 
-> **Now you're thinking with portals.**
-> Agent-feels-local SSH orchestration MCP server for coding agents (Claude Code / Copilot CLI / Cursor …).
-> 18 tools, AsyncSSH + FastMCP, SHA-256 conflict-protected remote edits, cross-tool connection reuse, identical performance on Windows / macOS / Linux.
+**Agent-first SSH orchestration MCP server**
 
+Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines as fluently as the local one: persistent bash sessions, hash-protected remote file editing, SFTP, SSH tunnels, multi-host orchestration. Built on [AsyncSSH](https://github.com/ronf/asyncssh) + [FastMCP](https://modelcontextprotocol.io/), with an in-process connection pool shared across every tool — identical reuse performance on Windows, macOS, and Linux.
+
+[![CI](https://github.com/TMYTiMidlY/portal-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/portal-mcp-server/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://modelcontextprotocol.io/)
+[![Last commit](https://img.shields.io/github/last-commit/TMYTiMidlY/portal-mcp-server)](https://github.com/TMYTiMidlY/portal-mcp-server/commits/main)
+[![Issues](https://img.shields.io/github/issues/TMYTiMidlY/portal-mcp-server)](https://github.com/TMYTiMidlY/portal-mcp-server/issues)
 
-🌐 **Language**: [中文](./README.md)（默认） · **English**
+[简体中文](./README.md) ｜ English
+
+</div>
 
 ---
 
 ## Contents
 
-- [What it is](#what-it-is)
-- [Why 18 tools instead of 57](#why-18-tools-instead-of-57)
-- [The 18 tools](#the-18-tools)
-- [Why this design](#why-this-design)
+- [Overview](#overview)
+- [Highlights](#highlights)
+- [Tools](#tools)
+- [Design notes](#design-notes)
 - [Install](#install)
-- [Register with your agent](#register-with-your-agent)
+- [Client integration](#client-integration)
 - [Configuration](#configuration)
 - [Security](#security)
 - [Testing](#testing)
-- ["Why doesn't my local change take effect?"](#why-doesnt-my-local-change-take-effect)
-- [Attribution & license](#attribution--license)
+- [FAQ](#faq)
+- [Contributing](#contributing)
+- [License & attribution](#license--attribution)
 
----
+## Overview
 
-## What it is
-
-`portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh, **agent-first 18-tool surface**:
+`portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 18-tool surface:
 
 - **2** hash-protected remote file editing tools (`portal_read` / `portal_patch`), with the SHA-256 conflict-detection algorithm referenced from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT, clean-room reimplementation)
 - **6** core IO / search / persistent bash tools
-- **10** higher-level tools consolidated via a single `mode` parameter
+- **10** higher-level tools consolidated via a single `mode` parameter (tunnels, file transfer, multi-host orchestration, playbooks, audit, …)
 
-See [`NOTICE`](./NOTICE) and [`SECURITY.md`](./SECURITY.md) for the full provenance and security posture.
+See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenance and security posture.
 
----
+## Highlights
 
-## Why 18 tools instead of 57
+- **Cross-tool connection reuse**: every `portal_*` tool shares the same in-process asyncssh pool; one TCP per host gets reused indefinitely, individual calls amortise to channel creation (~10–30 ms).
+- **Same speed on Windows**: no dependency on OpenSSH `ControlMaster`; the pool is plain Python objects, so the three major OSes get identical reuse performance.
+- **Persistent bash sessions**: `portal_bash` keeps a `bash -i` per host with cwd / env preserved across calls — the agent doesn't have to rebuild context every command.
+- **Hash-protected remote edits**: `portal_read` + `portal_patch` use whole-file SHA-256 plus per-range hashes, write through tmp + `posix_rename` (atomic), then re-hash on disk to refuse stale or concurrent overwrites.
+- **Agent-first tool budget**: 18 tools instead of the upstream's 57; the tool-list context drops from ~7.5k tokens to ~2.5k, and `mode` parameters collapse semantically overlapping entries.
+- **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default.
+- **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
+- **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
 
-Anthropic's [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) is explicit:
-> "More tools don't always lead to better outcomes... Tools that merely wrap existing software functionality is a common error... Too many tools or overlapping tools can also distract agents from pursuing efficient strategies."
+## Tools
 
-The upstream `ssh-shell-mcp` exposes one tool per ergonomic — `ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` … — **57 tools total**. Most are one-line bash wrappers that **`portal_bash` (a persistent bash session) replaces by itself**.
-
-The portal-mcp-server tradeoff:
-
-| Bucket | Count | What we did |
-|---|---:|---|
-| **Kept and redesigned** | 8 portal core | `portal_read` + `portal_patch` use SHA-256 hashes to fix the concurrency hole in raw cat/write; `portal_grep` / `portal_glob` give structured search output; `portal_bash`(`_close`/`_status`) provide a persistent shell; `portal_cleanup_tmps` handles interrupted writes |
-| **Mode-flag merged** | 10 portal high-level | `portal_tunnel_open(mode=local\|reverse\|socks)` replaces 3 upstream tools; `portal_multi_exec(mode=parallel\|rolling\|broadcast)` replaces 4; `portal_audit(view=...)` collapses 4 introspection endpoints; etc. |
-| **Removed entirely** | 27 | All trivially expressible as `portal_bash` invocations: 5 exec-family, 6 multi-session-family, 7 sysinfo (ps/df/free/journalctl/info/netstat/service), 5 process-management, 4 tmux |
-
-Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no longer has to disambiguate between semantically overlapping tools.
-
----
-
-## The 18 tools
-
-### 8 portal core (preferred entry points)
+### 8 core tools (preferred entry points)
 
 | Tool | What the agent gets |
 |---|---|
@@ -70,7 +66,7 @@ Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no lon
 | `portal_bash` / `_close` / `_status` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable |
 | `portal_cleanup_tmps` | Garbage-collects orphan `*.mcp_tmp.*` files left by interrupted patches |
 
-### 10 portal high-level (mode-switched)
+### 10 high-level tools (mode-switched)
 
 | Tool | mode / params | Purpose |
 |---|---|---|
@@ -83,15 +79,27 @@ Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no lon
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | Audit log + server introspection |
 | `portal_check` | `host`, optional `command` | Security policy dry-run |
 
-> `~/.ssh/config` aliases are **auto-resolved** — when `get_connection("1810")` doesn't find the host in the registry it auto-registers from `~/.ssh/config`; asyncssh natively handles HostName / User / Port / IdentityFile / ProxyJump.
->
 > The companion [`remote` skill](https://github.com/TMYTiMidlY/skills) teaches the agent the read → patch flow, when to default to `/tmp` as a sandbox, and when it should ask first.
 
----
+## Design notes
 
-## Why this design
+### Tool consolidation: 18 vs. 57
 
-### A cross-tool, in-process connection pool
+Anthropic's [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) is explicit:
+
+> "More tools don't always lead to better outcomes... Tools that merely wrap existing software functionality is a common error... Too many tools or overlapping tools can also distract agents from pursuing efficient strategies."
+
+The upstream `ssh-shell-mcp` exposes one tool per ergonomic — `ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` … — **57 tools total**. Most are one-line bash wrappers that **`portal_bash` (a persistent bash session) replaces by itself**.
+
+| Bucket | Count | What we did |
+|---|---:|---|
+| **Kept and redesigned** | 8 | `portal_read` + `portal_patch` use SHA-256 hashes to fix the concurrency hole in raw cat/write; `portal_grep` / `portal_glob` give structured search output; `portal_bash`(`_close`/`_status`) provide a persistent shell; `portal_cleanup_tmps` handles interrupted writes |
+| **Mode-flag merged** | 10 | `portal_tunnel_open(mode=local\|reverse\|socks)` replaces 3 upstream tools; `portal_multi_exec(mode=parallel\|rolling\|broadcast)` replaces 4; `portal_audit(view=...)` collapses 4 introspection endpoints |
+| **Removed entirely** | 27 | All trivially expressible as `portal_bash` invocations: 5 exec-family, 6 multi-session-family, 7 sysinfo (ps/df/free/journalctl/info/netstat/service), 5 process-management, 4 tmux |
+
+Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no longer has to disambiguate between semantically overlapping tools.
+
+### In-process connection pool
 
 portal-mcp-server runs an asyncssh connection pool inside its own server process. Every tool invocation (`portal_bash`, `portal_read`, `portal_transfer`, …) shares the same TCP. **Everything except the first connect amortises down to channel creation (~10–30 ms).**
 
@@ -99,22 +107,22 @@ Compared to the best plain-ssh option (`ControlMaster auto / ControlPersist 10m`
 
 | Dimension | portal-mcp-server | plain ssh + ControlMaster |
 |---|---|---|
-| Reuse mechanism | asyncssh in-process pool (≤ 5 TCP per host) | OpenSSH master process + Unix domain socket |
-| Reuse scope | **process-level** (lives as long as the MCP server) | session-level (default 10-min `ControlPersist`) |
+| Reuse mechanism | asyncssh in-process pool (≤ 5 concurrent ops per connection, new ones created on demand) | OpenSSH master process + Unix domain socket |
+| Reuse scope | process-level (lives as long as the MCP server) | session-level (default 10-min `ControlPersist`) |
 | First connect | TCP + auth (~200–500 ms) | TCP + auth (~200–500 ms) |
-| Subsequent commands | reuse pool, open new channel (**~10–30 ms**) | reuse master, open new channel (**~10–30 ms**) |
+| Subsequent commands | reuse pool, open new channel (~10–30 ms) | reuse master, open new channel (~10–30 ms) |
 | Cross-tool reuse | ✅ `portal_bash` and `portal_read` share the same TCP | ❌ `ssh` and `scp` only reuse if both have matching `ControlPath` |
 | Persistent shell state | ✅ `portal_bash` keeps `bash -i`; cwd/env survive across calls | ❌ each `ssh host cmd` is a fresh shell; cwd/env discarded |
 | Concurrency | true asyncio multi-channel parallelism | one ssh process per command, serial startup (sharing master) |
 | Windows | ✅ identical performance everywhere Python runs | ❌ Windows OpenSSH does not support ControlMaster |
 
-> Anonymised microbenchmark: same LAN (< 1ms RTT), 100× `echo pong`. Plain ssh + ControlMaster averaged 23 ms/call; portal-mcp-server through `portal_bash` averaged 18 ms/call (no ssh client process startup). First-connect both ~280 ms (auth dominated).
+Anonymised microbenchmark: same LAN (< 1ms RTT), 100× `echo pong`. Plain ssh + ControlMaster averaged 23 ms/call; portal-mcp-server through `portal_bash` averaged 18 ms/call (no ssh client process startup). First-connect both ~280 ms (auth dominated).
 
-### Why this matters more on Windows
+### Windows behaviour
 
 `ControlMaster` **doesn't work on Windows OpenSSH** — it relies on Unix-domain-socket-based fd sharing between the master and the child ssh processes, and the default Windows OpenSSH build lacks that primitive (the experimental named-pipe support is also unreliable).
 
-portal-mcp-server **doesn't depend on any OS-level socket sharing**. The pool is plain Python objects in the MCP server's own memory (asyncssh is pure Python). Any platform that runs Python (Windows / macOS / Linux) gets **the same reuse performance as Linux**.
+portal-mcp-server **doesn't depend on any OS-level socket sharing**. The pool is plain Python objects in the MCP server's own memory (asyncssh is pure Python). Any platform that runs Python (Windows / macOS / Linux) gets the same reuse performance as Linux.
 
 ```text
 On Windows:
@@ -124,7 +132,7 @@ On Windows:
 
 Side benefit: pool connections live as long as the MCP server (typically hours), not the 10-minute `ControlPersist` default — fewer reconnect spikes inside long sessions.
 
-### Why asyncssh, not subprocess-wrapped OpenSSH
+### Stack choice: asyncssh, not subprocess-wrapped OpenSSH
 
 [asyncssh](https://github.com/ronf/asyncssh) (EPL-2.0 / GPL-2.0 dual-licensed) is an **independent pure-Python SSHv2 implementation**, protocol-equivalent to OpenSSH:
 
@@ -134,21 +142,21 @@ Side benefit: pool connections live as long as the MCP server (typically hours),
 - **Only depends on PyCA `cryptography`** — install Python and you're done; no C deps, no OS-specific IPC
 
 Compared to "shell out to `ssh` / `scp`":
+
 - No new process per command (saves the ~50–100 ms fork)
 - No need to coordinate SSH reuse across multiple OS processes (which is exactly what breaks ControlMaster on Windows)
 - Error handling, retries, and timeouts are first-class Python async primitives, not stderr-string parsing
-
----
 
 ## Install
 
 Two paths depending on what you're doing.
 
-### Agent / end user (use the MCP server, never touch the source)
+### End user (use the MCP server, never touch the source)
 
-No clone needed — let your MCP client launch it via `uvx` straight from GitHub. See [Register with your agent](#register-with-your-agent) below. `uvx` caches deps on first run; subsequent restarts are instant.
+No clone needed — let your MCP client launch it via `uvx` straight from GitHub. See [Client integration](#client-integration). `uvx` caches deps on first run; subsequent restarts are instant.
 
 Manual smoke test in a shell:
+
 ```bash
 uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
 ```
@@ -162,23 +170,22 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
-pytest                        # 129 passed, 22 skipped
+pytest                        # 144 passed, 22 skipped
 ```
 
 If you'd rather not use uv, plain pip editable install works:
+
 ```bash
 pip install -e ".[dev]"       # prod + dev (pytest etc.)
 # or runtime only
 pip install -e .
 ```
 
----
+## Client integration
 
-## Register with your agent
+### Copilot CLI / Claude Code / Cursor
 
-### Copilot CLI (workspace-level `.mcp.json`)
-
-Copilot CLI natively supports a workspace-level `.mcp.json` (same format as Claude Code / Cursor):
+These all share the same `.mcp.json` schema. Drop this into `<project>/.mcp.json`:
 
 ```json
 {
@@ -195,7 +202,18 @@ Copilot CLI natively supports a workspace-level `.mcp.json` (same format as Clau
 }
 ```
 
-Verify:
+To override hosts / policies / log paths, add an `env` block:
+
+```json
+"env": {
+  "SSH_HOSTS_YAML": "/path/to/hosts.yaml",
+  "SSH_POLICIES_YAML": "/path/to/policies.yaml",
+  "SSH_MCP_LOG_DIR": "/path/to/logs"
+}
+```
+
+Verify under Copilot CLI:
+
 ```bash
 cd <project>
 copilot mcp list                # → Workspace servers: portal (local)
@@ -204,9 +222,18 @@ copilot mcp get portal          # → Source: Workspace (<project>/.mcp.json)
 
 > ⚠️ Don't use `copilot mcp add portal -- ...` — it writes to user-level `~/.copilot/mcp-config.json` by default, which leaks into every project. Edit `.mcp.json` directly to keep it project-scoped.
 
-### VS Code (`.vscode/mcp.json`)
+**Claude Code** can use the same `.mcp.json`, but you can also let its CLI / in-session slash command register the server for you (everything still ends up in the same config file):
 
-VS Code uses a different schema (top-level key is `servers`, not `mcpServers`):
+```bash
+claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+# or, inside a Claude Code session, just type /mcp for the interactive flow
+```
+
+**Claude Desktop** uses the same `mcpServers` top-level schema — paste the JSON snippet above under `mcpServers` in `claude_desktop_config.json`.
+
+### VS Code
+
+VS Code uses a different schema (top-level key is `servers`, not `mcpServers`). Write into `.vscode/mcp.json`:
 
 ```json
 {
@@ -230,8 +257,6 @@ VS Code uses a different schema (top-level key is `servers`, not `mcpServers`):
 
 Install the `remote` skill from [TMYTiMidlY/skills](https://github.com/TMYTiMidlY/skills) (follow the `manage-skills` flow to symlink it into `<target>/.agents/skills/`). The agent will then automatically follow the read → hash-check → patch flow and the `/tmp`-by-default sandbox rule when it sees instructions like "do X on host 1810…".
 
----
-
 ## Configuration
 
 | Env var | Meaning | Default |
@@ -244,13 +269,12 @@ Install the `remote` skill from [TMYTiMidlY/skills](https://github.com/TMYTiMidl
 
 `config/hosts.example.yaml` is the schema template. **`hosts.yaml` contains real credentials and is in `.gitignore` — never commit it.**
 
----
-
 ## Security
 
 ### Default constraints
 
 portal-mcp-server does not enforce a path allowlist — that's the job of the companion `remote` skill at the prompt layer:
+
 > **Writes default to remote `/tmp/`. Always ask before touching `$HOME` or project source directories.**
 
 For machine-level enforcement, add rules to `command_blocklist` in `config/policies.yaml` (e.g. `"rm -rf /home/*"`).
@@ -258,6 +282,13 @@ For machine-level enforcement, add rules to `command_blocklist` in `config/polic
 ### Policy gate
 
 `SecurityPolicy` checks: host allowlist (fnmatch), command blocklist/allowlist (fnmatch), per-host rate limit (sliding window). Every command-execution tool goes through `_gate(host, command)`; multi-host orchestration (`portal_multi_exec` parallel/rolling/broadcast and `portal_playbook` group path) goes through `_gate_many(hosts, command)`, and `playbook` additionally walks every `step` through the blocklist. `portal_bash` gates each command too — a persistent session does **not** authorise arbitrary commands.
+
+Every state-changing entry point is gated; there are no side doors:
+
+- `portal_host(action="register")` gates against the **target host** (the actual IP / DNS the connection will reach), so an agent cannot launder a non-allowlisted target through an alias whose name happens to match `safe-*`. `action="remove"` gates against the alias.
+- `portal_tunnel_open` and `portal_tunnel_close` both gate the originating host (the close path resolves it from the active-tunnel record).
+- `portal_bash` and `portal_bash_close` both gate the host (and the bash command, for `portal_bash`).
+- Multi-host gates are **two-phase**: every host is validated first, only then are per-host rate-limit tokens consumed — a single failing host cannot burn quota on the others.
 
 ### Authentication
 
@@ -269,9 +300,42 @@ All state-changing tools write `logs/audit.jsonl` (exec / file write / patch / r
 
 **Default is fail-closed** — audit-write failure raises and aborts the operation. Set `SSH_MCP_AUDIT_FAIL_OPEN=1` to switch to fail-open (warning only, suitable for dev / test).
 
-See [`SECURITY.md`](./SECURITY.md) for the algorithmic provenance and design diff. Vulnerability disclosures: GitHub Security Advisories.
+> ⚠️ **Honest disclosure on fail-closed semantics**: audit entries are written *after* the underlying operation completes (we need its result to know what to log). So if the disk write fails right after a successful operation, the agent sees a `RuntimeError` even though the remote patch / exec / register has already happened. Fail-closed prevents *subsequent* operations; it cannot roll back the one that just succeeded. For strict transactional auditing, fan out to an OS-level facility (rsyslog, central log collector) downstream.
 
----
+### Operator hygiene
+
+- Keep SSH private keys at `chmod 600`. Never commit `hosts.yaml` or any file that contains hostnames, usernames, or key paths.
+- Run remote targets behind a VPN (e.g. Tailscale) where possible. The MCP server itself only speaks stdio; it opens no network ports.
+- Create dedicated SSH users for automated access rather than reusing `root` or personal accounts. Lock them down with `AllowUsers` / `Match` / `ForceCommand` in `sshd_config`.
+
+### Known limitations
+
+- Password-based SSH authentication is not supported by design.
+- Host key verification uses the system `known_hosts` by default; disabling it weakens MITM protection.
+
+### Algorithmic provenance
+
+The hash-protected file editing in `portal_mcp_server.remote_text_editor` (`remote_read` / `remote_patch`) is a deliberate port of the safe-edit pattern from [tumf/mcp-text-editor](https://github.com/tumf/mcp-text-editor) (MIT):
+
+| Upstream (`mcp-text-editor`) | Here (`remote_text_editor`) |
+|---|---|
+| Whole-file SHA-256 conflict detection | identical algorithm, runs over SFTP |
+| Line-range patch model | identical model, plus per-patch `range_hash` |
+| Single-shot file overwrite | replaced with tmp-file + `posix_rename` (atomic) |
+| Local `open(...)` + `portalocker` advisory lock (calls `fcntl.flock` on Linux) | replaced with AsyncSSH SFTP + connection-pool release |
+
+The upstream library is **not** a Python dependency because its `TextEditorService` directly calls `with open(file_path, "r")` and exposes no file-backend interface — it cannot be retargeted to SFTP without forking. The test suite in `tests/test_remote_text_editor.py` mirrors the upstream test matrix (hash mismatch, overlap, beyond-EOF, multi-patch ordering, …) and adds SFTP-specific coverage (`posix_rename` fall-back, post-write rehash, connection release on every exit path).
+
+### Reporting a vulnerability
+
+Please do not open a public GitHub issue for security vulnerabilities. Use [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new) instead. Targets: acknowledgement within 48 hours, initial assessment within 7 days, resolution within 30 days for critical issues.
+
+### Supported versions
+
+| Version | Supported |
+|---|---|
+| `main` branch | ✅ Active |
+| Older tags | ❌ No backports |
 
 ## Testing
 
@@ -279,7 +343,7 @@ See [`SECURITY.md`](./SECURITY.md) for the algorithmic provenance and design dif
 
 ```bash
 pytest tests/ -v
-# 129 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
+# 144 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
 ```
 
 Coverage: command-injection regression, safety validators, hash-protected editor, concurrency, resource lifecycle, multi-host policy enforcement, no-password-auth invariants, audit fail mode.
@@ -300,9 +364,9 @@ SSH_MCP_AUDIT_FAIL_OPEN=1 \
 
 > The repo also contains `examples/phase6_acceptance.py`, a developer-era end-to-end demo. It **hard-codes host alias `1810` and paths under `~/SU2-Quantum/`** and is kept only as an internal regression script — adapt the host and paths before running.
 
----
+## FAQ
 
-## "Why doesn't my local change take effect?"
+### Local edits don't show up in the agent
 
 `uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server` re-fetches the latest commit on `main` from GitHub at the moment the MCP client launches the subprocess. So:
 
@@ -327,15 +391,26 @@ print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
 - `audit env var: SSH_MCP_AUDIT_FAIL_OPEN` → already on the new, security-tightened version
 - `NOT SET — running an OLD/published version` → uvx pulled an old commit (push didn't reach the upstream, or uvx cache is stale — `--refresh` clears it)
 
-For local debugging without pushing, point `mcp-config.example.json`'s `args` at your working tree:
+For local debugging without pushing, point your `.mcp.json`'s `args` at your working tree:
+
 ```json
 "args": ["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]
 ```
-(Path must be absolute.) **Don't commit this local path back into the example.**
 
----
+(Path must be absolute.) **Don't commit this local path into a shared project-level `.mcp.json`.**
 
-## Attribution & license
+## Contributing
+
+Issues and PRs welcome. Before opening a PR, please:
+
+- Target Python 3.10+; add type hints where practical and keep all I/O `async/await` — no blocking calls
+- Don't hardcode hostnames / usernames / IPs / paths — always read from config
+- Write docstrings for every new tool (FastMCP uses the docstring as the MCP description) and update `docs/tools.md` when relevant
+- Cover the new path with tests; `pytest tests/ -v` must pass
+- Never commit secrets, real hostnames, or personal data; `config/hosts.example.yaml` is the only schema template
+- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages (`feat:` / `fix:` / `docs:` / `chore:` …)
+
+## License & attribution
 
 Apache License 2.0 (see [`LICENSE`](LICENSE)).
 

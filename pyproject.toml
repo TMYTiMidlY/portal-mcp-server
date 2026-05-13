@@ -65,5 +65,11 @@ include = [
     "/config/policies.yaml",
     "/docs",
     "/tests",
-    "/pytest.ini",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

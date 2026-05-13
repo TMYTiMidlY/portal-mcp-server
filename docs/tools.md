@@ -10,7 +10,7 @@ Every tool that targets a host accepts a `host` parameter. The host can be:
 - a name registered via `portal_host(action="register", ...)`, **or**
 - a `Host` alias from `~/.ssh/config` (auto-resolved on first use; explicit registration is only needed for tag-based grouping).
 
-All state-changing tools write to `logs/audit.jsonl`. Read-only tools are intentionally not audited (see [`SECURITY.md`](../SECURITY.md)).
+All state-changing tools write to `logs/audit.jsonl`. Read-only tools are intentionally not audited (see the Security section of [`README.md`](../README.md#security)).
 
 ---
 

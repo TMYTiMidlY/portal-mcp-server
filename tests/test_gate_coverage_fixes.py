@@ -134,6 +134,45 @@ class TestPortalTunnelCloseGate:
         assert "t1" in tm._tunnels
 
 
+class TestPortalBashCloseGate:
+    @pytest.mark.asyncio
+    async def test_bash_close_blocked_when_host_not_in_allowlist(
+        self, policy, monkeypatch,
+    ):
+        """portal_bash_close is state-changing (tears down a session) and
+        must respect the same host allowlist as every other gated entry.
+        """
+        from portal_mcp_server import cli
+
+        # Sentinel: if the gate fails we should never reach the underlying
+        # close. Patch _re_bash_close to blow up if invoked.
+        async def _must_not_be_called(host):
+            raise AssertionError(
+                f"_re_bash_close called for blocked host {host!r}"
+            )
+
+        monkeypatch.setattr(cli, "_re_bash_close", _must_not_be_called)
+
+        out = await cli.portal_bash_close("evil-host")
+        assert out.startswith("BLOCKED:"), out
+
+    @pytest.mark.asyncio
+    async def test_bash_close_passes_when_host_in_allowlist(
+        self, policy, monkeypatch,
+    ):
+        from portal_mcp_server import cli
+
+        called = {"with": None}
+        async def _ok(host):
+            called["with"] = host
+            return f"closed {host}"
+
+        monkeypatch.setattr(cli, "_re_bash_close", _ok)
+        out = await cli.portal_bash_close("safe-01")
+        assert out == "closed safe-01"
+        assert called["with"] == "safe-01"
+
+
 class _FakeListener:
     def close(self):
         pass
