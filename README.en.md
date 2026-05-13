@@ -19,21 +19,6 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 ---
 
-## Contents
-
-- [Overview](#overview)
-- [Highlights](#highlights)
-- [Tools](#tools)
-- [Design notes](#design-notes)
-- [Install](#install)
-- [Client integration](#client-integration)
-- [Configuration](#configuration)
-- [Security](#security)
-- [Testing](#testing)
-- [FAQ](#faq)
-- [Contributing](#contributing)
-- [License & attribution](#license--attribution)
-
 ## Overview
 
 `portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 18-tool surface:
