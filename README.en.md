@@ -20,26 +20,6 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 ---
 
-## Table of contents
-
-- [Overview](#overview)
-- [Highlights](#highlights)
-- [Quick start](#quick-start)
-- [Architecture](#architecture)
-- [Tools](#tools)
-- [Design notes](#design-notes)
-- [Install](#install)
-- [Client integration](#client-integration)
-- [Configuration](#configuration)
-- [Authentication](#authentication)
-- [Security](#security)
-- [Testing](#testing)
-- [FAQ](#faq)
-- [Contributing](#contributing)
-- [License & attribution](#license--attribution)
-
----
-
 ## Overview
 
 `portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 18-tool surface:
@@ -417,7 +397,7 @@ Controls the in-process asyncssh connection pool. Defaults work well for most se
 
 ## Authentication
 
-> Password-auth users start here. Key-auth users skip to [SSH keys (preferred)](#ssh-keys-preferred).
+Pick the path for your setup — SSH keys preferred, encrypted keys via ssh-agent; password auth is supported but goes through `password_command`, so plaintext credentials never reach the LLM.
 
 ### SSH keys (preferred)
 

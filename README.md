@@ -20,26 +20,6 @@
 
 ---
 
-## 目录
-
-- [简介](#简介)
-- [项目特色](#项目特色)
-- [快速开始](#快速开始)
-- [架构](#架构)
-- [工具列表](#工具列表)
-- [设计理念](#设计理念)
-- [安装](#安装)
-- [接入方式](#接入方式)
-- [配置](#配置)
-- [认证](#认证)
-- [安全](#安全)
-- [测试](#测试)
-- [常见问题](#常见问题)
-- [贡献](#贡献)
-- [协议与致谢](#协议与致谢)
-
----
-
 ## 简介
 
 `portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 18 个面向 agent 的 `portal_*` 工具：
@@ -417,7 +397,7 @@ args = ["portal-mcp-server"]
 
 ## 认证
 
-> 密码登录的用户从这里开始读。SSH key 用户跳到 [SSH key（首选）](#ssh-key首选) 即可。
+按你的认证方式跳——优先 SSH key，passphrase 走 ssh-agent；密码登录支持但需要走 `password_command`，命令行明文密码从不进 LLM。
 
 ### SSH key（首选）
 
