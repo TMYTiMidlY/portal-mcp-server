@@ -1,12 +1,11 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-fancy-pypi-readme>=24.1.0"]
 build-backend = "hatchling.build"
 
 [project]
 name = "portal-mcp-server"
 version = "1.0.0"
 description = "Agent-feels-local SSH orchestration MCP server — persistent bash, hash-protected editing, SFTP, tunnels, multi-host orchestration over AsyncSSH"
-readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [
@@ -44,6 +43,7 @@ classifiers = [
     "Topic :: System :: Networking",
     "Typing :: Typed",
 ]
+dynamic = ["readme"]
 dependencies = [
     "asyncssh>=2.14.0",
     "mcp[cli]>=1.0.0",
@@ -71,6 +71,88 @@ Changelog = "https://github.com/TMYTiMidlY/portal-mcp-server/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["portal_mcp_server"]
+
+[tool.hatch.metadata.hooks.fancy-pypi-readme]
+content-type = "text/markdown"
+
+# 1) PyPI 友好头部：标题、slogan、精简徽章、GitHub 入口链接。
+#    替代源 README.md 顶部带 CI/last-commit/issues 徽章 + 语言切换的 GitHub 头部。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+text = """<div align="center">
+
+# portal-mcp-server
+
+**面向 coding agent 的 SSH orchestration MCP server**
+
+让 Claude Code、Copilot CLI、Cursor 等 agent 操作远端机器就像操作本地：持久 bash 会话、hash 保护的远端文件编辑、SFTP 文件传输、SSH 隧道、多机编排。基于 [AsyncSSH](https://github.com/ronf/asyncssh) + [FastMCP](https://modelcontextprotocol.io/)，连接池在 server 进程内跨工具复用，Windows / macOS / Linux 性能一致。
+
+[![PyPI](https://img.shields.io/pypi/v/portal-mcp-server)](https://pypi.org/project/portal-mcp-server/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/TMYTiMidlY/portal-mcp-server/blob/main/LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
+[![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://modelcontextprotocol.io/)
+
+📖 [Repository & full docs](https://github.com/TMYTiMidlY/portal-mcp-server) ｜ 🇬🇧 [English README](https://github.com/TMYTiMidlY/portal-mcp-server/blob/main/README.en.md)
+
+</div>
+
+---
+
+"""
+
+# 2) 正文：从 `## 简介` 截到文件末尾，跳过源 README 的徽章块与目录。
+#    所有相对链接由下方 substitutions 改成 GitHub 绝对 URL。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+path = "README.md"
+start-at = "## 简介"
+
+# 3) 末尾追加：链接区，方便 PyPI 访客跳回 GitHub。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
+text = """
+
+---
+
+## 相关链接
+
+- 📦 PyPI：<https://pypi.org/project/portal-mcp-server/>
+- 📖 仓库与文档：<https://github.com/TMYTiMidlY/portal-mcp-server>
+- 🐛 报告问题：<https://github.com/TMYTiMidlY/portal-mcp-server/issues>
+- 🚀 发布说明：<https://github.com/TMYTiMidlY/portal-mcp-server/releases>
+- 🔒 安全披露：<https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new>
+"""
+
+# Substitutions 顺序敏感：从最精确到最宽松，避免重复替换。
+
+# 3a) `](#anchor)` → repo root + anchor（GitHub README 渲染时 anchor 挂在 repo 主页）。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\(#'
+replacement = '](https://github.com/TMYTiMidlY/portal-mcp-server#'
+
+# 3b) `](./path)` → blob/main/ 绝对 URL。先剥 `./`。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\(\./'
+replacement = '](https://github.com/TMYTiMidlY/portal-mcp-server/blob/main/'
+
+# 3c) `](path)` 裸相对路径（前缀不是 http(s)://、#、/、./），如 [LICENSE](LICENSE)。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\]\((?!https?://|#|/)([^)]+)\)'
+replacement = '](https://github.com/TMYTiMidlY/portal-mcp-server/blob/main/\1)'
+
+# 3d) GitHub callouts → 粗体。PyPI 不支持 [!NOTE] / [!TIP] / [!WARNING] 等渲染。
+#     当前 README 未使用，preventive 写上，避免未来加 callout 破 PyPI 渲染。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\]'
+replacement = '**\1**:'
+
+# 3e) `#1234` → GitHub issue/PR 链接。前置 `\s` 防止匹配 `SHA-256` 之类。
+#     当前 README 未引用 issue 号，preventive 写上。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(\s)#(\d+)\b'
+replacement = '\1[#\2](https://github.com/TMYTiMidlY/portal-mcp-server/issues/\2)'
+
+# 3f) `@user` → GitHub profile 链接。前置 `\s` 防止匹配 `you@example.com` 之类邮箱。
+[[tool.hatch.metadata.hooks.fancy-pypi-readme.substitutions]]
+pattern = '(\s)@([\w\-]+)\b'
+replacement = '\1[@\2](https://github.com/\2)'
 
 [tool.hatch.build.targets.sdist]
 include = [
