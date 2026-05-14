@@ -47,11 +47,7 @@ jobs:
       - name: Get version from pyproject.toml
         id: get_version
         run: |
-          if [ -f pyproject.toml ]; then
-            VERSION=$(grep -Po '(?<=version = ")[^"]*' pyproject.toml)
-          else
-            VERSION="0.0.0"
-          fi
+          VERSION=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Extract latest changelog

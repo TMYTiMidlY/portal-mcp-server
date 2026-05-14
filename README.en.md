@@ -65,7 +65,7 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 
 ```bash
 # 1. Register with Claude Code (see "Client integration" for other MCP hosts)
-claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+claude mcp add portal -- uvx portal-mcp-server
 
 # 2. Make sure the target host is in ~/.ssh/config or config/hosts.yaml
 
@@ -207,12 +207,12 @@ Two paths depending on what you're doing.
 
 ### End user (use the MCP server, never touch the source)
 
-No clone needed — let your MCP client launch it via `uvx` straight from GitHub. See [Client integration](#client-integration). `uvx` caches deps on first run; subsequent restarts are instant.
+No clone needed — let your MCP client launch it via `uvx` straight from PyPI. See [Client integration](#client-integration). `uvx` caches deps on first run; subsequent restarts are instant.
 
 Manual smoke test in a shell:
 
 ```bash
-uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
+uvx portal-mcp-server --help
 ```
 
 ### Developer (will modify code or run tests)
@@ -237,9 +237,9 @@ pip install -e .
 
 ## Client integration
 
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJnaXQraHR0cHM6Ly9naXRodWIuY29tL1RNWVRpTWlkbFkvcG9ydGFsLW1jcC1zZXJ2ZXIuZ2l0IiwicG9ydGFsLW1jcC1zZXJ2ZXIiXX0%3D)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlciJdfQ==)
 
-`portal-mcp-server` is a local stdio MCP server — any MCP-capable host can install it. Each section below gives the minimal config for a popular host. `uvx` pulls and runs straight from GitHub, no clone / venv required.
+`portal-mcp-server` is a local stdio MCP server — any MCP-capable host can install it. Each section below gives the minimal config for a popular host. `uvx` pulls from PyPI and caches automatically — no clone or venv required.
 
 ### Generic snippet
 
@@ -250,11 +250,7 @@ pip install -e .
   "mcpServers": {
     "portal": {
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "portal-mcp-server"
-      ]
+      "args": ["portal-mcp-server"]
     }
   }
 }
@@ -275,7 +271,7 @@ To override hosts / policies / log paths, append an `env` block:
 Edit `<project>/.mcp.json` (same schema as above), or register via CLI / slash command:
 
 ```bash
-claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+claude mcp add portal -- uvx portal-mcp-server
 # or run /mcp inside a Claude Code session; pass --scope user to register globally
 ```
 
@@ -285,7 +281,7 @@ claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp
 Write `<project>/.mcp.json` for project scope, or register at user scope with one command (applies to every project):
 
 ```bash
-copilot mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+copilot mcp add portal -- uvx portal-mcp-server
 # or run /mcp inside a Copilot CLI session for the interactive flow
 ```
 
@@ -316,11 +312,7 @@ Click the **Install in VS Code** badge above for one-click setup, or write to `<
     "portal": {
       "type": "stdio",
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "portal-mcp-server"
-      ]
+      "args": ["portal-mcp-server"]
     }
   }
 }
@@ -357,7 +349,7 @@ Codex uses TOML. Edit `~/.codex/config.toml`:
 ```toml
 [mcp_servers.portal]
 command = "uvx"
-args = ["--from", "git+https://github.com/TMYTiMidlY/portal-mcp-server.git", "portal-mcp-server"]
+args = ["portal-mcp-server"]
 ```
 
 After starting Codex, run `/mcp` in the TUI to confirm `portal` is loaded.
@@ -411,11 +403,7 @@ Controls the in-process asyncssh connection pool. Defaults work well for most se
   "mcpServers": {
     "portal": {
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "portal-mcp-server"
-      ],
+      "args": ["portal-mcp-server"],
       "env": {
         "SSH_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
         "SSH_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
@@ -535,30 +523,14 @@ SSH_MCP_AUDIT_FAIL_OPEN=1 \
 
 ### Local edits don't show up in the agent
 
-`uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server` re-fetches the latest commit on `main` from GitHub at the moment the MCP client launches the subprocess. So:
+`uvx portal-mcp-server` launches from PyPI cache. If you modified local code, the agent won't see it — it uses the published PyPI version.
 
 | Where you edited | Will the agent see it? |
 |---|---|
-| Local working tree (`/home/.../portal-mcp-server/`) | ❌ No. uvx pulls remote git, not a local path |
-| Committed but not pushed | ❌ No |
-| Committed + pushed to `TMYTiMidlY/portal-mcp-server` main | ✅ Yes, but you must restart the MCP client (uvx fetches at process start; it does not refetch within the running process) |
+| Local working tree | ❌ No. uvx pulls from PyPI, not a local path |
+| New version published to PyPI | ✅ Use `uvx portal-mcp-server@latest` or `--refresh` to update the cache |
 
-To verify which version uvx actually loaded:
-
-```bash
-# cd somewhere outside the repo, otherwise uvx prefers the local working tree
-cd /tmp && uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git \
-  --refresh python -c "
-import portal_mcp_server.audit as a
-print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
-      'NOT SET — running an OLD/published version'))
-"
-```
-
-- `audit env var: SSH_MCP_AUDIT_FAIL_OPEN` → already on the new, security-tightened version
-- `NOT SET — running an OLD/published version` → uvx pulled an old commit (push didn't reach the upstream, or uvx cache is stale — `--refresh` clears it)
-
-For local debugging without pushing, point your `.mcp.json`'s `args` at your working tree:
+For local debugging without publishing, point your `.mcp.json`'s `args` at your working tree:
 
 ```json
 "args": ["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]
@@ -581,7 +553,7 @@ This is expected. The connection pool lives inside the MCP server process. When 
 
 ```bash
 # Clear uvx cache and re-fetch
-uvx --refresh --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
+uvx portal-mcp-server@latest --help
 ```
 
 Then restart the MCP client.

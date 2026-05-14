@@ -65,7 +65,7 @@
 
 ```bash
 # 1. 在 Claude Code 里登记（其他 MCP client 见"接入方式"节）
-claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+claude mcp add portal -- uvx portal-mcp-server
 
 # 2. 确保目标 host 在 ~/.ssh/config 或 config/hosts.yaml 里
 
@@ -207,12 +207,12 @@ Windows 下：
 
 ### 终端用户（用 MCP server，不动源码）
 
-不需要 clone，让 MCP client 通过 `uvx` 直接从 GitHub 拉运行——见下方 [接入方式](#接入方式)。`uvx` 第一次启动缓存依赖，后续重启秒级。
+不需要 clone，让 MCP client 通过 `uvx` 直接从 PyPI 拉运行——见下方 [接入方式](#接入方式)。`uvx` 第一次启动缓存依赖，后续重启秒级。
 
 shell 里手动 smoke test：
 
 ```bash
-uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
+uvx portal-mcp-server --help
 ```
 
 ### 开发者（要改代码 / 跑测试）
@@ -237,9 +237,9 @@ pip install -e .
 
 ## 接入方式
 
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJnaXQraHR0cHM6Ly9naXRodWIuY29tL1RNWVRpTWlkbFkvcG9ydGFsLW1jcC1zZXJ2ZXIuZ2l0IiwicG9ydGFsLW1jcC1zZXJ2ZXIiXX0%3D)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlciJdfQ==)
 
-`portal-mcp-server` 是一个本地 stdio MCP server，所有支持 MCP 的 host 都能接入。下面给常见 host 的最小配置——`uvx` 会直接从 GitHub 拉、跑，不需要 clone / venv。
+`portal-mcp-server` 是一个本地 stdio MCP server，所有支持 MCP 的 host 都能接入。下面给常见 host 的最小配置——`uvx` 会自动从 PyPI 拉取并缓存，后续启动秒级。
 
 ### 通用配置片段
 
@@ -250,11 +250,7 @@ pip install -e .
   "mcpServers": {
     "portal": {
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "portal-mcp-server"
-      ]
+      "args": ["portal-mcp-server"]
     }
   }
 }
@@ -275,7 +271,7 @@ pip install -e .
 直接编辑 `<project>/.mcp.json`（同上 schema），或用 CLI / 斜杠命令登记：
 
 ```bash
-claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+claude mcp add portal -- uvx portal-mcp-server
 # 或在 Claude Code 会话内输入 /mcp 交互登记；加 --scope user 可登记到 user 级
 ```
 
@@ -285,7 +281,7 @@ claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp
 写 `<project>/.mcp.json` 即在该项目内生效；或一行命令登记到 user 级（对所有项目生效）：
 
 ```bash
-copilot mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+copilot mcp add portal -- uvx portal-mcp-server
 # 或在 Copilot CLI 会话内输入 /mcp 走交互登记
 ```
 
@@ -316,11 +312,7 @@ copilot mcp get portal          # 检查 Source 是 Workspace / User
     "portal": {
       "type": "stdio",
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "portal-mcp-server"
-      ]
+      "args": ["portal-mcp-server"]
     }
   }
 }
@@ -357,7 +349,7 @@ Codex 用 TOML，编辑 `~/.codex/config.toml`：
 ```toml
 [mcp_servers.portal]
 command = "uvx"
-args = ["--from", "git+https://github.com/TMYTiMidlY/portal-mcp-server.git", "portal-mcp-server"]
+args = ["portal-mcp-server"]
 ```
 
 启动 Codex 后在 TUI 输入 `/mcp` 确认 `portal` 已加载。
@@ -411,11 +403,7 @@ args = ["--from", "git+https://github.com/TMYTiMidlY/portal-mcp-server.git", "po
   "mcpServers": {
     "portal": {
       "command": "uvx",
-      "args": [
-        "--from",
-        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
-        "portal-mcp-server"
-      ],
+      "args": ["portal-mcp-server"],
       "env": {
         "SSH_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
         "SSH_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
@@ -535,30 +523,14 @@ SSH_MCP_AUDIT_FAIL_OPEN=1 \
 
 ### 本地改动未在 agent 上生效
 
-`uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server` 在 MCP client 启动那一刻去 GitHub 拉本仓库 main 的最新 commit。所以：
+`uvx portal-mcp-server` 从 PyPI 缓存启动。如果你改了本地代码，agent 不会看到——它用的是 PyPI 发布的版本。
 
 | 你在哪改 | agent 的 MCP server 看得见吗 |
 |---|---|
-| 本地工作树 (`/home/.../portal-mcp-server/`) | ❌ 看不见。uvx 走的是远端 git，不是本地路径 |
-| 已 commit 但没 push | ❌ 看不见 |
-| commit + push 到 `TMYTiMidlY/portal-mcp-server` main | ✅ 但需要重启 MCP client（uvx 启动时 fetch；同一进程内不会重拉） |
+| 本地工作树 | ❌ 看不见。uvx 走的是 PyPI，不是本地路径 |
+| 已发布到 PyPI 的新版本 | ✅ 用 `uvx portal-mcp-server@latest` 或 `--refresh` 更新缓存 |
 
-排错时验证当前启动加载的到底是哪个版本：
-
-```bash
-# 必须 cd 到非项目目录再跑，否则 uvx 会优先认本地工作树
-cd /tmp && uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git \
-  --refresh python -c "
-import portal_mcp_server.audit as a
-print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
-      'NOT SET — running an OLD/published version'))
-"
-```
-
-- `audit env var: SSH_MCP_AUDIT_FAIL_OPEN` → 已是含本次安全收紧的新版
-- `NOT SET — running an OLD/published version` → uvx 拉到的还是旧 commit（push 没生效，或 uvx 缓存没刷新——加 `--refresh` 即可）
-
-本地调试想让 agent 不 push 也能用上改动，把 `.mcp.json` 里的 `args` 临时改成：
+本地调试想让 agent 用上改动，把 `.mcp.json` 里的 `args` 临时改成：
 
 ```json
 "args": ["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]
@@ -581,7 +553,7 @@ print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
 
 ```bash
 # uvx 缓存清理 + 重新拉取
-uvx --refresh --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
+uvx portal-mcp-server@latest --help
 ```
 
 然后重启 MCP client。
