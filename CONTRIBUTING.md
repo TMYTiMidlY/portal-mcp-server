@@ -11,7 +11,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras           # 准备 .venv + 所有 dev 依赖
 source .venv/bin/activate
-pytest                         # 144 passed, 22 skipped 应作为基线
+pytest                         # 应全绿（live SSH 测试默认 skip）
 ```
 
 不想用 uv 也可以走标准 pip：

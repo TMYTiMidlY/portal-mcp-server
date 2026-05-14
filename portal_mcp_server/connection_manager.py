@@ -5,9 +5,12 @@ Manages persistent AsyncSSH connections to multiple remote hosts.
 import asyncio
 import os
 import logging
+import re
 import subprocess
+import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import AsyncIterator, Optional
 from dataclasses import dataclass, field
 
 import asyncssh
@@ -19,6 +22,18 @@ logger = logging.getLogger("portal_mcp.connections")
 # for an interactive `pass show` (which may unlock the GPG agent) but short
 # enough that a misconfigured command does not silently hang the server.
 SECRET_COMMAND_TIMEOUT_SEC = 10
+
+# Default maximum concurrent channels (SFTP sessions, exec channels, etc.)
+# multiplexed over a single SSH TCP connection.
+DEFAULT_MAX_CHANNELS_PER_CONN = 5
+
+# Default maximum idle time (seconds) before a connection with no active
+# channels is eligible for pruning. 10 minutes matches OpenSSH ControlPersist.
+DEFAULT_MAX_IDLE_TIME = 600.0
+
+# Default maximum connection age (seconds). Connections older than this with
+# no active channels are closed to avoid stale TCP/firewall state.
+DEFAULT_MAX_CONN_AGE = 3600.0
 
 
 @dataclass
@@ -74,14 +89,37 @@ class ConnectionManager:
     """
     Manages a pool of AsyncSSH connections keyed by host name.
     Supports host registry from YAML, dynamic registration, and connection reuse.
+
+    Pool semantics
+    --------------
+    * **pool_size**: maximum number of TCP connections kept *per host*.
+      When all connections are fully loaded and the cap is reached, the
+      least-loaded connection is reused (with a warning log).
+    * **max_channels_per_conn**: preferred ceiling for concurrent SSH channels
+      (exec, SFTP, tunnel, …) multiplexed over one TCP connection.
+    * **max_idle_time**: connections with ``in_use == 0`` that have been idle
+      longer than this are closed on the next ``get_connection`` call.
+    * **max_conn_age**: connections older than this with ``in_use == 0`` are
+      closed regardless of recent activity (guards against stale
+      TCP / NAT / firewall state).
     """
 
-    def __init__(self, hosts_yaml: str | os.PathLike | None = None, pool_size: int = 5):
+    def __init__(
+        self,
+        hosts_yaml: str | os.PathLike | None = None,
+        pool_size: int = 5,
+        max_channels_per_conn: int = DEFAULT_MAX_CHANNELS_PER_CONN,
+        max_idle_time: float = DEFAULT_MAX_IDLE_TIME,
+        max_conn_age: float = DEFAULT_MAX_CONN_AGE,
+    ):
         from .paths import hosts_yaml_path
         self._registry: dict[str, HostConfig] = {}
         self._pool: dict[str, list[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._pool_size = pool_size
+        self._max_channels_per_conn = max_channels_per_conn
+        self._max_idle_time = max_idle_time
+        self._max_conn_age = max_conn_age
         self._hosts_yaml = str(hosts_yaml) if hosts_yaml else str(hosts_yaml_path())
         self._load_registry()
 
@@ -371,7 +409,6 @@ class ConnectionManager:
             return None
         # Lightweight scan: look for a `Host <alias>` line that lists host_name
         # as one of the patterns (excluding wildcard-only entries).
-        import re
         for line in content.splitlines():
             stripped = line.strip()
             if not stripped or stripped.startswith("#"):
@@ -414,33 +451,85 @@ class ConnectionManager:
 
         async with lock:
             pool = self._pool.get(host_name, [])
-            # Reuse alive, available connection
+            now = time.time()
+
+            # ── Prune dead, idle, and aged connections ──
+            alive: list[PooledConnection] = []
             for pc in pool:
-                if pc.is_alive and pc.in_use < self._pool_size:
-                    import time
-                    pc.last_used = time.time()
+                if not pc.is_alive:
+                    self._close_pc(pc, reason="dead")
+                elif pc.in_use == 0 and (now - pc.last_used) > self._max_idle_time:
+                    self._close_pc(pc, reason=f"idle {now - pc.last_used:.0f}s")
+                elif pc.in_use == 0 and (now - pc.created_at) > self._max_conn_age:
+                    self._close_pc(pc, reason=f"aged {now - pc.created_at:.0f}s")
+                else:
+                    alive.append(pc)
+            self._pool[host_name] = alive
+
+            # ── Reuse an alive connection with channel capacity ──
+            for pc in alive:
+                if pc.in_use < self._max_channels_per_conn:
+                    pc.last_used = now
                     pc.in_use += 1
                     return pc.conn
-            # Prune dead connections
-            self._pool[host_name] = [p for p in pool if p.is_alive]
-            # Create new connection
-            import time
+
+            # ── Pool at capacity: overload the least-busy connection ──
+            if len(alive) >= self._pool_size:
+                least = min(alive, key=lambda p: p.in_use)
+                logger.warning(
+                    "Pool for '%s' at capacity (%d conns, all ≥%d channels); "
+                    "overloading connection (in_use=%d→%d)",
+                    host_name, self._pool_size,
+                    self._max_channels_per_conn,
+                    least.in_use, least.in_use + 1,
+                )
+                least.last_used = now
+                least.in_use += 1
+                return least.conn
+
+            # ── Create new connection ──
             kwargs = await self._build_connect_kwargs(cfg)
             logger.info(f"Opening SSH connection to {host_name} ({cfg.user}@{cfg.host}:{cfg.port})")
             conn = await asyncssh.connect(**kwargs)
             pc = PooledConnection(
                 host_name=host_name, conn=conn,
-                created_at=time.time(), last_used=time.time(), in_use=1
+                created_at=now, last_used=now, in_use=1,
             )
-            self._pool.setdefault(host_name, []).append(pc)
+            self._pool[host_name].append(pc)
             return conn
+
+    @asynccontextmanager
+    async def connection(self, host_name: str) -> AsyncIterator[asyncssh.SSHClientConnection]:
+        """Context manager that acquires a pooled connection and auto-releases it.
+
+        Use for short-lived operations::
+
+            async with mgr.connection("myhost") as conn:
+                result = await conn.run("whoami")
+        """
+        conn = await self.get_connection(host_name)
+        try:
+            yield conn
+        finally:
+            self.release_connection(host_name, conn)
 
     def release_connection(self, host_name: str, conn: asyncssh.SSHClientConnection):
         """Decrement in-use counter for a connection."""
-        for pc in self._pool.get(host_name, []):
+        pool = self._pool.get(host_name, [])
+        for pc in pool:
             if pc.conn is conn:
                 pc.in_use = max(0, pc.in_use - 1)
+                pc.last_used = time.time()
                 return
+
+    def _close_pc(self, pc: PooledConnection, *, reason: str = "") -> None:
+        """Close a pooled connection, swallowing errors."""
+        if reason:
+            logger.debug("Pruning connection to '%s' (%s)", pc.host_name, reason)
+        try:
+            pc.conn.close()
+        except Exception:  # pragma: no cover
+            pass
 
     async def close_all(self):
         """Close all pooled connections gracefully."""
@@ -455,7 +544,7 @@ class ConnectionManager:
         logger.info("All SSH connections closed")
 
     def pool_status(self) -> list[dict]:
-        import time
+        now = time.time()
         result = []
         for name, pool in self._pool.items():
             for pc in pool:
@@ -463,10 +552,20 @@ class ConnectionManager:
                     "host": name,
                     "alive": pc.is_alive,
                     "in_use": pc.in_use,
-                    "age_s": round(time.time() - pc.created_at, 1),
-                    "idle_s": round(time.time() - pc.last_used, 1),
+                    "age_s": round(now - pc.created_at, 1),
+                    "idle_s": round(now - pc.last_used, 1),
                 })
         return result
+
+    @property
+    def pool_config(self) -> dict:
+        """Return current pool configuration for diagnostics."""
+        return {
+            "pool_size": self._pool_size,
+            "max_channels_per_conn": self._max_channels_per_conn,
+            "max_idle_time": self._max_idle_time,
+            "max_conn_age": self._max_conn_age,
+        }
 
 
 # Module-level singleton
@@ -475,5 +574,21 @@ _manager: Optional[ConnectionManager] = None
 def get_manager() -> ConnectionManager:
     global _manager
     if _manager is None:
-        _manager = ConnectionManager()
+        def _int_env(key: str, default: int) -> int:
+            val = os.environ.get(key, "")
+            return int(val) if val.isdigit() else default
+
+        def _float_env(key: str, default: float) -> float:
+            val = os.environ.get(key, "")
+            try:
+                return float(val) if val else default
+            except ValueError:
+                return default
+
+        _manager = ConnectionManager(
+            pool_size=_int_env("SSH_POOL_SIZE", 5),
+            max_channels_per_conn=_int_env("SSH_MAX_CHANNELS_PER_CONN", DEFAULT_MAX_CHANNELS_PER_CONN),
+            max_idle_time=_float_env("SSH_MAX_IDLE_TIME", DEFAULT_MAX_IDLE_TIME),
+            max_conn_age=_float_env("SSH_MAX_CONN_AGE", DEFAULT_MAX_CONN_AGE),
+        )
     return _manager

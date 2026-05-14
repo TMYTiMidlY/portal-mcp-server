@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build release distributions
+        run: |
+          python -m pip install build
+          python -m build
+
+      - name: Upload dists
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dists
+          path: dist/
+
+  create-release:
+    runs-on: ubuntu-latest
+    needs: release-build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Get version from pyproject.toml
+        id: get_version
+        run: |
+          if [ -f pyproject.toml ]; then
+            VERSION=$(grep -Po '(?<=version = ")[^"]*' pyproject.toml)
+          else
+            VERSION="0.0.0"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Extract latest changelog
+        id: changelog
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            VERSION="${{ steps.get_version.outputs.version }}"
+
+            CHANGELOG=$(awk -v version="$VERSION" '
+              BEGIN { found=0; content="" }
+              /^## / {
+                if (found) exit
+                if ($0 ~ version) {
+                  found=1
+                  content = content $0 "\n"
+                  next
+                }
+                next
+              }
+              found && /^## / { exit }
+              found { content = content $0 "\n" }
+              END { print content }
+            ' CHANGELOG.md)
+
+            echo "$CHANGELOG" > /tmp/changelog.txt
+          else
+            echo "Version ${{ steps.get_version.outputs.version }}" > /tmp/changelog.txt
+          fi
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.get_version.outputs.version }}
+          body_path: /tmp/changelog.txt
+          files: |
+            dist/*.tar.gz
+            dist/*.whl
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
+  pypi-publish:
+    runs-on: ubuntu-latest
+    needs:
+      - release-build
+    environment:
+      name: pypi
+      url: https://pypi.org/p/portal-mcp-server/
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Retrieve release distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Publish release distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true

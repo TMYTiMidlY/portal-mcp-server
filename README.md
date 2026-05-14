@@ -7,6 +7,7 @@
 让 Claude Code、Copilot CLI、Cursor 等 agent 操作远端机器就像操作本地：持久 bash 会话、hash 保护的远端文件编辑、SFTP 文件传输、SSH 隧道、多机编排。基于 [AsyncSSH](https://github.com/ronf/asyncssh) + [FastMCP](https://modelcontextprotocol.io/)，连接池在 server 进程内跨工具复用，Windows / macOS / Linux 性能一致。
 
 [![CI](https://github.com/TMYTiMidlY/portal-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/portal-mcp-server/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/portal-mcp-server)](https://pypi.org/project/portal-mcp-server/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://modelcontextprotocol.io/)
@@ -23,6 +24,8 @@
 
 - [简介](#简介)
 - [项目特色](#项目特色)
+- [快速开始](#快速开始)
+- [架构](#架构)
 - [工具列表](#工具列表)
 - [设计理念](#设计理念)
 - [安装](#安装)
@@ -58,6 +61,45 @@
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
 
+## 快速开始
+
+```bash
+# 1. 在 Claude Code 里登记（其他 MCP client 见"接入方式"节）
+claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+
+# 2. 确保目标 host 在 ~/.ssh/config 或 config/hosts.yaml 里
+
+# 3. 在 agent 对话中使用
+#    "帮我看看 myhost 上 /var/log/syslog 最后 50 行"
+#    agent 会调用 portal_bash("myhost", "tail -50 /var/log/syslog")
+```
+
+不需要 clone 仓库、不需要 venv——`uvx` 会自动拉取并运行。开发者安装见 [安装](#安装)。
+
+## 架构
+
+```
+┌──────────────┐    stdio / SSE     ┌─────────────────────────────────────┐
+│  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
+│ (Claude Code │                    │                                     │
+│  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
+│  Cursor ...) │                    │  │ 18 tools │──►│ security gate  │  │
+└──────────────┘                    │  └──────────┘   │ + audit log    │  │
+                                    │                  └───────┬────────┘  │
+                                    │                          │           │
+                                    │              ┌───────────▼────────┐  │
+                                    │              │  asyncssh 连接池    │  │
+                                    │              │  (进程内, 跨工具    │  │
+                                    │              │   复用同一 TCP)     │  │
+                                    │              └──┬──────┬──────┬──┘  │
+                                    └─────────────────┼──────┼──────┼─────┘
+                                                      │      │      │
+                                               SSH    │      │      │
+                                              ┌───────▼─┐ ┌──▼──┐ ┌─▼──────┐
+                                              │ Host A  │ │ ... │ │ Host N │
+                                              └─────────┘ └─────┘ └────────┘
+```
+
 ## 工具列表
 
 ### 8 个核心工具（首选入口）
@@ -82,7 +124,16 @@
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection |
 | `portal_check` | `host`，optional `command` | 安全策略 dry-run |
 
-> **Agent 使用约定**：改远端文件先 `portal_read` 拿 `file_hash`，再用同一 hash 调 `portal_patch`；冲突时 patch 会返回新 hash，重读重改即可。写默认只到远端 `/tmp/`，改 `$HOME` 或项目代码前先确认。
+### 给 agent 的使用约定
+
+`portal-mcp-server` 只提供工具，并不强制 agent 怎么用。如果你希望 agent 在这套工具上行为可预期、不爆炸，建议在 `AGENTS.md` / `CLAUDE.md` 或系统 prompt 里加上以下规约：
+
+- **优先确认 host 别名**——目标主机如果不在 `~/.ssh/config` 或 `hosts.yaml`，先问用户，不要随便注册一个新 host
+- **写文件走 read → patch**——先 `portal_read` 拿 `file_hash` 和 `range_hash`，再用同一组 hash 调 `portal_patch`；冲突时 patch 会返回新 hash，重读重改即可
+- **默认沙箱 `/tmp/`**——写操作默认落在远端 `/tmp/` 下；改 `$HOME` 或项目源码前必须先确认
+- **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
+- **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
+- **sudo 走交互**——需要交互式 sudo 的操作 `portal_bash` 处理不了，让用户在 terminal 里 `ssh -t host sudo ...`
 
 ## 设计理念
 
@@ -173,7 +224,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
-pytest                        # 157 passed, 22 skipped
+pytest                        # 应全绿（live SSH 测试默认 skip）
 ```
 
 不想用 uv 也可以走标准 pip editable install：
@@ -186,9 +237,13 @@ pip install -e .
 
 ## 接入方式
 
-### Copilot CLI / Claude Code / Cursor
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJnaXQraHR0cHM6Ly9naXRodWIuY29tL1RNWVRpTWlkbFkvcG9ydGFsLW1jcC1zZXJ2ZXIuZ2l0IiwicG9ydGFsLW1jcC1zZXJ2ZXIiXX0%3D)
 
-这几个工具共享同一份 `.mcp.json` 格式。把下面这段写进 `<project>/.mcp.json`：
+`portal-mcp-server` 是一个本地 stdio MCP server，所有支持 MCP 的 host 都能接入。下面给常见 host 的最小配置——`uvx` 会直接从 GitHub 拉、跑，不需要 clone / venv。
+
+### 通用配置片段
+
+> 大多数 host 都接受 `{ "mcpServers": { "<name>": { "command": ..., "args": [...] } } }` 这种顶层 schema；VS Code 和 Codex 用各自专有 schema，单独列出。
 
 ```json
 {
@@ -205,7 +260,7 @@ pip install -e .
 }
 ```
 
-需要传环境变量（指向自定义的 hosts/policies/log 路径）时，加 `env`：
+如果需要传环境变量（指向自定义的 hosts/policies/log 路径），追加 `env`：
 
 ```json
 "env": {
@@ -215,28 +270,45 @@ pip install -e .
 }
 ```
 
-Copilot CLI 下验证：
+### Claude Code CLI
 
-```bash
-cd <project>
-copilot mcp list                # → Workspace servers: portal (local)
-copilot mcp get portal          # → Source: Workspace (<project>/.mcp.json)
-```
-
-> ⚠️ 不要用 `copilot mcp add portal -- ...`，它默认写到 user-level `~/.copilot/mcp-config.json`，会污染所有项目。直接编辑 `.mcp.json` 才能保持项目级。
-
-**Claude Code** 用户除了直接编辑 `.mcp.json`，也可以用 CLI 命令或会话内斜杠命令登记，最终都落到同一份配置：
+直接编辑 `<project>/.mcp.json`（同上 schema），或用 CLI / 斜杠命令登记：
 
 ```bash
 claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
-# 或在 Claude Code 会话内直接输入 /mcp 走交互式登记
+# 或在 Claude Code 会话内输入 /mcp 交互登记；加 --scope user 可登记到 user 级
 ```
 
-**Claude Desktop** 用同样的 `mcpServers` 顶层 schema，把上面的 JSON 段贴到 `claude_desktop_config.json` 的 `mcpServers` 下即可。
+<details>
+<summary><b>GitHub Copilot CLI</b></summary>
 
-### VS Code
+写 `<project>/.mcp.json` 即在该项目内生效；或一行命令登记到 user 级（对所有项目生效）：
 
-VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写入 `.vscode/mcp.json`：
+```bash
+copilot mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+# 或在 Copilot CLI 会话内输入 /mcp 走交互登记
+```
+
+验证：
+
+```bash
+copilot mcp list                # 应看到 portal
+copilot mcp get portal          # 检查 Source 是 Workspace / User
+```
+
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+点上方 「Install in Cursor」badge 即可一键安装；或手动把通用片段写进 `~/.cursor/mcp.json`（全局生效）或 `<project>/.cursor/mcp.json`（仅当前项目）。Cursor → Settings → Tools & MCP 里能看到 `portal` 并启用。
+
+</details>
+
+<details>
+<summary><b>VS Code（Copilot Chat / Agent mode）</b></summary>
+
+点上方 「Install in VS Code」badge 即可一键安装；或手动写入 `<project>/.vscode/mcp.json`（VS Code 用专有 schema，顶层 key 是 `servers` 而非 `mcpServers`）：
 
 ```json
 {
@@ -254,30 +326,106 @@ VS Code 用不同 schema（顶层 key 是 `servers` 而非 `mcpServers`），写
 }
 ```
 
-> 两种格式不兼容。同时用 Copilot CLI 和 VS Code 时需各维护一份。
+要全局生效，可以把同样的 `servers` 段写进 VS Code 用户 `settings.json` 的 `mcp` 字段（路径随 OS 不同）。
 
-### 给 agent 的使用约定
+> 与 `mcpServers` 不兼容；同时用 Copilot CLI / Claude Code / Cursor 和 VS Code 时需各维护一份。
 
-`portal-mcp-server` 只提供工具，并不强制 agent 怎么用。如果你希望 agent 在这套工具上行为可预期、不爆炸，建议在 `AGENTS.md` / `CLAUDE.md` 或系统 prompt 里加上以下规约：
+</details>
 
-- **优先确认 host 别名**——目标主机如果不在 `~/.ssh/config` 或 `hosts.yaml`，先问用户，不要随便注册一个新 host
-- **写文件走 read → patch**——先 `portal_read` 拿 `file_hash` 和 `range_hash`，再用同一组 hash 调 `portal_patch`；冲突时 patch 会返回新 hash，重读重改即可
-- **默认沙箱 `/tmp/`**——写操作默认落在远端 `/tmp/` 下；改 `$HOME` 或项目源码前必须先确认
-- **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
-- **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
-- **sudo 走交互**——需要交互式 sudo 的操作 `portal_bash` 处理不了，让用户在 terminal 里 `ssh -t host sudo ...`
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+把通用片段贴到 `claude_desktop_config.json` 的 `mcpServers` 下，重启 Claude Desktop。配置文件位置：
+
+- macOS：`~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows：`%APPDATA%\Claude\claude_desktop_config.json`
+
+</details>
+
+<details>
+<summary><b>Windsurf</b></summary>
+
+Windsurf 用同一份 `mcpServers` schema。在 Cascade 面板点插件按钮 → 「Manually configure MCP」，把通用片段写进 `~/.codeium/windsurf/mcp_config.json`，回 Cascade 启用即可。
+
+</details>
+
+<details>
+<summary><b>OpenAI Codex CLI</b></summary>
+
+Codex 用 TOML，编辑 `~/.codex/config.toml`：
+
+```toml
+[mcp_servers.portal]
+command = "uvx"
+args = ["--from", "git+https://github.com/TMYTiMidlY/portal-mcp-server.git", "portal-mcp-server"]
+```
+
+启动 Codex 后在 TUI 输入 `/mcp` 确认 `portal` 已加载。
+
+</details>
+
+<details>
+<summary><b>其它 host（Cline / Continue / Roo Code / Zed …）</b></summary>
+
+- **Cline / Continue / Roo Code 等 VS Code 插件**：通常都接受 `{ "mcpServers": ... }` 通用片段，写到各自插件的 MCP 设置面板或工作区配置即可
+- **任意 MCP 兼容 host**：把通用片段贴到该 host 的 MCP 配置入口；stdio 不需要额外代理
+
+</details>
 
 ## 配置
 
+所有配置通过环境变量传入。在 MCP client 的 `env` 字段里设置即可——这些变量只对 MCP server 子进程生效，不影响其他程序。
+
+### 文件路径
+
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
-| `SSH_HOSTS_YAML` | 主机注册 YAML | `./config/hosts.yaml` 若存在，否则 `$XDG_CONFIG_HOME/portal-mcp-server/hosts.yaml` |
-| `SSH_POLICIES_YAML` | 安全策略 YAML | `./config/policies.yaml` 若存在，否则 `$XDG_CONFIG_HOME/portal-mcp-server/policies.yaml` |
-| `SSH_MCP_LOG_DIR` | audit + server log 目录 | `./logs/` 若存在，否则 `$XDG_STATE_HOME/portal-mcp-server/logs/` |
-| `SSH_MCP_AUDIT_FAIL_OPEN` | 设 `1` → audit 写盘失败时仅 warning 并继续；默认（未设）→ **fail-closed**，audit 写不进则操作 raise 中止 | _(unset)_ |
-| `MCP_AUTH_TOKEN` | HTTP transport 的 Bearer token | _(none)_ |
+| `SSH_HOSTS_YAML` | 主机注册 YAML | `./config/hosts.yaml` 若存在，否则 `~/.config/portal-mcp-server/hosts.yaml` |
+| `SSH_POLICIES_YAML` | 安全策略 YAML | `./config/policies.yaml` 若存在，否则 `~/.config/portal-mcp-server/policies.yaml` |
+| `SSH_MCP_LOG_DIR` | audit + server log 目录 | `./logs/` 若存在，否则 `~/.local/state/portal-mcp-server/logs/` |
 
-`config/hosts.example.yaml` 给了完整 schema 模板。**`hosts.yaml` 含真实凭据，已在 `.gitignore`，永远别 commit**。
+路径解析优先级：环境变量 > 当前目录下的 `./config/` 或 `./logs/`（兼容开发者 checkout 布局）> XDG 目录。`config/hosts.example.yaml` 给了完整 schema 模板。**`hosts.yaml` 含真实凭据，已在 `.gitignore`，永远别 commit**。
+
+### 安全与认证
+
+| 环境变量 | 含义 | 默认 |
+|---|---|---|
+| `SSH_MCP_AUDIT_FAIL_OPEN` | 设 `1` → audit 写盘失败时仅 warning 并继续；默认 → **fail-closed**，audit 写不进则操作 raise 中止 | _(unset)_ |
+| `MCP_AUTH_TOKEN` | HTTP transport（`--transport streamable_http`）的 Bearer token；stdio 模式不需要 | _(none)_ |
+
+### 连接池
+
+控制 asyncssh 进程内连接池的行为。默认值适合大多数场景，仅在高并发或特殊网络环境下需要调整。
+
+| 环境变量 | 含义 | 默认 |
+|---|---|---|
+| `SSH_POOL_SIZE` | 每 host 最大 TCP 连接数。连接池满且所有连接都达到 channel 上限时，会复用最空闲的连接（带 warning） | `5` |
+| `SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 上最大并发 channel 数（SFTP 会话、exec、tunnel 等共享）。超出后新建 TCP，直到 `SSH_POOL_SIZE` 上限 | `5` |
+| `SSH_MAX_IDLE_TIME` | 无活跃 channel 的连接空闲多久后自动关闭（秒）。设 `0` 禁用 | `600`（10 分钟） |
+| `SSH_MAX_CONN_AGE` | 连接最大存活时间（秒），超龄且无活跃 channel 时关闭。防止防火墙 / NAT 静默断连 | `3600`（1 小时） |
+
+### 完整示例
+
+```json
+{
+  "mcpServers": {
+    "portal": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
+        "portal-mcp-server"
+      ],
+      "env": {
+        "SSH_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
+        "SSH_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
+        "SSH_POOL_SIZE": "10",
+        "SSH_MAX_CHANNELS_PER_CONN": "8"
+      }
+    }
+  }
+}
+```
 
 ## 认证
 
@@ -364,7 +512,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 ```bash
 pytest tests/ -v
-# 157 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
+# live SSH 测试默认 skip（受 SSH_TEST_LIVE 环境变量控制）
 ```
 
 覆盖：command injection regression、safety validators、hash-protected editor、concurrency、resource lifecycle、multi-host policy enforcement、password_command/passphrase_command 安全不变量、audit fail mode。
@@ -417,6 +565,26 @@ print('audit env var:', getattr(a, '_FAIL_OPEN_ENV',
 ```
 
 （路径必须绝对）。**别把这条本地路径 commit 进项目级的 `.mcp.json`**。
+
+### 连接超时 / Permission denied (publickey)
+
+1. 确认 `ssh user@host` 能在终端直连
+2. 检查私钥权限：`chmod 600 ~/.ssh/id_ed25519`
+3. 如果用了 `~/.ssh/config`，确认 `Host` 别名、`HostName`、`User`、`IdentityFile` 配正确
+4. 跳板机（ProxyJump）场景：asyncssh 原生支持 `~/.ssh/config` 的 `ProxyJump`，确认跳板机也能手动 ssh 通
+
+### MCP client 重启后连接断了
+
+这是正常行为——连接池跟随 MCP server 进程生命周期。MCP client 重启会关闭 server 进程，连接池随之释放。下次 agent 调用任意 `portal_*` 工具时会自动重建连接。
+
+### 怎么更新到最新版
+
+```bash
+# uvx 缓存清理 + 重新拉取
+uvx --refresh --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
+```
+
+然后重启 MCP client。
 
 ## 贡献
 

@@ -13,7 +13,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras           # creates .venv with prod + dev deps
 source .venv/bin/activate
-pytest                         # 144 passed, 22 skipped is the baseline
+pytest                         # should be all green (live SSH tests skip by default)
 ```
 
 If you'd rather not use uv, plain pip works:

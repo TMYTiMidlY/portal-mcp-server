@@ -7,6 +7,7 @@
 Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines as fluently as the local one: persistent bash sessions, hash-protected remote file editing, SFTP, SSH tunnels, multi-host orchestration. Built on [AsyncSSH](https://github.com/ronf/asyncssh) + [FastMCP](https://modelcontextprotocol.io/), with an in-process connection pool shared across every tool — identical reuse performance on Windows, macOS, and Linux.
 
 [![CI](https://github.com/TMYTiMidlY/portal-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/TMYTiMidlY/portal-mcp-server/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/portal-mcp-server)](https://pypi.org/project/portal-mcp-server/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![MCP](https://img.shields.io/badge/MCP-compatible-brightgreen)](https://modelcontextprotocol.io/)
@@ -23,6 +24,8 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 - [Overview](#overview)
 - [Highlights](#highlights)
+- [Quick start](#quick-start)
+- [Architecture](#architecture)
 - [Tools](#tools)
 - [Design notes](#design-notes)
 - [Install](#install)
@@ -58,6 +61,45 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 - **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
 - **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
 
+## Quick start
+
+```bash
+# 1. Register with Claude Code (see "Client integration" for other MCP hosts)
+claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+
+# 2. Make sure the target host is in ~/.ssh/config or config/hosts.yaml
+
+# 3. Use it in an agent conversation
+#    "Show me the last 50 lines of /var/log/syslog on myhost"
+#    → agent calls portal_bash("myhost", "tail -50 /var/log/syslog")
+```
+
+No clone, no venv — `uvx` pulls and runs automatically. For developer setup see [Install](#install).
+
+## Architecture
+
+```
+┌──────────────┐    stdio / SSE     ┌─────────────────────────────────────┐
+│  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
+│ (Claude Code │                    │                                     │
+│  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
+│  Cursor ...) │                    │  │ 18 tools │──►│ security gate  │  │
+└──────────────┘                    │  └──────────┘   │ + audit log    │  │
+                                    │                  └───────┬────────┘  │
+                                    │                          │           │
+                                    │              ┌───────────▼────────┐  │
+                                    │              │  asyncssh pool     │  │
+                                    │              │  (in-process,      │  │
+                                    │              │   cross-tool reuse)│  │
+                                    │              └──┬──────┬──────┬──┘  │
+                                    └─────────────────┼──────┼──────┼─────┘
+                                                      │      │      │
+                                               SSH    │      │      │
+                                              ┌───────▼─┐ ┌──▼──┐ ┌─▼──────┐
+                                              │ Host A  │ │ ... │ │ Host N │
+                                              └─────────┘ └─────┘ └────────┘
+```
+
 ## Tools
 
 ### 8 core tools (preferred entry points)
@@ -82,7 +124,16 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | Audit log + server introspection |
 | `portal_check` | `host`, optional `command` | Security policy dry-run |
 
-> **Agent conventions**: to change a remote file, call `portal_read` for the `file_hash` first, then `portal_patch` with the same hash; on conflict, `portal_patch` returns the new hash — re-read and retry. Writes default to remote `/tmp/`; ask before touching `$HOME` or project source.
+### Agent-side conventions
+
+`portal-mcp-server` only provides tools — it does not enforce how the agent uses them. To make agent behaviour on top of these tools predictable and safe, recommend pinning the following rules in `AGENTS.md` / `CLAUDE.md` or your system prompt:
+
+- **Confirm the host alias first** — if the target host is not in `~/.ssh/config` or `hosts.yaml`, ask the user. Don't just register a new host.
+- **Writes go through read → patch** — call `portal_read` for `file_hash` (and `range_hash` per region), then `portal_patch` with the same hashes; on conflict, `portal_patch` returns the new hash — re-read and retry.
+- **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
+- **Don't mix tools within one task** — pick `portal_*` (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
+- **Use the multi-host tools** — `portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`, not a bash loop of `ssh host1; ssh host2; …`.
+- **Interactive sudo goes outside MCP** — operations that require an interactive sudo password can't go through `portal_bash`. Have the user run `ssh -t host sudo …` in a terminal instead.
 
 ## Design notes
 
@@ -173,7 +224,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
-pytest                        # 157 passed, 22 skipped
+pytest                        # should be all green (live SSH tests skip by default)
 ```
 
 If you'd rather not use uv, plain pip editable install works:
@@ -186,9 +237,13 @@ pip install -e .
 
 ## Client integration
 
-### Copilot CLI / Claude Code / Cursor
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22--from%22%2C%22git%2Bhttps%3A%2F%2Fgithub.com%2FTMYTiMidlY%2Fportal-mcp-server.git%22%2C%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJnaXQraHR0cHM6Ly9naXRodWIuY29tL1RNWVRpTWlkbFkvcG9ydGFsLW1jcC1zZXJ2ZXIuZ2l0IiwicG9ydGFsLW1jcC1zZXJ2ZXIiXX0%3D)
 
-These all share the same `.mcp.json` schema. Drop this into `<project>/.mcp.json`:
+`portal-mcp-server` is a local stdio MCP server — any MCP-capable host can install it. Each section below gives the minimal config for a popular host. `uvx` pulls and runs straight from GitHub, no clone / venv required.
+
+### Generic snippet
+
+> Most hosts accept the `{ "mcpServers": { "<name>": { "command": ..., "args": [...] } } }` top-level schema. VS Code and Codex use their own schemas — see their dedicated sections below.
 
 ```json
 {
@@ -205,7 +260,7 @@ These all share the same `.mcp.json` schema. Drop this into `<project>/.mcp.json
 }
 ```
 
-To override hosts / policies / log paths, add an `env` block:
+To override hosts / policies / log paths, append an `env` block:
 
 ```json
 "env": {
@@ -215,28 +270,45 @@ To override hosts / policies / log paths, add an `env` block:
 }
 ```
 
-Verify under Copilot CLI:
+### Claude Code CLI
 
-```bash
-cd <project>
-copilot mcp list                # → Workspace servers: portal (local)
-copilot mcp get portal          # → Source: Workspace (<project>/.mcp.json)
-```
-
-> ⚠️ Don't use `copilot mcp add portal -- ...` — it writes to user-level `~/.copilot/mcp-config.json` by default, which leaks into every project. Edit `.mcp.json` directly to keep it project-scoped.
-
-**Claude Code** can use the same `.mcp.json`, but you can also let its CLI / in-session slash command register the server for you (everything still ends up in the same config file):
+Edit `<project>/.mcp.json` (same schema as above), or register via CLI / slash command:
 
 ```bash
 claude mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
-# or, inside a Claude Code session, just type /mcp for the interactive flow
+# or run /mcp inside a Claude Code session; pass --scope user to register globally
 ```
 
-**Claude Desktop** uses the same `mcpServers` top-level schema — paste the JSON snippet above under `mcpServers` in `claude_desktop_config.json`.
+<details>
+<summary><b>GitHub Copilot CLI</b></summary>
 
-### VS Code
+Write `<project>/.mcp.json` for project scope, or register at user scope with one command (applies to every project):
 
-VS Code uses a different schema (top-level key is `servers`, not `mcpServers`). Write into `.vscode/mcp.json`:
+```bash
+copilot mcp add portal -- uvx --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server
+# or run /mcp inside a Copilot CLI session for the interactive flow
+```
+
+Verify:
+
+```bash
+copilot mcp list                # should show portal
+copilot mcp get portal          # check Source is Workspace / User
+```
+
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Click the **Install in Cursor** badge above for one-click setup, or write the generic snippet to `~/.cursor/mcp.json` (all projects) or `<project>/.cursor/mcp.json` (this project only). Cursor → Settings → Tools & MCP shows `portal` once added.
+
+</details>
+
+<details>
+<summary><b>VS Code (Copilot Chat / Agent mode)</b></summary>
+
+Click the **Install in VS Code** badge above for one-click setup, or write to `<project>/.vscode/mcp.json` manually (VS Code uses its own schema — top-level key is `servers`, not `mcpServers`):
 
 ```json
 {
@@ -254,30 +326,106 @@ VS Code uses a different schema (top-level key is `servers`, not `mcpServers`). 
 }
 ```
 
-> The two formats are not interchangeable. If you use both Copilot CLI and VS Code you'll need to maintain both files.
+For global scope, place the same `servers` block under the `mcp` field of your VS Code user `settings.json` (path varies by OS).
 
-### Agent-side conventions
+> Not interchangeable with `mcpServers`. Keep a separate file when you mix VS Code with Copilot CLI / Claude Code / Cursor.
 
-`portal-mcp-server` only provides tools — it does not enforce how the agent uses them. To make agent behaviour on top of these tools predictable and safe, recommend pinning the following rules in `AGENTS.md` / `CLAUDE.md` or your system prompt:
+</details>
 
-- **Confirm the host alias first** — if the target host is not in `~/.ssh/config` or `hosts.yaml`, ask the user. Don't just register a new host.
-- **Writes go through read → patch** — call `portal_read` for `file_hash` (and `range_hash` per region), then `portal_patch` with the same hashes; on conflict, `portal_patch` returns the new hash — re-read and retry.
-- **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
-- **Don't mix tools within one task** — pick `portal_*` (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
-- **Use the multi-host tools** — `portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`, not a bash loop of `ssh host1; ssh host2; …`.
-- **Interactive sudo goes outside MCP** — operations that require an interactive sudo password can't go through `portal_bash`. Have the user run `ssh -t host sudo …` in a terminal instead.
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+Paste the generic snippet under `mcpServers` in `claude_desktop_config.json`, then restart Claude Desktop. Config file location:
+
+- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+
+</details>
+
+<details>
+<summary><b>Windsurf</b></summary>
+
+Windsurf uses the same `mcpServers` schema. In Cascade, click the plugins icon → "Manually configure MCP", then write the generic snippet to `~/.codeium/windsurf/mcp_config.json`. Reload Cascade to enable.
+
+</details>
+
+<details>
+<summary><b>OpenAI Codex CLI</b></summary>
+
+Codex uses TOML. Edit `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.portal]
+command = "uvx"
+args = ["--from", "git+https://github.com/TMYTiMidlY/portal-mcp-server.git", "portal-mcp-server"]
+```
+
+After starting Codex, run `/mcp` in the TUI to confirm `portal` is loaded.
+
+</details>
+
+<details>
+<summary><b>Other hosts (Cline / Continue / Roo Code / Zed …)</b></summary>
+
+- **Cline / Continue / Roo Code and other VS Code extensions** — most accept the `{ "mcpServers": ... }` generic snippet; paste it into the extension's MCP settings panel or workspace config
+- **Any MCP-compatible host** — paste the generic snippet into the host's MCP config entry; stdio needs no proxy
+
+</details>
 
 ## Configuration
 
+All settings are passed as environment variables. Set them in the `env` field of your MCP client config — they only affect the MCP server subprocess, not anything else on your system.
+
+### File paths
+
 | Env var | Meaning | Default |
 |---|---|---|
-| `SSH_HOSTS_YAML` | Host registry YAML | `./config/hosts.yaml` if present, else `$XDG_CONFIG_HOME/portal-mcp-server/hosts.yaml` |
-| `SSH_POLICIES_YAML` | Security policy YAML | `./config/policies.yaml` if present, else `$XDG_CONFIG_HOME/portal-mcp-server/policies.yaml` |
-| `SSH_MCP_LOG_DIR` | Audit + server log directory | `./logs/` if present, else `$XDG_STATE_HOME/portal-mcp-server/logs/` |
-| `SSH_MCP_AUDIT_FAIL_OPEN` | Set to `1` → audit-write failures are warnings only; unset (default) → **fail-closed**, audit-write failure raises and aborts the operation | _(unset)_ |
-| `MCP_AUTH_TOKEN` | Bearer token for HTTP transport | _(none)_ |
+| `SSH_HOSTS_YAML` | Host registry YAML | `./config/hosts.yaml` if present, else `~/.config/portal-mcp-server/hosts.yaml` |
+| `SSH_POLICIES_YAML` | Security policy YAML | `./config/policies.yaml` if present, else `~/.config/portal-mcp-server/policies.yaml` |
+| `SSH_MCP_LOG_DIR` | Audit + server log directory | `./logs/` if present, else `~/.local/state/portal-mcp-server/logs/` |
 
-`config/hosts.example.yaml` is the schema template. **`hosts.yaml` contains real credentials and is in `.gitignore` — never commit it.**
+Resolution order: env var > `./config/` or `./logs/` in the current directory (developer-checkout layout) > XDG directories. `config/hosts.example.yaml` is the schema template. **`hosts.yaml` contains real credentials and is in `.gitignore` — never commit it.**
+
+### Security & auth
+
+| Env var | Meaning | Default |
+|---|---|---|
+| `SSH_MCP_AUDIT_FAIL_OPEN` | Set to `1` → audit-write failures are warnings only; unset → **fail-closed**, audit-write failure aborts the operation | _(unset)_ |
+| `MCP_AUTH_TOKEN` | Bearer token for HTTP transport (`--transport streamable_http`); not needed for stdio | _(none)_ |
+
+### Connection pool
+
+Controls the in-process asyncssh connection pool. Defaults work well for most setups; tune only under high concurrency or unusual network conditions.
+
+| Env var | Meaning | Default |
+|---|---|---|
+| `SSH_POOL_SIZE` | Max TCP connections per host. When the pool is full and every connection is at the channel ceiling, the least-loaded connection is reused (with a warning) | `5` |
+| `SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels (SFTP, exec, tunnel, …) multiplexed over one TCP connection. New connections are opened when exceeded, up to `SSH_POOL_SIZE` | `5` |
+| `SSH_MAX_IDLE_TIME` | Close idle connections (no active channels) after this many seconds. Set `0` to disable | `600` (10 min) |
+| `SSH_MAX_CONN_AGE` | Max connection lifetime in seconds; aged connections with no active channels are closed. Guards against silent firewall / NAT drops | `3600` (1 hour) |
+
+### Full example
+
+```json
+{
+  "mcpServers": {
+    "portal": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/TMYTiMidlY/portal-mcp-server.git",
+        "portal-mcp-server"
+      ],
+      "env": {
+        "SSH_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
+        "SSH_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
+        "SSH_POOL_SIZE": "10",
+        "SSH_MAX_CHANNELS_PER_CONN": "8"
+      }
+    }
+  }
+}
+```
 
 ## Authentication
 
@@ -364,7 +512,7 @@ Vulnerability disclosure: do **not** open a public issue. Use [GitHub Security A
 
 ```bash
 pytest tests/ -v
-# 157 passed, 22 skipped (live SSH tests gated by SSH_TEST_LIVE)
+# live SSH tests skip by default (gated by SSH_TEST_LIVE)
 ```
 
 Coverage: command-injection regression, safety validators, hash-protected editor, concurrency, resource lifecycle, multi-host policy enforcement, password_command / passphrase_command safety invariants, audit fail mode.
@@ -417,6 +565,26 @@ For local debugging without pushing, point your `.mcp.json`'s `args` at your wor
 ```
 
 (Path must be absolute.) **Don't commit this local path into a shared project-level `.mcp.json`.**
+
+### Connection timeout / Permission denied (publickey)
+
+1. Confirm that `ssh user@host` works from a terminal first
+2. Check key permissions: `chmod 600 ~/.ssh/id_ed25519`
+3. If using `~/.ssh/config`, verify the `Host` alias, `HostName`, `User`, and `IdentityFile` are correct
+4. Jump hosts (ProxyJump): asyncssh natively supports `ProxyJump` from `~/.ssh/config` — make sure the jump host itself is reachable via `ssh`
+
+### Connections drop after MCP client restart
+
+This is expected. The connection pool lives inside the MCP server process. When the MCP client restarts, it stops the server process and the pool is released. The next `portal_*` tool call will automatically reconnect.
+
+### How to update to the latest version
+
+```bash
+# Clear uvx cache and re-fetch
+uvx --refresh --from git+https://github.com/TMYTiMidlY/portal-mcp-server.git portal-mcp-server --help
+```
+
+Then restart the MCP client.
 
 ## Contributing
 

@@ -5,15 +5,28 @@ build-backend = "hatchling.build"
 [project]
 name = "portal-mcp-server"
 version = "1.0.0"
-description = "Portal MCP Server — agent-feels-local SSH orchestration over AsyncSSH + FastMCP (18 tools)"
+description = "Agent-feels-local SSH orchestration MCP server — persistent bash, hash-protected editing, SFTP, tunnels, multi-host orchestration over AsyncSSH"
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [
-    { name = "jaguar999paw-droid" },
     { name = "TMYTiMidlY" },
 ]
-keywords = ["mcp", "ssh", "asyncssh", "ai-agents", "orchestration"]
+maintainers = [
+    { name = "TMYTiMidlY" },
+]
+keywords = [
+    "mcp",
+    "mcp-server",
+    "ssh",
+    "asyncssh",
+    "ai-agents",
+    "orchestration",
+    "remote",
+    "devops",
+    "claude",
+    "copilot",
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -21,11 +34,15 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: System :: Systems Administration",
+    "Topic :: System :: Networking",
+    "Typing :: Typed",
 ]
 dependencies = [
     "asyncssh>=2.14.0",
@@ -39,6 +56,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
+    "ruff>=0.4.0",
 ]
 
 [project.scripts]
@@ -47,7 +65,9 @@ portal-mcp-server = "portal_mcp_server:main"
 [project.urls]
 Homepage = "https://github.com/TMYTiMidlY/portal-mcp-server"
 Repository = "https://github.com/TMYTiMidlY/portal-mcp-server"
+Documentation = "https://github.com/TMYTiMidlY/portal-mcp-server#readme"
 Issues = "https://github.com/TMYTiMidlY/portal-mcp-server/issues"
+Changelog = "https://github.com/TMYTiMidlY/portal-mcp-server/releases"
 
 [tool.hatch.build.targets.wheel]
 packages = ["portal_mcp_server"]
@@ -74,3 +94,15 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.commitizen]
+name = "cz_conventional_commits"
+tag_format = "v$version"
+version_scheme = "pep440"
+version_provider = "pep621"
+update_changelog_on_bump = true
+major_version_zero = true
