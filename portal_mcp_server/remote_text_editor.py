@@ -35,7 +35,6 @@ Key design decisions a source reader needs to know
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import logging

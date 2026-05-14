@@ -65,7 +65,7 @@ class SecurityPolicy:
             for pattern in self.command_allowlist:
                 if fnmatch.fnmatch(cmd_lower, pattern.lower()):
                     return None
-            return f"Command not in allowlist"
+            return "Command not in allowlist"
         return None
 
     def check_rate_limit(self, host_name: str) -> Optional[str]:

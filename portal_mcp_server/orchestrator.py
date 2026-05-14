@@ -4,7 +4,6 @@ Orchestrator — multi-host fleet operations: parallel, rolling, broadcast, grou
 import asyncio
 import logging
 import time
-from typing import Callable
 
 from .shell_engine import ssh_exec, ssh_exec_batch
 from .connection_manager import get_manager
