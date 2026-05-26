@@ -10,11 +10,25 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import asyncssh
-from .connection_manager import get_manager
+from .connection_manager import SSH_DECODE_ERRORS, get_manager
 from .safety import quote_shell, validate_env_dict, validate_env_key
 
 logger = logging.getLogger("portal_mcp.sessions")
 OUTPUT_BUFFER_LINES = 10000
+
+
+class SessionDead(RuntimeError):
+    """Raised by execute_in_session when the underlying SSH channel has died.
+
+    The session has already been removed from the manager's registry by the
+    time this is raised, so the caller (typically ``remote_bash``) can safely
+    create a fresh session without first calling ``close_session``.
+    """
+
+    def __init__(self, session_id: str, original: BaseException):
+        super().__init__(f"session {session_id} died: {original!r}")
+        self.session_id = session_id
+        self.original = original
 
 
 @dataclass
@@ -52,6 +66,11 @@ class SessionManager:
             process = await conn.create_process(
                 "bash -i", term_type="xterm-256color",
                 env=env, request_pty=True,
+                # See connection_manager.SSH_DECODE_ERRORS — without this,
+                # any non-UTF-8 byte on stdout (GBK from a Windows host,
+                # Latin-1 from legacy tools, …) raises UnicodeDecodeError
+                # inside asyncssh's stream reader and tears the channel down.
+                errors=SSH_DECODE_ERRORS,
             )
             session_id = str(uuid.uuid4())[:8]
             session = ShellSession(
@@ -92,7 +111,14 @@ class SessionManager:
 
     async def execute_in_session(self, session_id: str, command: str,
                                   timeout: float = 30.0) -> str:
-        """Execute a command inside a persistent shell session."""
+        """Execute a command inside a persistent shell session.
+
+        Raises:
+            SessionDead: the underlying SSH channel died (write failed,
+                EOF, codec error, etc.). The session is removed from the
+                registry before this is raised, so callers can rebuild
+                without first calling ``close_session``.
+        """
         session = self._get(session_id)
         session.touch()
         # Sentinel uses the FULL 128-bit uuid so a command whose stdout
@@ -102,28 +128,66 @@ class SessionManager:
         # latent corruption source under bursty multi-host workloads.
         sentinel = f"__DONE_{uuid.uuid4().hex}__"
         full_cmd = f"{command}\necho {sentinel}\n"
-        session.process.stdin.write(full_cmd)
+        try:
+            session.process.stdin.write(full_cmd)
+        except (BrokenPipeError, ConnectionResetError, OSError,
+                asyncssh.ChannelOpenError, asyncssh.ConnectionLost) as e:
+            # stdin write failed — channel is gone. Drop the session
+            # from the registry so the next call creates a fresh one,
+            # and surface a typed error so the caller (remote_bash) can
+            # transparently retry.
+            await self._invalidate(session_id)
+            raise SessionDead(session_id, e) from e
         output_lines = []
         deadline = time.time() + timeout
-        try:
-            while time.time() < deadline:
-                try:
-                    chunk = await asyncio.wait_for(
-                        session.process.stdout.read(4096), timeout=0.3
-                    )
-                    if not chunk:
-                        break
-                    lines = chunk.splitlines()
-                    for line in lines:
-                        clean = self._strip_ansi(line)
-                        if sentinel in clean:
-                            return "\n".join(output_lines)
-                        output_lines.append(clean)
-                except asyncio.TimeoutError:
-                    continue
-        except Exception as e:
-            return f"Error: {e}"
+        while time.time() < deadline:
+            try:
+                chunk = await asyncio.wait_for(
+                    session.process.stdout.read(4096), timeout=0.3
+                )
+            except asyncio.TimeoutError:
+                continue
+            except (asyncssh.ChannelOpenError, asyncssh.ConnectionLost,
+                    UnicodeDecodeError, ConnectionResetError, OSError) as e:
+                # Channel-level failure during read. With
+                # SSH_DECODE_ERRORS='backslashreplace' the UnicodeDecodeError
+                # branch shouldn't fire — keep it as defense-in-depth in case
+                # someone overrides the encoding to a stricter setting.
+                await self._invalidate(session_id)
+                raise SessionDead(session_id, e) from e
+            if not chunk:
+                # EOF — bash exited or channel half-closed. Session is no
+                # longer usable.
+                await self._invalidate(session_id)
+                raise SessionDead(session_id, EOFError("stdout EOF"))
+            lines = chunk.splitlines()
+            for line in lines:
+                clean = self._strip_ansi(line)
+                if sentinel in clean:
+                    return "\n".join(output_lines)
+                output_lines.append(clean)
         return "\n".join(output_lines) + "\n[timeout]"
+
+    async def _invalidate(self, session_id: str) -> None:
+        """Drop a session from the registry and release its pool slot.
+
+        Used when the underlying channel is detected to be dead; we don't
+        try to ``exit`` cleanly (the channel is already gone) but we do
+        need to decrement the pool's in-use counter or it leaks.
+        """
+        async with self._lock:
+            session = self._sessions.pop(session_id, None)
+        if session is None:
+            return
+        try:
+            session.process.close()
+        except Exception:  # pragma: no cover
+            pass
+        try:
+            get_manager().release_connection(session.host_name, session.conn)
+        except Exception:  # pragma: no cover
+            logger.debug("invalidate: release_connection failed", exc_info=True)
+        logger.info(f"Session {session_id} invalidated (channel dead)")
 
     def _strip_ansi(self, text: str) -> str:
         import re

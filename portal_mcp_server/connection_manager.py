@@ -35,6 +35,20 @@ DEFAULT_MAX_IDLE_TIME = 600.0
 # no active channels are closed to avoid stale TCP/firewall state.
 DEFAULT_MAX_CONN_AGE = 3600.0
 
+# How asyncssh should handle bytes that aren't valid in the negotiated
+# encoding (default 'utf-8'). The library default is 'strict', which raises
+# UnicodeDecodeError on the first non-UTF-8 byte and tears the channel down
+# — fatal when an SSH command happens to emit GBK / Latin-1 / ANSI bytes
+# (e.g. ``powershell.exe`` on a Chinese Windows host whose codepage is 936
+# returns ``netsh`` output as GBK). ``'backslashreplace'`` makes undecodable
+# bytes survive as ``\xd3`` style escapes, so the agent still gets readable
+# stdout AND the channel stays alive for the next command.
+#
+# Used by every ``conn.run(...)`` / ``conn.create_process(...)`` call in
+# this codebase. Bumping it to ``'replace'`` would lose information; keep
+# ``'backslashreplace'`` so the original bytes can still be reconstructed.
+SSH_DECODE_ERRORS = "backslashreplace"
+
 
 @dataclass
 class HostConfig:

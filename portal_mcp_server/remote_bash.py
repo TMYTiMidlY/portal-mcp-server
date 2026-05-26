@@ -36,7 +36,7 @@ import logging
 import re
 from typing import Dict
 
-from .session_manager import get_session_manager
+from .session_manager import SessionDead, get_session_manager
 
 logger = logging.getLogger("portal_mcp.remote_bash")
 
@@ -105,10 +105,29 @@ async def remote_bash(host: str, cmd: str, timeout: float = 60.0) -> Dict[str, s
     """Run a command in the persistent bash session for <host>.
 
     cwd and env vars are preserved across calls.
+
+    If the cached session's SSH channel has died (e.g. the remote shell
+    exited, the TCP connection dropped, or an earlier command produced
+    output the codec couldn't decode), this transparently recreates the
+    session and retries the command **once** so the agent doesn't have
+    to call ``portal_bash_close`` and reissue every time.
     """
     smgr = get_session_manager()
     sid = await _ensure_session(host)
-    raw = await smgr.execute_in_session(sid, cmd, timeout=timeout)
+    try:
+        raw = await smgr.execute_in_session(sid, cmd, timeout=timeout)
+    except SessionDead as dead:
+        logger.warning(
+            "remote_bash: session %s on host %s died (%s); recreating once",
+            dead.session_id, host, dead.original,
+        )
+        # _invalidate already dropped the session from the registry; clear
+        # our host->sid cache too so _ensure_session creates a fresh one.
+        async with _lock_for(host):
+            if _HOST_SESSIONS.get(host) == dead.session_id:
+                _HOST_SESSIONS.pop(host, None)
+        sid = await _ensure_session(host)
+        raw = await smgr.execute_in_session(sid, cmd, timeout=timeout)
     return {"host": host, "session_id": sid, "output": _clean(raw)}
 
 
