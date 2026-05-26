@@ -539,6 +539,16 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
 
 ⚠️ It writes one file under remote `/tmp/portal-mcp-server-smoke-<pid>.txt` and removes it at the end. Stays inside `/tmp`.
 
+## CI / Release
+
+GitHub Actions handles both testing and publishing — you never need a local `python -m build`:
+
+- **CI** ([`ci.yml`](.github/workflows/ci.yml)): every PR / push to `main` runs `ruff check portal_mcp_server/` + `pytest tests/` on Python **3.10 / 3.11 / 3.12 / 3.13**; all four must be green to merge.
+- **Release** ([`release.yml`](.github/workflows/release.yml)): pushing a `v*.*.*` tag triggers a three-stage pipeline — `python -m build` produces wheel + sdist → the matching `CHANGELOG.md` section is awk-extracted into the [GitHub Release](https://github.com/TMYTiMidlY/portal-mcp-server/releases) body → the artifacts are published to [PyPI](https://pypi.org/project/portal-mcp-server/) via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC short-lived tokens, no static `PYPI_API_TOKEN`).
+
+The full release procedure, CHANGELOG format constraint, and recovery
+playbook live in [`CONTRIBUTING.en.md` § CI & Release automation](./CONTRIBUTING.en.md#ci--release-automation).
+
 ## FAQ
 
 ### Local edits don't show up in the agent

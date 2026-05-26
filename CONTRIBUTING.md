@@ -88,6 +88,78 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 4. CI 必须通过；ruff lint 与 pytest 都不能 fail
 5. 涉及行为变更或安全相关的 PR 期待 maintainer review；纯文档 / 测试改动可以更快合入
 
+## CI & Release 自动化
+
+仓库走两条 GitHub Actions 流水线，正常发布动作都不需要在本地手跑构建。
+
+### CI — `.github/workflows/ci.yml`
+
+触发：push / PR 到 `main`。
+矩阵：Python **3.10 / 3.11 / 3.12 / 3.13**（ubuntu-latest）。
+
+每个矩阵 job 做四件事：
+
+1. `pip install -e ".[dev]" && pip install ruff`
+2. `ruff check portal_mcp_server/` —— 只 lint 产品代码，不 lint 测试
+3. import smoke：`python -c "import portal_mcp_server; assert portal_mcp_server.main"` + `portal-mcp-server --help`
+4. `pytest tests/ -v --tb=short`（live SSH 测试 fixture 默认 skip，CI 不需要真实 host）
+
+PR 必须四个 Python 版本全绿才能 merge。
+
+### Release — `.github/workflows/release.yml`
+
+触发：
+- push tag 匹配 `v*.*.*`（**生产路径**）
+- `workflow_dispatch`（手动兜底）
+
+三个 job 顺序执行：
+
+1. **`release-build`**：`python -m build` 出 wheel + sdist，传成 artifact `release-dists`。
+2. **`create-release`**：下载 artifact → 从 `CHANGELOG.md` awk 抽出当前版本段（详见下面"CHANGELOG 格式约束"）→ 用 `softprops/action-gh-release@v1` 建 GitHub Release，把 `.whl` / `.tar.gz` 当 asset 一并上传。
+3. **`pypi-publish`**：用 PyPA 官方 action + **OIDC trusted publishing**（无 token、无 secret）发到 PyPI；`skip-existing: true` 防止同版本重发硬失败。
+
+GH environment `pypi` 在仓库 Settings → Environments 里绑到 https://pypi.org/p/portal-mcp-server/ 的 trusted publisher。**不要往里塞 `PYPI_API_TOKEN`**——trusted publishing 比静态 token 安全得多。
+
+### CHANGELOG 格式约束
+
+`release.yml` 用 awk 抓「以 `## ` 开头、且首行字串包含目标版本号」的那段，到下一个 `## ` 之前为止：
+
+```markdown
+## v1.1.0 (2026-05-26)
+
+### BREAKING CHANGES
+- ...
+
+### Fix
+- ...
+
+## v1.0.1 (2026-05-15)
+...
+```
+
+> ⚠️ 每个版本头行必须包含纯版本号（如 `1.1.0`），否则 awk 抓不到，GH Release body 会是空字符串。
+
+### 发布新版本步骤
+
+1. 改 `pyproject.toml` 的 `version`（语义化版本：BREAKING bump major，新功能 bump minor，bugfix bump patch）
+2. `uv lock`（让 `uv.lock` 同步到新自身版本号）
+3. 本地预检：`pytest tests/ -v && ruff check portal_mcp_server/`
+4. 在 `CHANGELOG.md` 顶部加 `## v<x.y.z> (<YYYY-MM-DD>)` 段，下面按 `### BREAKING CHANGES` / `### Feat` / `### Fix` / `### Tests` / `### Docs` 等子标题分类
+5. commit + `git push origin main`
+6. `git tag v<x.y.z> -m "..."` 然后 `git push origin v<x.y.z>`
+7. 在 [Actions 页](https://github.com/TMYTiMidlY/portal-mcp-server/actions) 等三个 job 全绿
+8. 验收：https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\> + https://pypi.org/project/portal-mcp-server/\<x.y.z\>/
+
+### Release 出错怎么办
+
+| 哪个 job 红 | 多半原因 | 处理 |
+|---|---|---|
+| `release-build` | `pyproject.toml` 写错 / build backend 报错 | 看构建日志，本地 `python -m build` 复现 |
+| `create-release` | CHANGELOG 段抽不到（版本号串不在头行 / 上一段头行被吞了） | 修 CHANGELOG → 删 tag → 重打 tag |
+| `pypi-publish` | trusted publisher 没配 / PyPI 上已有同版本 | 配 trusted publishing；同版本已发就接受，无须重传 |
+
+> 历史教训：v1.1.0 之前 release.yml 曾从 `pyproject.toml` 直接读 version，导致 tag 和包版本号不一致；commit `8e33ea3 fix(ci): derive release version from tag name instead of pyproject.toml` 改成从 `GITHUB_REF_NAME` 拿，更可靠。
+
 ## 漏洞披露
 
 **不要**在公开 issue 里报告安全漏洞，请按 [`SECURITY.md`](./SECURITY.md) 走 GitHub Security Advisories 私下提交。

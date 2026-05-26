@@ -539,6 +539,15 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
 
 ⚠️ 它会在远端 `/tmp/portal-mcp-server-smoke-<pid>.txt` 写一次再删除——只动 `/tmp`。
 
+## CI / Release
+
+仓库用 GitHub Actions 自动化跑测试和发布，本地不需要手动 build：
+
+- **CI**（[`ci.yml`](.github/workflows/ci.yml)）：每个 PR / push to `main` 在 Python **3.10 / 3.11 / 3.12 / 3.13** 上跑 `ruff check portal_mcp_server/` + `pytest tests/`，四个版本都绿才能 merge。
+- **Release**（[`release.yml`](.github/workflows/release.yml)）：push 一个 `v*.*.*` tag 自动触发——`python -m build` 产出 wheel + sdist → 从 `CHANGELOG.md` awk 抽出对应版本段做 [GitHub Release](https://github.com/TMYTiMidlY/portal-mcp-server/releases) body → 通过 [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)（OIDC 短令牌，无静态 token）发布到 [PyPI](https://pypi.org/project/portal-mcp-server/)。
+
+完整发布流程、CHANGELOG 格式约束与 release 失败排障见 [`CONTRIBUTING.md` § CI & Release 自动化](./CONTRIBUTING.md#ci--release-自动化)。
+
 ## 常见问题
 
 ### 本地改动未在 agent 上生效

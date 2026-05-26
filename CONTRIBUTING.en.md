@@ -124,6 +124,103 @@ commit makes review and revert dramatically easier.
 5. PRs that touch behaviour or security generally need a maintainer
    review; pure docs / test changes can land faster.
 
+## CI & Release automation
+
+The repo runs two GitHub Actions pipelines. Normal releases never
+require a local `python -m build`.
+
+### CI — `.github/workflows/ci.yml`
+
+Triggers: `push` / `pull_request` to `main`.
+Matrix: Python **3.10 / 3.11 / 3.12 / 3.13** (ubuntu-latest).
+
+Each matrix job does four things:
+
+1. `pip install -e ".[dev]" && pip install ruff`
+2. `ruff check portal_mcp_server/` — lints product code only, not tests
+3. Import smoke: `python -c "import portal_mcp_server; assert portal_mcp_server.main"` plus `portal-mcp-server --help`
+4. `pytest tests/ -v --tb=short` (live SSH fixtures skip by default, so
+   CI never needs a real host)
+
+A PR can only land when all four Python versions are green.
+
+### Release — `.github/workflows/release.yml`
+
+Triggers:
+- pushing a tag matching `v*.*.*` (**production path**)
+- `workflow_dispatch` (manual fallback)
+
+Three jobs run in order:
+
+1. **`release-build`** — `python -m build` produces wheel + sdist,
+   uploaded as artifact `release-dists`.
+2. **`create-release`** — downloads the artifact, awk-extracts the
+   matching version's section from `CHANGELOG.md` (see "CHANGELOG
+   format constraint" below), and uses `softprops/action-gh-release@v1`
+   to create a GitHub Release with the `.whl` / `.tar.gz` attached.
+3. **`pypi-publish`** — uses the official PyPA action with **OIDC
+   trusted publishing** (no token, no secret) to publish to PyPI.
+   `skip-existing: true` prevents a hard failure on republish of an
+   existing version.
+
+The GitHub environment `pypi` is bound in repo Settings → Environments
+to the trusted publisher at https://pypi.org/p/portal-mcp-server/.
+**Do not stash a `PYPI_API_TOKEN` there** — trusted publishing is
+strictly more secure than a static token.
+
+### CHANGELOG format constraint
+
+`release.yml` uses awk to grab the section that starts with `## ` and
+whose first line contains the target version string, up to (but not
+including) the next `## `:
+
+```markdown
+## v1.1.0 (2026-05-26)
+
+### BREAKING CHANGES
+- ...
+
+### Fix
+- ...
+
+## v1.0.1 (2026-05-15)
+...
+```
+
+> ⚠️ Each version header must contain the plain version number (e.g.
+> `1.1.0`), or awk returns an empty string and the GitHub Release body
+> ends up blank.
+
+### Cutting a new release
+
+1. Bump `version` in `pyproject.toml` (semver: BREAKING bumps major,
+   new feature bumps minor, bugfix bumps patch).
+2. `uv lock` so `uv.lock` picks up the new self-version.
+3. Local pre-flight: `pytest tests/ -v && ruff check portal_mcp_server/`.
+4. Prepend a `## v<x.y.z> (<YYYY-MM-DD>)` block to `CHANGELOG.md`,
+   grouped under `### BREAKING CHANGES` / `### Feat` / `### Fix` /
+   `### Tests` / `### Docs`, etc.
+5. Commit and `git push origin main`.
+6. `git tag v<x.y.z> -m "..."` then `git push origin v<x.y.z>`.
+7. Watch the [Actions page](https://github.com/TMYTiMidlY/portal-mcp-server/actions)
+   until all three jobs go green.
+8. Verify: https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\>
+   and https://pypi.org/project/portal-mcp-server/\<x.y.z\>/.
+
+### When a release fails
+
+| Red job | Most likely cause | What to do |
+|---|---|---|
+| `release-build` | broken `pyproject.toml` / build backend error | Read the build log; reproduce locally with `python -m build` |
+| `create-release` | CHANGELOG section not extractable (version string missing from header / earlier header truncated) | Fix CHANGELOG, delete the tag, retag |
+| `pypi-publish` | trusted publisher not configured / version already on PyPI | Configure trusted publishing; `skip-existing` already accepts a duplicate version so no re-upload needed |
+
+> History lesson: before v1.1.0, `release.yml` read the version from
+> `pyproject.toml` and risked drifting from the tag name. Commit
+> `8e33ea3 fix(ci): derive release version from tag name instead of
+> pyproject.toml` switched to `GITHUB_REF_NAME`, which is the source
+> of truth.
+
 ## Vulnerability disclosure
 
 **Do not** report security vulnerabilities in public issues. Use
