@@ -14,10 +14,16 @@ source .venv/bin/activate
 pytest                         # 应全绿（live SSH 测试默认 skip）
 ```
 
+要让 MCP client 直接跑这个本地 checkout，可安装成固定可执行文件：
+
+```bash
+uv tool install --force .      # --force 覆盖旧 tool，确保用当前 checkout
+```
+
 不想用 uv 也可以走标准 pip：
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"       # -e/--editable 指向当前源码
 ```
 
 ## 代码规范

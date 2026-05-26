@@ -16,10 +16,16 @@ source .venv/bin/activate
 pytest                         # should be all green (live SSH tests skip by default)
 ```
 
+To point an MCP client at this local checkout, install it as a fixed executable:
+
+```bash
+uv tool install --force .      # --force overwrites the old tool with this checkout
+```
+
 If you'd rather not use uv, plain pip works:
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev]"       # -e/--editable points at this source tree
 ```
 
 ## Code conventions
