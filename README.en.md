@@ -248,9 +248,9 @@ To override hosts / policies / log paths, append an `env` block:
 
 ```json
 "env": {
-  "SSH_HOSTS_YAML": "/path/to/hosts.yaml",
-  "SSH_POLICIES_YAML": "/path/to/policies.yaml",
-  "SSH_MCP_LOG_DIR": "/path/to/logs"
+  "PORTAL_HOSTS_YAML": "/path/to/hosts.yaml",
+  "PORTAL_POLICIES_YAML": "/path/to/policies.yaml",
+  "PORTAL_LOG_DIR": "/path/to/logs"
 }
 ```
 
@@ -352,17 +352,37 @@ After starting Codex, run `/mcp` in the TUI to confirm `portal` is loaded.
 
 </details>
 
-## Configuration
+## Environment variables
 
-All settings are passed as environment variables. Set them in the `env` field of your MCP client config — they only affect the MCP server subprocess, not anything else on your system.
+All configurable knobs in portal-mcp-server are passed as environment variables, unified under the `PORTAL_*` prefix to avoid clashes with OpenSSH's own `SSH_*` namespace or other MCP servers. Set them in the `env` field of your MCP client config — they only affect the MCP server subprocess.
+
+> **v1.1.0 rename notice**: the three legacy prefixes from 1.0.x (`SSH_*`, `SSH_MCP_*`, `MCP_*`) have all been consolidated under `PORTAL_*`. **No backward compatibility.** When upgrading from 1.0.x, rename in one pass per the table below. Full migration table in [CHANGELOG](./CHANGELOG.md).
+
+### Overview
+
+| Category | Variable | One-line purpose |
+|---|---|---|
+| File paths | `PORTAL_HOSTS_YAML` | Host registry YAML |
+| File paths | `PORTAL_POLICIES_YAML` | Security policy YAML |
+| File paths | `PORTAL_LOG_DIR` | Audit + server log directory |
+| Security & auth | `PORTAL_AUDIT_FAIL_OPEN` | Whether audit-write failure is fail-open |
+| Security & auth | `PORTAL_AUTH_TOKEN` | Bearer token for HTTP transport |
+| Connection pool | `PORTAL_SSH_POOL_SIZE` | Max TCP connections per host |
+| Connection pool | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels per TCP connection |
+| Connection pool | `PORTAL_SSH_MAX_IDLE_TIME` | Idle-close timeout in seconds |
+| Connection pool | `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds |
+| Testing (dev only) | `PORTAL_TEST_LIVE` | Gate for live SSH integration tests |
+| Testing (dev only) | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | Live test target |
+
+Detailed breakdown below.
 
 ### File paths
 
 | Env var | Meaning | Default |
 |---|---|---|
-| `SSH_HOSTS_YAML` | Host registry YAML | `./config/hosts.yaml` if present, else `~/.config/portal-mcp-server/hosts.yaml` |
-| `SSH_POLICIES_YAML` | Security policy YAML | `./config/policies.yaml` if present, else `~/.config/portal-mcp-server/policies.yaml` |
-| `SSH_MCP_LOG_DIR` | Audit + server log directory | `./logs/` if present, else `~/.local/state/portal-mcp-server/logs/` |
+| `PORTAL_HOSTS_YAML` | Host registry YAML | `./config/hosts.yaml` if present, else `~/.config/portal-mcp-server/hosts.yaml` |
+| `PORTAL_POLICIES_YAML` | Security policy YAML | `./config/policies.yaml` if present, else `~/.config/portal-mcp-server/policies.yaml` |
+| `PORTAL_LOG_DIR` | Audit + server log directory | `./logs/` if present, else `~/.local/state/portal-mcp-server/logs/` |
 
 Resolution order: env var > `./config/` or `./logs/` in the current directory (developer-checkout layout) > XDG directories. `config/hosts.example.yaml` is the schema template. **`hosts.yaml` contains real credentials and is in `.gitignore` — never commit it.**
 
@@ -370,19 +390,31 @@ Resolution order: env var > `./config/` or `./logs/` in the current directory (d
 
 | Env var | Meaning | Default |
 |---|---|---|
-| `SSH_MCP_AUDIT_FAIL_OPEN` | Set to `1` → audit-write failures are warnings only; unset → **fail-closed**, audit-write failure aborts the operation | _(unset)_ |
-| `MCP_AUTH_TOKEN` | Bearer token for HTTP transport (`--transport streamable_http`); not needed for stdio | _(none)_ |
+| `PORTAL_AUDIT_FAIL_OPEN` | Set to `1` → audit-write failures are warnings only; unset → **fail-closed**, audit-write failure aborts the operation | _(unset)_ |
+| `PORTAL_AUTH_TOKEN` | Bearer token for HTTP transport (`--transport streamable_http`); not needed for stdio | _(none)_ |
 
 ### Connection pool
 
-Controls the in-process asyncssh connection pool. Defaults work well for most setups; tune only under high concurrency or unusual network conditions.
+Controls the in-process asyncssh connection pool. Defaults work well for most setups; tune only under high concurrency or unusual network conditions. Pool behaviour is documented in [§ In-process connection pool](#in-process-connection-pool).
 
 | Env var | Meaning | Default |
 |---|---|---|
-| `SSH_POOL_SIZE` | Max TCP connections per host. When the pool is full and every connection is at the channel ceiling, the least-loaded connection is reused (with a warning) | `5` |
-| `SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels (SFTP, exec, tunnel, …) multiplexed over one TCP connection. New connections are opened when exceeded, up to `SSH_POOL_SIZE` | `5` |
-| `SSH_MAX_IDLE_TIME` | Close idle connections (no active channels) after this many seconds. Set `0` to disable | `600` (10 min) |
-| `SSH_MAX_CONN_AGE` | Max connection lifetime in seconds; aged connections with no active channels are closed. Guards against silent firewall / NAT drops | `3600` (1 hour) |
+| `PORTAL_SSH_POOL_SIZE` | Max TCP connections per host. When the pool is full and every connection is at the channel ceiling, the least-loaded connection is reused (with a warning) | `5` |
+| `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels (SFTP, exec, tunnel, …) multiplexed over one TCP connection. New connections are opened when exceeded, up to `PORTAL_SSH_POOL_SIZE` | `5` |
+| `PORTAL_SSH_MAX_IDLE_TIME` | Close idle connections (no active channels) after this many seconds. Set `0` to disable | `600` (10 min) |
+| `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds; aged connections with no active channels are closed. Guards against silent firewall / NAT drops | `3600` (1 hour) |
+
+### Testing (dev only)
+
+Only relevant when running `tests/`; regular MCP deployments do not need these. See [§ Testing](#testing) for full usage.
+
+| Env var | Meaning | Default |
+|---|---|---|
+| `PORTAL_TEST_LIVE` | Set to `1` / `true` / `yes` to actually run the real-SSH tests in `tests/test_live_ssh.py`; otherwise they are all skipped | _(unset)_ |
+| `PORTAL_TEST_HOST` | Live-test target host | `127.0.0.1` |
+| `PORTAL_TEST_PORT` | Live-test target port | `22` |
+| `PORTAL_TEST_USER` | Live-test SSH user | `$USER` or `root` |
+| `PORTAL_TEST_KEY_PATH` | Private key for live tests | `~/.ssh/id_ed25519` |
 
 ### Full example
 
@@ -393,10 +425,10 @@ Controls the in-process asyncssh connection pool. Defaults work well for most se
       "command": "uvx",
       "args": ["portal-mcp-server"],
       "env": {
-        "SSH_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
-        "SSH_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
-        "SSH_POOL_SIZE": "10",
-        "SSH_MAX_CHANNELS_PER_CONN": "8"
+        "PORTAL_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
+        "PORTAL_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
+        "PORTAL_SSH_POOL_SIZE": "10",
+        "PORTAL_SSH_MAX_CHANNELS_PER_CONN": "8"
       }
     }
   }
@@ -474,7 +506,7 @@ Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphra
 - **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).
 - **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate limit; every state-changing tool runs through `_gate` with no side doors (`portal_host(register)` gates against the target IP, not the alias; `portal_tunnel_close` is gated; multi-host gates are two-phase).
 - **Authentication**: SSH keys are the default and recommended path; password auth is supported but only via `password_command` in `hosts.yaml`, never exposed through any MCP tool — config in [Authentication](#authentication), security design in [`SECURITY.md` § Authentication](./SECURITY.md#authentication).
-- **Audit**: every state-changing operation is appended to `logs/audit.jsonl`; fail-closed by default (`SSH_MCP_AUDIT_FAIL_OPEN=1` switches to fail-open).
+- **Audit**: every state-changing operation is appended to `logs/audit.jsonl`; fail-closed by default (`PORTAL_AUDIT_FAIL_OPEN=1` switches to fail-open).
 - **Hash-protected edits**: `portal_read` + `portal_patch` use SHA-256 + per-range hashes + atomic `posix_rename` + post-write rehash to refuse concurrent overwrites.
 
 The full threat model, layer-by-layer defences, operator hygiene, known limitations, and algorithmic provenance live in **[`SECURITY.md`](./SECURITY.md)**.
@@ -488,7 +520,7 @@ Vulnerability disclosure: do **not** open a public issue. Use [GitHub Security A
 
 ```bash
 pytest tests/ -v
-# live SSH tests skip by default (gated by SSH_TEST_LIVE)
+# live SSH tests skip by default (gated by PORTAL_TEST_LIVE)
 ```
 
 Coverage: command-injection regression, safety validators, hash-protected editor, concurrency, resource lifecycle, multi-host policy enforcement, password_command / passphrase_command safety invariants, audit fail mode.
@@ -498,9 +530,9 @@ Coverage: command-injection regression, safety validators, hash-protected editor
 `tests/live_smoke.py` imports the local working tree and drives a series of real SSH actions: stale `password:` field handling in `hosts.yaml`, basic `ssh_exec`, `portal_multi_exec(mode="parallel", group_tag=...)` against real hosts (verifying both blocked-command and not-in-allowlist hosts get rejected), per-command gating in `portal_bash`, a `portal_bash` + `portal_patch` round-trip in remote `/tmp/` (including the stale-hash rejection path), and audit.jsonl ingestion of the new operation tags.
 
 ```bash
-SSH_MCP_AUDIT_FAIL_OPEN=1 \
-  TEST_HOST=<your-host> TEST_PORT=22 TEST_USER=<user> \
-  TEST_KEY_PATH=$HOME/.ssh/id_ed25519 \
+PORTAL_AUDIT_FAIL_OPEN=1 \
+  PORTAL_TEST_HOST=<your-host> PORTAL_TEST_PORT=22 PORTAL_TEST_USER=<user> \
+  PORTAL_TEST_KEY_PATH=$HOME/.ssh/id_ed25519 \
   uv run --with-editable . --with pytest --with pytest-asyncio \
     python tests/live_smoke.py
 ```

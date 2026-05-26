@@ -1,7 +1,7 @@
 """Default filesystem locations for portal-mcp-server.
 
 Resolution order for each path:
-1. Environment variable override (e.g. SSH_HOSTS_YAML).
+1. Environment variable override (e.g. PORTAL_HOSTS_YAML).
 2. Legacy `./config/<file>` relative to the current working directory
    (preserves the original developer-checkout layout).
 3. XDG-style user directory (works for `uvx`/`pipx` installs where the
@@ -42,7 +42,7 @@ def _resolve(env_var: str, legacy: str, xdg_default: Path) -> Path:
 
 def hosts_yaml_path() -> Path:
     return _resolve(
-        "SSH_HOSTS_YAML",
+        "PORTAL_HOSTS_YAML",
         "config/hosts.yaml",
         xdg_config_home() / "hosts.yaml",
     )
@@ -50,14 +50,14 @@ def hosts_yaml_path() -> Path:
 
 def policies_yaml_path() -> Path:
     return _resolve(
-        "SSH_POLICIES_YAML",
+        "PORTAL_POLICIES_YAML",
         "config/policies.yaml",
         xdg_config_home() / "policies.yaml",
     )
 
 
 def default_log_dir() -> Path:
-    override = os.environ.get("SSH_MCP_LOG_DIR")
+    override = os.environ.get("PORTAL_LOG_DIR")
     if override:
         return Path(override).expanduser()
     legacy = Path("logs")

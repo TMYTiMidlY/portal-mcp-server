@@ -7,9 +7,9 @@ HOW TO RUN:
   pytest tests/test_live_ssh.py -v
 
 REQUIREMENTS:
-  - SSH server accessible at TEST_HOST (default: 127.0.0.1:22)
-  - Set env vars: TEST_HOST, TEST_USER, TEST_KEY_PATH
-  - Or edit the TEST_* constants below.
+  - SSH server accessible at PORTAL_TEST_HOST (default: 127.0.0.1:22)
+  - Set env vars: PORTAL_TEST_HOST, PORTAL_TEST_USER, PORTAL_TEST_KEY_PATH
+  - Or edit the PORTAL_TEST_* constants below.
 
 The tests use a real SSH connection; they do NOT mock asyncssh.
 """
@@ -25,10 +25,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 # ── Test configuration ─────────────────────────────────────────────────────
 TEST_HOST_NAME = "test-localhost"
-TEST_HOST      = os.environ.get("TEST_HOST", "127.0.0.1")
-TEST_PORT      = int(os.environ.get("TEST_PORT", "22"))
-TEST_USER      = os.environ.get("TEST_USER", os.environ.get("USER", "root"))
-TEST_KEY       = os.environ.get("TEST_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
+TEST_HOST      = os.environ.get("PORTAL_TEST_HOST", "127.0.0.1")
+TEST_PORT      = int(os.environ.get("PORTAL_TEST_PORT", "22"))
+TEST_USER      = os.environ.get("PORTAL_TEST_USER", os.environ.get("USER", "root"))
+TEST_KEY       = os.environ.get("PORTAL_TEST_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
 
 # ── Bootstrap: register the test host ─────────────────────────────────────
 from portal_mcp_server.connection_manager import get_manager

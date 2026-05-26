@@ -6,7 +6,7 @@ Audit findings addressed
   host blew up ``asyncio.gather`` and crashed the entire fleet operation.
 * ``audit_log`` defaults to fail-closed: a write failure raises
   ``RuntimeError`` so the caller learns the operation was not recorded.
-  Set ``SSH_MCP_AUDIT_FAIL_OPEN=1`` to opt out (operation continues with a
+  Set ``PORTAL_AUDIT_FAIL_OPEN=1`` to opt out (operation continues with a
   warning) — appropriate for development / test environments.
 """
 from __future__ import annotations
@@ -54,7 +54,7 @@ class TestPlaybookOnGroupFailureIsolation:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  audit.audit_log — default fail-closed; SSH_MCP_AUDIT_FAIL_OPEN=1 → fail-open
+#  audit.audit_log — default fail-closed; PORTAL_AUDIT_FAIL_OPEN=1 → fail-open
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestAuditFailClosed:

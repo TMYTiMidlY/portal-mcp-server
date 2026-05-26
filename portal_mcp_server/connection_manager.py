@@ -600,9 +600,9 @@ def get_manager() -> ConnectionManager:
                 return default
 
         _manager = ConnectionManager(
-            pool_size=_int_env("SSH_POOL_SIZE", 5),
-            max_channels_per_conn=_int_env("SSH_MAX_CHANNELS_PER_CONN", DEFAULT_MAX_CHANNELS_PER_CONN),
-            max_idle_time=_float_env("SSH_MAX_IDLE_TIME", DEFAULT_MAX_IDLE_TIME),
-            max_conn_age=_float_env("SSH_MAX_CONN_AGE", DEFAULT_MAX_CONN_AGE),
+            pool_size=_int_env("PORTAL_SSH_POOL_SIZE", 5),
+            max_channels_per_conn=_int_env("PORTAL_SSH_MAX_CHANNELS_PER_CONN", DEFAULT_MAX_CHANNELS_PER_CONN),
+            max_idle_time=_float_env("PORTAL_SSH_MAX_IDLE_TIME", DEFAULT_MAX_IDLE_TIME),
+            max_conn_age=_float_env("PORTAL_SSH_MAX_CONN_AGE", DEFAULT_MAX_CONN_AGE),
         )
     return _manager

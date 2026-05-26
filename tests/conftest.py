@@ -4,7 +4,7 @@ Goals
 -----
 1. Register the ``ssh`` marker so the existing live-SSH tests can be skipped
    in environments without a reachable SSH server (CI, sandbox).
-2. Auto-skip the live tests in ``test_live_ssh.py`` if ``SSH_TEST_LIVE`` is
+2. Auto-skip the live tests in ``test_live_ssh.py`` if ``PORTAL_TEST_LIVE`` is
    not set — they require a real SSH server and credentials.
 3. Reset module-level singletons between tests so independent tests stay
    independent (the previous suite mutated the global ConnectionManager
@@ -20,16 +20,16 @@ import pytest
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "ssh: requires a reachable SSH server "
-                  "(set SSH_TEST_LIVE=1 to run)"
+                  "(set PORTAL_TEST_LIVE=1 to run)"
     )
 
 
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip live SSH tests unless SSH_TEST_LIVE is set."""
-    if os.environ.get("SSH_TEST_LIVE", "").lower() in ("1", "true", "yes"):
+    """Auto-skip live SSH tests unless PORTAL_TEST_LIVE is set."""
+    if os.environ.get("PORTAL_TEST_LIVE", "").lower() in ("1", "true", "yes"):
         return
     skip = pytest.mark.skip(
-        reason="live SSH test — set SSH_TEST_LIVE=1 to run"
+        reason="live SSH test — set PORTAL_TEST_LIVE=1 to run"
     )
     for item in items:
         # Anything in the test_live_ssh.py module that exercises a real SSH

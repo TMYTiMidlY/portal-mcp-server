@@ -10,7 +10,7 @@ matches the cybersecurity positioning advertised in the README ("every
 state-changing operation is recorded") — if the audit log cannot be
 written, we refuse to act.
 
-Set the environment variable ``SSH_MCP_AUDIT_FAIL_OPEN=1`` to switch to
+Set the environment variable ``PORTAL_AUDIT_FAIL_OPEN=1`` to switch to
 fail-open behaviour (write failure is logged but the operation proceeds).
 This is appropriate for development / test environments where audit
 durability is not required.
@@ -28,13 +28,13 @@ _audit_file = _log_dir / "audit.jsonl"
 
 logger = logging.getLogger("portal_mcp.audit")
 
-_FAIL_OPEN_ENV = "SSH_MCP_AUDIT_FAIL_OPEN"
+_FAIL_OPEN_ENV = "PORTAL_AUDIT_FAIL_OPEN"
 
 
 def _fail_closed() -> bool:
     """Read the fail-closed flag at call time so tests / runtime can flip it.
 
-    Default is fail-closed (returns True). Setting ``SSH_MCP_AUDIT_FAIL_OPEN``
+    Default is fail-closed (returns True). Setting ``PORTAL_AUDIT_FAIL_OPEN``
     to a truthy value switches to fail-open (returns False).
     """
     return os.environ.get(_FAIL_OPEN_ENV, "").lower() not in (

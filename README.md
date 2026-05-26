@@ -248,9 +248,9 @@ pip install -e .
 
 ```json
 "env": {
-  "SSH_HOSTS_YAML": "/path/to/hosts.yaml",
-  "SSH_POLICIES_YAML": "/path/to/policies.yaml",
-  "SSH_MCP_LOG_DIR": "/path/to/logs"
+  "PORTAL_HOSTS_YAML": "/path/to/hosts.yaml",
+  "PORTAL_POLICIES_YAML": "/path/to/policies.yaml",
+  "PORTAL_LOG_DIR": "/path/to/logs"
 }
 ```
 
@@ -352,17 +352,37 @@ args = ["portal-mcp-server"]
 
 </details>
 
-## 配置
+## 环境变量
 
-所有配置通过环境变量传入。在 MCP client 的 `env` 字段里设置即可——这些变量只对 MCP server 子进程生效，不影响其他程序。
+portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `PORTAL_*` 前缀，避免和 OpenSSH 自带的 `SSH_*`、或其他 MCP server 的命名空间冲突。在 MCP client 的 `env` 字段里设置即可——这些变量只对 MCP server 子进程生效，不影响其他程序。
+
+> **v1.1.0 重命名提醒**：1.0.x 时期的 `SSH_*` / `SSH_MCP_*` / `MCP_*` 三套前缀已统一改成 `PORTAL_*`，不向后兼容。从 1.0.x 升级时按下表照单全收一次即可。完整迁移表见 [CHANGELOG](./CHANGELOG.md)。
+
+### 总览
+
+| 分类 | 变量 | 用途一句话 |
+|---|---|---|
+| 文件路径 | `PORTAL_HOSTS_YAML` | 主机注册 YAML |
+| 文件路径 | `PORTAL_POLICIES_YAML` | 安全策略 YAML |
+| 文件路径 | `PORTAL_LOG_DIR` | audit + server log 目录 |
+| 安全与认证 | `PORTAL_AUDIT_FAIL_OPEN` | audit 写盘失败时是否 fail-open |
+| 安全与认证 | `PORTAL_AUTH_TOKEN` | HTTP transport 的 Bearer token |
+| 连接池 | `PORTAL_SSH_POOL_SIZE` | 每 host 最大 TCP 连接数 |
+| 连接池 | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 最大并发 channel 数 |
+| 连接池 | `PORTAL_SSH_MAX_IDLE_TIME` | 空闲连接自动关闭超时（秒） |
+| 连接池 | `PORTAL_SSH_MAX_CONN_AGE` | 连接最大存活时间（秒） |
+| 测试（仅 dev） | `PORTAL_TEST_LIVE` | 是否执行真实 SSH 集成测试 |
+| 测试（仅 dev） | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | live 测试目标 |
+
+下面分类详述。
 
 ### 文件路径
 
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
-| `SSH_HOSTS_YAML` | 主机注册 YAML | `./config/hosts.yaml` 若存在，否则 `~/.config/portal-mcp-server/hosts.yaml` |
-| `SSH_POLICIES_YAML` | 安全策略 YAML | `./config/policies.yaml` 若存在，否则 `~/.config/portal-mcp-server/policies.yaml` |
-| `SSH_MCP_LOG_DIR` | audit + server log 目录 | `./logs/` 若存在，否则 `~/.local/state/portal-mcp-server/logs/` |
+| `PORTAL_HOSTS_YAML` | 主机注册 YAML | `./config/hosts.yaml` 若存在，否则 `~/.config/portal-mcp-server/hosts.yaml` |
+| `PORTAL_POLICIES_YAML` | 安全策略 YAML | `./config/policies.yaml` 若存在，否则 `~/.config/portal-mcp-server/policies.yaml` |
+| `PORTAL_LOG_DIR` | audit + server log 目录 | `./logs/` 若存在，否则 `~/.local/state/portal-mcp-server/logs/` |
 
 路径解析优先级：环境变量 > 当前目录下的 `./config/` 或 `./logs/`（兼容开发者 checkout 布局）> XDG 目录。`config/hosts.example.yaml` 给了完整 schema 模板。**`hosts.yaml` 含真实凭据，已在 `.gitignore`，永远别 commit**。
 
@@ -370,19 +390,31 @@ args = ["portal-mcp-server"]
 
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
-| `SSH_MCP_AUDIT_FAIL_OPEN` | 设 `1` → audit 写盘失败时仅 warning 并继续；默认 → **fail-closed**，audit 写不进则操作 raise 中止 | _(unset)_ |
-| `MCP_AUTH_TOKEN` | HTTP transport（`--transport streamable_http`）的 Bearer token；stdio 模式不需要 | _(none)_ |
+| `PORTAL_AUDIT_FAIL_OPEN` | 设 `1` → audit 写盘失败时仅 warning 并继续；默认 → **fail-closed**，audit 写不进则操作 raise 中止 | _(unset)_ |
+| `PORTAL_AUTH_TOKEN` | HTTP transport（`--transport streamable_http`）的 Bearer token；stdio 模式不需要 | _(none)_ |
 
 ### 连接池
 
-控制 asyncssh 进程内连接池的行为。默认值适合大多数场景，仅在高并发或特殊网络环境下需要调整。
+控制 asyncssh 进程内连接池的行为。默认值适合大多数场景，仅在高并发或特殊网络环境下需要调整。详细的池行为说明见 [§ 进程内连接池](#进程内连接池)。
 
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
-| `SSH_POOL_SIZE` | 每 host 最大 TCP 连接数。连接池满且所有连接都达到 channel 上限时，会复用最空闲的连接（带 warning） | `5` |
-| `SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 上最大并发 channel 数（SFTP 会话、exec、tunnel 等共享）。超出后新建 TCP，直到 `SSH_POOL_SIZE` 上限 | `5` |
-| `SSH_MAX_IDLE_TIME` | 无活跃 channel 的连接空闲多久后自动关闭（秒）。设 `0` 禁用 | `600`（10 分钟） |
-| `SSH_MAX_CONN_AGE` | 连接最大存活时间（秒），超龄且无活跃 channel 时关闭。防止防火墙 / NAT 静默断连 | `3600`（1 小时） |
+| `PORTAL_SSH_POOL_SIZE` | 每 host 最大 TCP 连接数。连接池满且所有连接都达到 channel 上限时，会复用最空闲的连接（带 warning） | `5` |
+| `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 上最大并发 channel 数（SFTP 会话、exec、tunnel 等共享）。超出后新建 TCP，直到 `PORTAL_SSH_POOL_SIZE` 上限 | `5` |
+| `PORTAL_SSH_MAX_IDLE_TIME` | 无活跃 channel 的连接空闲多久后自动关闭（秒）。设 `0` 禁用 | `600`（10 分钟） |
+| `PORTAL_SSH_MAX_CONN_AGE` | 连接最大存活时间（秒），超龄且无活跃 channel 时关闭。防止防火墙 / NAT 静默断连 | `3600`（1 小时） |
+
+### 测试（仅 dev）
+
+只在跑 `tests/` 时用到，正常 MCP 部署不需要设置。详细测试用法见 [§ 测试](#测试)。
+
+| 环境变量 | 含义 | 默认 |
+|---|---|---|
+| `PORTAL_TEST_LIVE` | 设 `1` / `true` / `yes` 才会运行 `tests/test_live_ssh.py` 中的真实 SSH 测试；否则全部 skip | _(unset)_ |
+| `PORTAL_TEST_HOST` | live 测试目标主机 | `127.0.0.1` |
+| `PORTAL_TEST_PORT` | live 测试目标端口 | `22` |
+| `PORTAL_TEST_USER` | live 测试登录用户 | `$USER` 或 `root` |
+| `PORTAL_TEST_KEY_PATH` | live 测试用的私钥路径 | `~/.ssh/id_ed25519` |
 
 ### 完整示例
 
@@ -393,10 +425,10 @@ args = ["portal-mcp-server"]
       "command": "uvx",
       "args": ["portal-mcp-server"],
       "env": {
-        "SSH_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
-        "SSH_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
-        "SSH_POOL_SIZE": "10",
-        "SSH_MAX_CHANNELS_PER_CONN": "8"
+        "PORTAL_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
+        "PORTAL_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
+        "PORTAL_SSH_POOL_SIZE": "10",
+        "PORTAL_SSH_MAX_CHANNELS_PER_CONN": "8"
       }
     }
   }
@@ -474,7 +506,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）
 - **认证**：默认且推荐 SSH key；密码登录支持但只走 `hosts.yaml` 的 `password_command`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
-- **审计**：所有状态变更写 `logs/audit.jsonl`；默认 fail-closed（`SSH_MCP_AUDIT_FAIL_OPEN=1` 切 fail-open）
+- **审计**：所有状态变更写 `logs/audit.jsonl`；默认 fail-closed（`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open）
 - **hash 保护编辑**：`portal_read` + `portal_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
 
 完整威胁模型、各防御层细节、运维 hygiene、已知限制、算法引用见 **[`SECURITY.md`](./SECURITY.md)**。
@@ -488,7 +520,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 ```bash
 pytest tests/ -v
-# live SSH 测试默认 skip（受 SSH_TEST_LIVE 环境变量控制）
+# live SSH 测试默认 skip（受 PORTAL_TEST_LIVE 环境变量控制）
 ```
 
 覆盖：command injection regression、safety validators、hash-protected editor、concurrency、resource lifecycle、multi-host policy enforcement、password_command/passphrase_command 安全不变量、audit fail mode。
@@ -498,9 +530,9 @@ pytest tests/ -v
 `tests/live_smoke.py` 直接 import 本地工作树驱动一系列真实 SSH 行为：`hosts.yaml` 残留 `password:` 字段处理、`ssh_exec` 基础调用、`portal_multi_exec(mode="parallel", group_tag=...)` 在真实主机上的 gate（blocked 命令 + 不在 allowlist 的主机均拦截）、`portal_bash` 单命令的 gate、`portal_bash` + `portal_patch` 在远端 `/tmp/` 的 round-trip（含 stale-hash 拒绝路径）、audit.jsonl 是否吃到新加的 operation tag。
 
 ```bash
-SSH_MCP_AUDIT_FAIL_OPEN=1 \
-  TEST_HOST=<your-host> TEST_PORT=22 TEST_USER=<user> \
-  TEST_KEY_PATH=$HOME/.ssh/id_ed25519 \
+PORTAL_AUDIT_FAIL_OPEN=1 \
+  PORTAL_TEST_HOST=<your-host> PORTAL_TEST_PORT=22 PORTAL_TEST_USER=<user> \
+  PORTAL_TEST_KEY_PATH=$HOME/.ssh/id_ed25519 \
   uv run --with-editable . --with pytest --with pytest-asyncio \
     python tests/live_smoke.py
 ```

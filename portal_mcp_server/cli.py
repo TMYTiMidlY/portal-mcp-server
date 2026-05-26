@@ -785,14 +785,14 @@ def main() -> None:
     from starlette.requests import Request
     from starlette.responses import Response
 
-    MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "")
+    PORTAL_AUTH_TOKEN = os.environ.get("PORTAL_AUTH_TOKEN", "")
 
     class TokenAuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
-            if not MCP_AUTH_TOKEN:
+            if not PORTAL_AUTH_TOKEN:
                 return await call_next(request)
             auth = request.headers.get("Authorization", "")
-            if auth != f"Bearer {MCP_AUTH_TOKEN}":
+            if auth != f"Bearer {PORTAL_AUTH_TOKEN}":
                 return Response("Unauthorized", status_code=401)
             return await call_next(request)
 
@@ -811,7 +811,7 @@ def main() -> None:
     if args.transport == "streamable_http":
         import uvicorn
         app = mcp.streamable_http_app()
-        if MCP_AUTH_TOKEN:
+        if PORTAL_AUTH_TOKEN:
             app.add_middleware(TokenAuthMiddleware)
             logger.info("Bearer token auth enabled")
         logger.info(f"HTTP transport on {args.host}:{args.port}/mcp")

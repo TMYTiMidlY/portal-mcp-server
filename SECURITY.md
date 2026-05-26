@@ -172,7 +172,7 @@ choice is deliberate:
 | `shell=True` | Operators write things like `pass show ssh/web01`, `printf '%s' "$VAR"`, `op read op://...`. Without a shell they would have to argv-split themselves and lose env-var substitution and pipelines — exactly the patterns the entire family (Borg / restic / msmtp / git-credential-cache) supports. The risk that normally rules out `shell=True` (LLM-controlled command strings) does not apply: the command is operator-controlled and never reaches the LLM surface. |
 | `capture_output=True` | Stops stdout (= the secret) from reaching the MCP server's own stderr stream. Without it, an unconsumed secret would be visible to anything reading the server's process output. |
 | `timeout=SECRET_COMMAND_TIMEOUT_SEC` (= 10 seconds) | Long enough for `pass show` to unlock the GPG agent on first use, or for `op read` to round-trip to 1Password's servers. Short enough that a hung password manager (locked GPG agent, network-mounted secret store gone unreachable) does not wedge the connection pool — which would block every subsequent SSH operation, not just this one host. |
-| `env=os.environ.copy()` | Required so `printf '%s' "$WEB01_PASSWORD"` and the GitHub-Actions / Vault / `direnv` patterns work at all. The MCP server inherits the operator's environment by design (see `SSH_HOSTS_YAML`, `SSH_MCP_LOG_DIR`) — passing it through is consistent with the rest of the server's contract. |
+| `env=os.environ.copy()` | Required so `printf '%s' "$WEB01_PASSWORD"` and the GitHub-Actions / Vault / `direnv` patterns work at all. The MCP server inherits the operator's environment by design (see `PORTAL_HOSTS_YAML`, `PORTAL_LOG_DIR`) — passing it through is consistent with the rest of the server's contract. |
 | `check=False` + manual exit-code handling | Lets us format the error message with only `host` and `returncode`, never the command string and never the captured stderr. |
 | `loop.run_in_executor(None, _run)` | The subprocess call is synchronous; running it on the asyncio thread pool keeps the server's event loop responsive while the password manager unlocks. |
 
@@ -218,7 +218,7 @@ Read-only tools — `portal_read`, `portal_grep`, `portal_glob`,
 
 The audit subsystem is **fail-closed by default**: if writing to disk
 fails, the operation raises and aborts. Set
-`SSH_MCP_AUDIT_FAIL_OPEN=1` to switch to fail-open behaviour (warning
+`PORTAL_AUDIT_FAIL_OPEN=1` to switch to fail-open behaviour (warning
 only — appropriate for dev / test, not production).
 
 > ⚠️ **Honest disclosure on fail-closed semantics.** Audit entries are

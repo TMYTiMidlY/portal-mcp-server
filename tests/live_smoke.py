@@ -1,6 +1,7 @@
 """Live end-to-end smoke test for the portal-mcp-server tools.
 
-Target host comes from TEST_HOST / TEST_PORT / TEST_USER (or sensible defaults).
+Target host comes from PORTAL_TEST_HOST / PORTAL_TEST_PORT / PORTAL_TEST_USER
+(or sensible defaults).
 
 Verifies:
   1. ssh_exec basic round-trip still works (no regression).
@@ -12,7 +13,7 @@ Verifies:
   6. The new audit entries appear in audit.jsonl with the new operation tags.
 
 Run:
-  SSH_MCP_AUDIT_FAIL_OPEN=1 uv run --with-editable . --with pytest \
+  PORTAL_AUDIT_FAIL_OPEN=1 uv run --with-editable . --with pytest \
     --with pytest-asyncio python tests/live_smoke.py
 """
 from __future__ import annotations
@@ -27,10 +28,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-TEST_HOST = os.environ.get("TEST_HOST", "10.144.18.10")
-TEST_PORT = int(os.environ.get("TEST_PORT", "2222"))
-TEST_USER = os.environ.get("TEST_USER", "timidly")
-TEST_KEY = os.environ.get("TEST_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
+TEST_HOST = os.environ.get("PORTAL_TEST_HOST", "10.144.18.10")
+TEST_PORT = int(os.environ.get("PORTAL_TEST_PORT", "2222"))
+TEST_USER = os.environ.get("PORTAL_TEST_USER", "timidly")
+TEST_KEY = os.environ.get("PORTAL_TEST_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
 
 
 def sect(title):
