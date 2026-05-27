@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import asyncssh
-from .connection_manager import SSH_DECODE_ERRORS, get_manager
+from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
 from .safety import quote_shell, validate_env_dict, validate_env_key
 
 logger = logging.getLogger("portal_mcp.sessions")
@@ -66,11 +66,11 @@ class SessionManager:
             process = await conn.create_process(
                 "bash -i", term_type="xterm-256color",
                 env=env, request_pty=True,
-                # See connection_manager.SSH_DECODE_ERRORS — without this,
+                # See connection_manager.DEFAULT_DECODE_ERRORS — without this,
                 # any non-UTF-8 byte on stdout (GBK from a Windows host,
                 # Latin-1 from legacy tools, …) raises UnicodeDecodeError
                 # inside asyncssh's stream reader and tears the channel down.
-                errors=SSH_DECODE_ERRORS,
+                errors=DEFAULT_DECODE_ERRORS,
             )
             session_id = str(uuid.uuid4())[:8]
             session = ShellSession(
@@ -150,7 +150,7 @@ class SessionManager:
             except (asyncssh.ChannelOpenError, asyncssh.ConnectionLost,
                     UnicodeDecodeError, ConnectionResetError, OSError) as e:
                 # Channel-level failure during read. With
-                # SSH_DECODE_ERRORS='backslashreplace' the UnicodeDecodeError
+                # DEFAULT_DECODE_ERRORS='backslashreplace' the UnicodeDecodeError
                 # branch shouldn't fire — keep it as defense-in-depth in case
                 # someone overrides the encoding to a stricter setting.
                 await self._invalidate(session_id)

@@ -1,3 +1,15 @@
+## v1.1.1 (2026-05-27)
+
+### Refactor
+
+- **internal naming**: renamed the module-level constant
+  `connection_manager.SSH_DECODE_ERRORS` to `DEFAULT_DECODE_ERRORS` so it
+  aligns with the surrounding `DEFAULT_*` defaults (`DEFAULT_MAX_IDLE_TIME`,
+  `DEFAULT_MAX_CONN_AGE`, …) and stops being misread as either an environment
+  variable or an `SSH_AUTH_SOCK`-style OpenSSH name. Purely internal: the
+  constant is not part of any public API, never read from the environment,
+  and never appeared in the README or `CHANGELOG`. Behaviour unchanged.
+
 ## v1.1.0 (2026-05-16)
 
 ### BREAKING CHANGES

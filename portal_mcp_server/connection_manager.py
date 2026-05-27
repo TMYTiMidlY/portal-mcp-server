@@ -47,7 +47,7 @@ DEFAULT_MAX_CONN_AGE = 3600.0
 # Used by every ``conn.run(...)`` / ``conn.create_process(...)`` call in
 # this codebase. Bumping it to ``'replace'`` would lose information; keep
 # ``'backslashreplace'`` so the original bytes can still be reconstructed.
-SSH_DECODE_ERRORS = "backslashreplace"
+DEFAULT_DECODE_ERRORS = "backslashreplace"
 
 
 @dataclass

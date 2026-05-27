@@ -21,7 +21,7 @@ import time
 import logging
 from typing import AsyncGenerator
 
-from .connection_manager import SSH_DECODE_ERRORS, get_manager
+from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
 from .audit import audit_log
 from .safety import (
     build_cwd_prefix,
@@ -48,7 +48,7 @@ async def ssh_exec(host_name: str, command: str, timeout: int = 60,
     try:
         result = await asyncio.wait_for(
             conn.run(full_cmd, env=env_clean, check=False,
-                     errors=SSH_DECODE_ERRORS),
+                     errors=DEFAULT_DECODE_ERRORS),
             timeout=timeout,
         )
         elapsed = round(time.time() - t0, 3)
@@ -79,7 +79,7 @@ async def ssh_exec_stream(host_name: str, command: str,
     mgr = get_manager()
     conn = await mgr.get_connection(host_name)
     try:
-        async with conn.create_process(command, errors=SSH_DECODE_ERRORS) as proc:
+        async with conn.create_process(command, errors=DEFAULT_DECODE_ERRORS) as proc:
             deadline = asyncio.get_event_loop().time() + timeout
             while asyncio.get_event_loop().time() < deadline:
                 try:

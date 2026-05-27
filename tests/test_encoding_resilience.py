@@ -14,7 +14,7 @@ sending`` until the caller manually invoked ``portal_bash_close``.
 
 The fix is in three layers:
 
-  1. ``connection_manager.SSH_DECODE_ERRORS = "backslashreplace"`` is passed
+  1. ``connection_manager.DEFAULT_DECODE_ERRORS = "backslashreplace"`` is passed
      to every ``create_process`` / ``conn.run`` so undecodable bytes show up
      as ``\\xd3\\xd0`` escapes instead of killing the channel.
   2. ``session_manager.execute_in_session`` catches channel-level errors,
@@ -119,7 +119,7 @@ def _install_fake_conn(monkeypatch, proc_factory):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Layer 1: SSH_DECODE_ERRORS is wired through to create_process
+#  Layer 1: DEFAULT_DECODE_ERRORS is wired through to create_process
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestDecodeErrorsKwarg:
@@ -139,16 +139,16 @@ class TestDecodeErrorsKwarg:
 
         assert create_kwargs, "create_process was not called"
         assert create_kwargs[0].get("errors") == \
-            connection_manager.SSH_DECODE_ERRORS
-        assert connection_manager.SSH_DECODE_ERRORS == "backslashreplace"
+            connection_manager.DEFAULT_DECODE_ERRORS
+        assert connection_manager.DEFAULT_DECODE_ERRORS == "backslashreplace"
 
     def test_shell_engine_passes_errors_kwarg(self):
         """Static check: shell_engine.ssh_exec passes errors= to conn.run."""
         import inspect
         from portal_mcp_server import shell_engine
         src = inspect.getsource(shell_engine.ssh_exec)
-        assert "errors=SSH_DECODE_ERRORS" in src, (
-            "shell_engine.ssh_exec must pass errors=SSH_DECODE_ERRORS to "
+        assert "errors=DEFAULT_DECODE_ERRORS" in src, (
+            "shell_engine.ssh_exec must pass errors=DEFAULT_DECODE_ERRORS to "
             "conn.run() to survive non-UTF-8 stdout from Windows hosts"
         )
 
@@ -157,14 +157,14 @@ class TestDecodeErrorsKwarg:
         import inspect
         from portal_mcp_server import remote_search
         src = inspect.getsource(remote_search)
-        # Count the run() invocations and require errors=SSH_DECODE_ERRORS
+        # Count the run() invocations and require errors=DEFAULT_DECODE_ERRORS
         # on each. The string "conn.run(" appears once per call site.
         run_calls = src.count("conn.run(")
-        guarded = src.count("errors=SSH_DECODE_ERRORS")
+        guarded = src.count("errors=DEFAULT_DECODE_ERRORS")
         assert run_calls > 0, "smoke check: remote_search should issue run()"
         assert guarded >= run_calls, (
             f"only {guarded}/{run_calls} conn.run() calls in remote_search "
-            "pass errors=SSH_DECODE_ERRORS"
+            "pass errors=DEFAULT_DECODE_ERRORS"
         )
 
 
@@ -199,7 +199,7 @@ class TestSessionDeath:
     @pytest.mark.asyncio
     async def test_decode_error_on_read_raises_session_dead(self, monkeypatch):
         """If a defense-in-depth UnicodeDecodeError still slips through
-        (e.g. someone overrides SSH_DECODE_ERRORS to 'strict'), the
+        (e.g. someone overrides DEFAULT_DECODE_ERRORS to 'strict'), the
         session must die cleanly instead of leaving a corpse in the
         registry."""
         from portal_mcp_server import session_manager

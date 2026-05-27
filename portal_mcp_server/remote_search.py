@@ -13,7 +13,7 @@ import logging
 import shlex
 from typing import Any, Dict, Optional
 
-from .connection_manager import SSH_DECODE_ERRORS, get_manager
+from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
 
 logger = logging.getLogger("portal_mcp.remote_search")
 
@@ -28,10 +28,10 @@ async def _probe_tools(host: str) -> Dict[str, bool]:
     conn = await mgr.get_connection(host)
     try:
         r = await conn.run("command -v rg >/dev/null && echo yes || echo no",
-                           errors=SSH_DECODE_ERRORS)
+                           errors=DEFAULT_DECODE_ERRORS)
         has_rg = r.stdout.strip() == "yes"
         r2 = await conn.run("command -v find >/dev/null && echo yes || echo no",
-                            errors=SSH_DECODE_ERRORS)
+                            errors=DEFAULT_DECODE_ERRORS)
         has_find = r2.stdout.strip() == "yes"
     finally:
         mgr.release_connection(host, conn)
@@ -81,7 +81,7 @@ async def remote_grep(
                 cmd_parts += ["--max-count", str(int(max_count))]
             cmd_parts += [_q(pattern), _q(path)]
             cmd = " ".join(cmd_parts)
-            r = await conn.run(cmd, check=False, errors=SSH_DECODE_ERRORS)
+            r = await conn.run(cmd, check=False, errors=DEFAULT_DECODE_ERRORS)
             matches = []
             for line in r.stdout.splitlines():
                 try:
@@ -107,7 +107,7 @@ async def remote_grep(
             cmd_parts += [f"-m{int(max_count)}"]
         cmd_parts += ["--", _q(pattern), _q(path)]
         cmd = " ".join(cmd_parts)
-        r = await conn.run(cmd, check=False, errors=SSH_DECODE_ERRORS)
+        r = await conn.run(cmd, check=False, errors=DEFAULT_DECODE_ERRORS)
         matches = []
         for line in r.stdout.splitlines():
             # format: file:line:text
@@ -158,7 +158,7 @@ async def remote_glob(host: str, pattern: str, path: Optional[str] = None) -> Di
         else:
             cmd = f"cd {_q(base)} && find . -type f -name {_q(pattern)} 2>/dev/null"
             engine = "find"
-        r = await conn.run(cmd, check=False, errors=SSH_DECODE_ERRORS)
+        r = await conn.run(cmd, check=False, errors=DEFAULT_DECODE_ERRORS)
         files = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
         return {"engine": engine, "files": files, "base": base}
     finally:
