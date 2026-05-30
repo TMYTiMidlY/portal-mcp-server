@@ -737,7 +737,7 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 
 
 @mcp.tool()
-async def portal_bash(host: str, command: str, timeout: float = 60.0) -> str:
+async def portal_bash(host: str, command: str, timeout: float = 3600.0) -> str:
     """Run a command in the persistent bash session for <host>.
 
     Behavior:

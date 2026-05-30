@@ -101,7 +101,7 @@ async def _ensure_session(host: str) -> str:
         return new_sid
 
 
-async def remote_bash(host: str, cmd: str, timeout: float = 60.0) -> Dict[str, str]:
+async def remote_bash(host: str, cmd: str, timeout: float = 3600.0) -> Dict[str, str]:
     """Run a command in the persistent bash session for <host>.
 
     cwd and env vars are preserved across calls.
