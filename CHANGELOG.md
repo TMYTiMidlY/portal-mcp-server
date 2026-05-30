@@ -1,3 +1,9 @@
+## v1.1.2 (2026-05-30)
+
+### Fix
+
+- raise default portal_bash timeout 60s→3600s
+
 ## v1.1.1 (2026-05-27)
 
 ### Refactor

@@ -44,8 +44,8 @@
 ## 快速开始
 
 ```bash
-# 1. 在 Claude Code 里登记（其他 MCP client 见"接入方式"节）
-claude mcp add portal -- uvx portal-mcp-server
+# 1. 在 Claude Code 里登记（--scope user 对所有 repo 生效；其他 MCP client 见"接入方式"节）
+claude mcp add --scope user portal -- uvx portal-mcp-server
 
 # 2. 确保目标 host 在 ~/.ssh/config 或 config/hosts.yaml 里
 
@@ -259,9 +259,15 @@ pip install -e .
 直接编辑 `<project>/.mcp.json`（同上 schema），或用 CLI / 斜杠命令登记：
 
 ```bash
+# 推荐：user 级，对所有 repo 生效
+claude mcp add --scope user portal -- uvx portal-mcp-server
+
+# 不加 --scope 默认是 local，只在「当前目录」生效，换个目录 claude mcp list 就看不到
 claude mcp add portal -- uvx portal-mcp-server
-# 或在 Claude Code 会话内输入 /mcp 交互登记；加 --scope user 可登记到 user 级
+# 或在 Claude Code 会话内输入 /mcp 交互登记
 ```
+
+> ⚠️ Claude Code 有三档 scope：`local`（**默认**，仅当前目录）、`user`（所有 repo）、`project`（写进 repo 的 `.mcp.json`，随仓库共享）。要「装一次处处可用」**务必带 `--scope user`**——这点和 Codex（`mcp add` 即 global）/ Copilot CLI（`mcp add` 即 User 级）不一样，最易踩坑。
 
 <details>
 <summary><b>GitHub Copilot CLI</b></summary>
@@ -332,7 +338,14 @@ Windsurf 用同一份 `mcpServers` schema。在 Cascade 面板点插件按钮 �
 <details>
 <summary><b>OpenAI Codex CLI</b></summary>
 
-Codex 用 TOML，编辑 `~/.codex/config.toml`：
+新版 Codex 直接一行命令登记（global，对所有目录生效）：
+
+```bash
+codex mcp add portal -- uvx portal-mcp-server
+codex mcp list          # 应看到 portal
+```
+
+或手动编辑 `~/.codex/config.toml`（旧版，或想精细控制时）：
 
 ```toml
 [mcp_servers.portal]
