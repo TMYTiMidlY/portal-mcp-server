@@ -100,6 +100,57 @@ def test_hosts_yaml_plaintext_password_field_is_logged_and_ignored(
     ), "expected an ERROR log naming the offending host"
 
 
+def test_plaintext_password_field_surfaces_warning_to_agent(tmp_path):
+    """A logger.error() on a stdio MCP server's stderr is effectively invisible
+    to the user. The plaintext-`password:` warning must therefore also ride out
+    on list_hosts(), which is the agent's host-discovery surface — the agent
+    relays it to the user. Hosts with a clean config carry no `warnings` key."""
+    from portal_mcp_server.connection_manager import ConnectionManager
+
+    yml = tmp_path / "hosts.yaml"
+    yml.write_text(textwrap.dedent("""\
+        hosts:
+          legacy:
+            host: 10.0.0.1
+            user: deploy
+            password: super-secret
+          clean:
+            host: 10.0.0.2
+            user: deploy
+    """))
+    m = ConnectionManager(hosts_yaml=yml)
+
+    hosts = {h["name"]: h for h in m.list_hosts()}
+    assert "warnings" in hosts["legacy"]
+    assert any("password" in w for w in hosts["legacy"]["warnings"])
+    # the secret itself must never ride out in the warning text
+    assert all("super-secret" not in w for w in hosts["legacy"]["warnings"])
+    assert "warnings" not in hosts["clean"]
+
+    # and the dedicated accessor exposes the same data for diagnostics
+    cw = m.config_warnings()
+    assert "legacy" in cw and "clean" not in cw
+
+
+def test_auth_password_without_command_surfaces_warning(tmp_path):
+    """`auth: password` with no `password_command` is a guaranteed connect
+    failure — surface it to the agent, not just the log."""
+    from portal_mcp_server.connection_manager import ConnectionManager
+
+    yml = tmp_path / "hosts.yaml"
+    yml.write_text(textwrap.dedent("""\
+        hosts:
+          broken:
+            host: 10.0.0.3
+            auth: password
+    """))
+    m = ConnectionManager(hosts_yaml=yml)
+
+    hosts = {h["name"]: h for h in m.list_hosts()}
+    assert "warnings" in hosts["broken"]
+    assert any("password_command" in w for w in hosts["broken"]["warnings"])
+
+
 @pytest.mark.asyncio
 async def test_build_connect_kwargs_no_password_when_no_password_command(
     tmp_path,

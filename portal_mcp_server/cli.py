@@ -202,6 +202,11 @@ def portal_host(action: str, name: str = "", host: str = "",
     here so credentials cannot leak into LLM tool-call traces. To use
     password auth, declare the host in hosts.yaml with `auth: password` and
     a `password_command:`. See README §Authentication.
+
+    action="list" may include a per-host `warnings` array (e.g. a plaintext
+    `password:` field in hosts.yaml that is being ignored). When present,
+    relay these warnings to the user — they flag misconfigurations the user
+    must fix, and server-side logs are not visible to them.
     """
     mgr = get_manager()
     if action == "list":

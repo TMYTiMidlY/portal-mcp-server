@@ -135,6 +135,10 @@ class ConnectionManager:
     ):
         from .paths import hosts_yaml_path
         self._registry: dict[str, HostConfig] = {}
+        # host name -> human-readable config warnings collected at load time.
+        # Surfaced to the agent via list_hosts() because a logger.error() on a
+        # stdio MCP server's stderr is effectively invisible to the user.
+        self._config_warnings: dict[str, list[str]] = {}
         self._pool: dict[str, list[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._pool_size = pool_size
@@ -154,35 +158,40 @@ class ConnectionManager:
             data = yaml.safe_load(f) or {}
         hosts = data.get("hosts", {})
         for name, cfg in hosts.items():
+            warnings: list[str] = []
             if "password" in cfg:
-                logger.error(
-                    "Host '%s' has 'password' field in hosts.yaml — plaintext "
-                    "password fields are not supported (would leak credentials "
-                    "into config files and backups). Use 'auth: password' + "
-                    "'password_command:' instead. The 'password' field is "
-                    "being IGNORED.",
-                    name,
+                msg = (
+                    "hosts.yaml has a plaintext 'password' field — it is being "
+                    "IGNORED (plaintext credentials in config files/backups are "
+                    "a leak risk). Remove it and rotate the password, then use "
+                    "'auth: password' + 'password_command:' (a command that "
+                    "prints the password to stdout) instead."
                 )
+                logger.error("Host '%s': %s", name, msg)
+                warnings.append(msg)
             auth = cfg.get("auth")
             password_command = cfg.get("password_command")
             passphrase_command = cfg.get("passphrase_command")
             sudo_password_command = cfg.get("sudo_password_command")
             if auth == "password" and not password_command:
-                logger.error(
-                    "Host '%s' declares 'auth: password' but has no "
-                    "'password_command' — the host is loaded but connection "
-                    "attempts will fail. Add a 'password_command:' that "
-                    "prints the password to stdout (e.g. 'pass show ssh/%s' "
-                    "or 'printf %%s \"$%s_PASSWORD\"').",
-                    name, name, name.upper(),
+                msg = (
+                    "declares 'auth: password' but has no 'password_command' — "
+                    "the host is loaded but connection attempts will fail. Add a "
+                    "'password_command:' that prints the password to stdout "
+                    f"(e.g. 'pass show ssh/{name}' or 'printf %s \"${name.upper()}_PASSWORD\"')."
                 )
+                logger.error("Host '%s' %s", name, msg)
+                warnings.append(msg)
             if auth not in (None, "password"):
-                logger.error(
-                    "Host '%s' has unknown auth mode '%s'; expected None "
-                    "(key-based) or 'password'. Treating as key-based.",
-                    name, auth,
+                msg = (
+                    f"unknown auth mode '{auth}'; expected None (key-based) or "
+                    "'password'. Treating as key-based."
                 )
+                logger.error("Host '%s' has %s", name, msg)
+                warnings.append(msg)
                 auth = None
+            if warnings:
+                self._config_warnings[name] = warnings
             self._registry[name] = HostConfig(
                 name=name,
                 host=cfg["host"],
@@ -228,11 +237,19 @@ class ConnectionManager:
         return f"Host '{name}' registered: {user}@{host}:{port}"
 
     def list_hosts(self) -> list[dict]:
-        return [
-            {"name": h.name, "host": h.host, "port": h.port,
-             "user": h.user, "tags": h.tags}
-            for h in self._registry.values()
-        ]
+        out = []
+        for h in self._registry.values():
+            entry = {"name": h.name, "host": h.host, "port": h.port,
+                     "user": h.user, "tags": h.tags}
+            warns = self._config_warnings.get(h.name)
+            if warns:
+                entry["warnings"] = warns
+            out.append(entry)
+        return out
+
+    def config_warnings(self) -> dict[str, list[str]]:
+        """host -> config warnings collected at registry load time."""
+        return {k: list(v) for k, v in self._config_warnings.items()}
 
     def remove_host(self, name: str) -> str:
         if name not in self._registry:
