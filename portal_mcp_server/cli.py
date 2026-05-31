@@ -10,11 +10,12 @@ import os
 import sys
 import time
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 from .paths import default_log_dir
 from .connection_manager import get_manager
 from .shell_engine import ssh_exec
-from .file_ops import ssh_upload_file, ssh_download_file, ssh_sync_directory
+from .file_ops import (ssh_upload_file, ssh_download_file, ssh_sync_directory,
+                       ssh_mirror_directory)
 from .network_tools import get_tunnel_manager
 from .orchestrator import (ssh_parallel_exec, ssh_rolling_exec,
                             ssh_broadcast, run_playbook, run_playbook_on_group)
@@ -30,6 +31,7 @@ from .remote_bash import (
     remote_bash as _re_bash,
     remote_bash_close as _re_bash_close,
     remote_bash_status as _re_bash_status,
+    remote_sudo_exec as _re_sudo_exec,
 )
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
@@ -56,6 +58,42 @@ mcp = FastMCP("portal-mcp-server")
 def _gate(host: str, command: str = "") -> str | None:
     """Returns error string if blocked, None if allowed."""
     return get_policy().enforce(host, command)
+
+
+def _make_progress_cb(ctx: "Context | None"):
+    """Build a throttled (done, total) callback that emits MCP progress.
+
+    The progress notification doubles as a keepalive: clients reset their
+    idle/timeout window on each one, which is what unblocks large transfers.
+    Calls are throttled to ~2/s (plus a final 100% tick) to avoid flooding.
+    The async ``ctx.report_progress`` is fire-and-forget scheduled onto the
+    running loop, since asyncssh invokes the handler from a sync context.
+    """
+    if ctx is None:
+        return None
+    state = {"last": 0.0}
+
+    def cb(done: int, total: int) -> None:
+        if not total:
+            return
+        now = time.monotonic()
+        if done < total and (now - state["last"]) < 0.5:
+            return
+        state["last"] = now
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:  # pragma: no cover - no loop, nothing to notify
+            return
+        loop.create_task(_safe_report(ctx, done, total))
+
+    return cb
+
+
+async def _safe_report(ctx: "Context", done: int, total: int) -> None:
+    try:
+        await ctx.report_progress(done, total)
+    except Exception:  # pragma: no cover - progress is best-effort
+        pass
 
 
 def _gate_many(hosts: list[str], command: str = "") -> str | None:
@@ -206,7 +244,8 @@ def portal_host(action: str, name: str = "", host: str = "",
 
 @mcp.tool()
 async def portal_transfer(direction: str, host: str,
-                           local_path: str, remote_path: str) -> str:
+                           local_path: str, remote_path: str,
+                           ctx: Context, checksum: bool = False) -> str:
     """Transfer files between local and remote via SFTP (binary-safe, atomic).
 
     ## Modes
@@ -218,32 +257,53 @@ async def portal_transfer(direction: str, host: str,
         Example: portal_transfer(direction="download", host="web01",
                                   remote_path="/var/log/syslog",
                                   local_path="/tmp/syslog")
-    - direction="sync": recursively sync local_path directory → remote_path directory.
-        Example: portal_transfer(direction="sync", host="web01",
-                                  local_path="./build/", remote_path="/srv/www/")
+    - direction="sync": recursively sync local_path directory → remote_path
+        directory (upload). Files already present with a matching size+mtime
+        (or sha256 when checksum=True) are skipped.
+    - direction="mirror": recursively mirror remote_path directory → local_path
+        directory (download); the remote→local counterpart of "sync".
+        Example: portal_transfer(direction="mirror", host="web01",
+                                  remote_path="/srv/www/", local_path="./www/")
+
+    Args:
+        checksum: for sync/mirror, compare files by sha256 instead of size+mtime
+            (slower, requires `sha256sum` on the remote; missing remote files or
+            an unavailable sha256sum force a re-transfer).
+
+    Progress is reported to the MCP client during transfers, which also keeps
+    the connection alive so large files don't trip client idle timeouts.
+
+    Returns a JSON status dict. Single-file: {status, direction, host, bytes,
+    duration_s, ...}. sync/mirror: {status, uploaded|downloaded, skipped,
+    failed[], bytes_total, bytes_transferred, duration_s}.
 
     For text-only edits prefer portal_patch (hash-protected). Use portal_transfer
-    when SFTP semantics are needed: binary files, large files, whole directory trees.
+    when SFTP semantics are needed: binary files, large files, whole directory
+    trees. Note: directory modes copy *files* only — symlinks and special files
+    are skipped, and empty directories are not created on their own.
     """
     err = _gate(host)
     if err:
         return f"BLOCKED: {err}"
+    progress_cb = _make_progress_cb(ctx)
     if direction == "upload":
-        result = await ssh_upload_file(host, local_path, remote_path)
-        audit_log(host, f"upload:{local_path}→{remote_path}", "ok",
-                  operation="file_upload")
-        return result
-    if direction == "download":
-        result = await ssh_download_file(host, remote_path, local_path)
-        audit_log(host, f"download:{remote_path}", "ok",
-                  operation="file_download")
-        return result
-    if direction == "sync":
-        result = await ssh_sync_directory(host, local_path, remote_path)
-        audit_log(host, f"sync:{local_path}→{remote_path}", "ok",
-                  operation="file_sync")
-        return result
-    return f'Error: unknown direction {direction!r}. Valid: upload, download, sync.'
+        result = await ssh_upload_file(host, local_path, remote_path,
+                                       progress_cb=progress_cb)
+    elif direction == "download":
+        result = await ssh_download_file(host, remote_path, local_path,
+                                         progress_cb=progress_cb)
+    elif direction == "sync":
+        result = await ssh_sync_directory(host, local_path, remote_path,
+                                          checksum=checksum, progress_cb=progress_cb)
+    elif direction == "mirror":
+        result = await ssh_mirror_directory(host, remote_path, local_path,
+                                            checksum=checksum, progress_cb=progress_cb)
+    else:
+        return (f'Error: unknown direction {direction!r}. '
+                'Valid: upload, download, sync, mirror.')
+    audit_log(host, f"{direction}:{local_path}<->{remote_path}",
+              result.get("status", "?"), operation=f"file_{direction}")
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -331,7 +391,7 @@ def portal_tunnel_list() -> str:
 async def portal_multi_exec(mode: str, command: str = "",
                              commands_json: str = "",
                              hosts_json: str = "", group_tag: str = "",
-                             timeout: int = 60, delay_s: float = 2.0,
+                             timeout: int = 3600, delay_s: float = 2.0,
                              stop_on_error: bool = True) -> str:
     """Execute commands across multiple hosts.
 
@@ -737,7 +797,8 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 
 
 @mcp.tool()
-async def portal_bash(host: str, command: str, timeout: float = 3600.0) -> str:
+async def portal_bash(host: str, command: str, timeout: float = 3600.0,
+                      use_sudo: bool = False) -> str:
     """Run a command in the persistent bash session for <host>.
 
     Behavior:
@@ -749,10 +810,31 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0) -> str:
     ⚠️ Safety: by default, write operations should target /tmp/ on the remote
        unless the user has explicitly approved a different path. This tool does
        NOT enforce that — it's a convention for the agent's skill prompt.
+
+    use_sudo: run the command via `sudo -S`, feeding a password obtained
+        out-of-band (NEVER passed by the agent). The password comes from the
+        in-memory cache populated by `portal-mcp-server sudo-login <host>`, or
+        from the host's `sudo_password_command` in hosts.yaml. Because sudo
+        reads stdin, this runs as a ONE-SHOT command (not the persistent
+        session): cwd/env from prior portal_bash calls do not apply.
     """
     err = _gate(host, command)
     if err:
         return f"BLOCKED: {err}"
+    if use_sudo:
+        from .sudo_creds import resolve_sudo_password
+        password = await resolve_sudo_password(host)
+        if password is None:
+            return json.dumps({
+                "host": host,
+                "error": ("No sudo password available for this host. In a "
+                          f"separate terminal run `portal-mcp-server sudo-login {host}`, "
+                          "or set `sudo_password_command` for the host in hosts.yaml."),
+            }, indent=2, ensure_ascii=False)
+        res = await _re_sudo_exec(host, command, password, timeout=timeout)
+        audit_log(host, "sudo: " + command, res.get("exit_code", "?"),
+                  operation="remote_sudo")
+        return json.dumps(res, indent=2, ensure_ascii=False)
     res = await _re_bash(host, command, timeout=timeout)
     audit_log(host, command, "ok", operation="remote_bash")
     return json.dumps(res, indent=2, ensure_ascii=False)
@@ -777,10 +859,55 @@ async def portal_bash_status() -> str:
 # ENTRYPOINT
 # ═══════════════════════════════════════════════════════════════════
 
+def _sudo_login_cli(argv: list[str]) -> None:
+    """`portal-mcp-server sudo-login <host>` — push a sudo password to a running
+    server, out-of-band (prompted with no echo; never via the LLM)."""
+    import argparse
+    import getpass
+    from .sudo_creds import (send_sudo_password, control_socket_path,
+                             DEFAULT_TTL_SEC)
+
+    p = argparse.ArgumentParser(
+        prog="portal-mcp-server sudo-login",
+        description="Provide a sudo password to a running portal-mcp-server "
+                    "(cached in memory with a TTL; never written to disk, never "
+                    "seen by the agent).",
+    )
+    p.add_argument("host", help="host alias the password is for")
+    p.add_argument("--ttl", type=int, default=DEFAULT_TTL_SEC,
+                   help=f"seconds before the cached password expires "
+                        f"(default {DEFAULT_TTL_SEC})")
+    a = p.parse_args(argv)
+
+    path = control_socket_path()
+    if not path.exists():
+        print(f"No running portal-mcp-server control socket at {path}.\n"
+              "Start the MCP server first (your MCP client launches it), then "
+              "retry.", file=sys.stderr)
+        sys.exit(1)
+    pw = getpass.getpass(f"sudo password for host '{a.host}': ")
+    if not pw:
+        print("Empty password, aborted.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        resp = send_sudo_password(a.host, pw, ttl=a.ttl)
+    except OSError as e:
+        print(f"Failed to reach control socket: {e}", file=sys.stderr)
+        sys.exit(1)
+    if resp.get("status") == "ok":
+        print(f"sudo password cached for '{a.host}' (expires in {a.ttl}s).")
+    else:
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
     """CLI entrypoint registered as `portal-mcp-server` (and the legacy
     `portal-mcp-server` alias for backward compat with existing .mcp.json)."""
     import argparse
+    if len(sys.argv) >= 2 and sys.argv[1] == "sudo-login":
+        _sudo_login_cli(sys.argv[2:])
+        return
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
     from starlette.responses import Response
@@ -800,6 +927,12 @@ def main() -> None:
         prog="portal-mcp-server",
         description="portal-mcp-server — Agent-feels-local SSH orchestration MCP server",
     )
+    from importlib.metadata import version as _pkg_version, PackageNotFoundError
+    try:
+        _ver = _pkg_version("portal-mcp-server")
+    except PackageNotFoundError:
+        _ver = "unknown"
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_ver}")
     parser.add_argument("--transport", choices=["stdio", "streamable_http"], default="stdio",
                         help="MCP transport (default: stdio)")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port (default: 8000)")
@@ -807,6 +940,14 @@ def main() -> None:
     args = parser.parse_args()
 
     logger.info(f"portal-mcp-server starting | transport={args.transport}")
+
+    # Best-effort: start the local control socket so `sudo-login` from a
+    # separate terminal can push sudo passwords into this process's memory.
+    try:
+        from .sudo_creds import start_control_server
+        start_control_server()
+    except Exception as e:  # pragma: no cover - never block startup on this
+        logger.warning("could not start sudo control server: %s", e)
 
     if args.transport == "streamable_http":
         import uvicorn

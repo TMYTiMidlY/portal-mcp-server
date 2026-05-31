@@ -81,6 +81,13 @@ class HostConfig:
     # Same execution model as ``password_command``. Prefer ssh-agent for
     # encrypted keys; this is the headless / CI fallback.
     passphrase_command: Optional[str] = None
+    # Shell command that prints this host's *sudo* password to stdout. Same
+    # execution model as ``password_command`` (run on demand, never persisted,
+    # never logged, never exposed via any MCP tool parameter). Used by
+    # ``portal_bash(use_sudo=True)`` to feed ``sudo -S`` on stdin. The
+    # alternative source is the in-memory cache populated out-of-band by
+    # ``portal-mcp-server sudo-login`` (see sudo_creds.py).
+    sudo_password_command: Optional[str] = None
 
 
 @dataclass
@@ -159,6 +166,7 @@ class ConnectionManager:
             auth = cfg.get("auth")
             password_command = cfg.get("password_command")
             passphrase_command = cfg.get("passphrase_command")
+            sudo_password_command = cfg.get("sudo_password_command")
             if auth == "password" and not password_command:
                 logger.error(
                     "Host '%s' declares 'auth: password' but has no "
@@ -190,6 +198,7 @@ class ConnectionManager:
                 auth=auth,
                 password_command=password_command,
                 passphrase_command=passphrase_command,
+                sudo_password_command=sudo_password_command,
             )
         logger.info(f"Loaded {len(self._registry)} hosts from registry")
 
@@ -347,6 +356,21 @@ class ConnectionManager:
                 f"{kind} for host '{host}' produced empty output"
             )
         return secret
+
+    async def sudo_password_command_for(self, host_name: str) -> Optional[str]:
+        """Run a host's ``sudo_password_command`` and return its output.
+
+        Returns ``None`` when the host is unknown or has no
+        ``sudo_password_command`` configured (so callers can fall back to the
+        in-memory cache populated by ``sudo-login``). Raises only if the
+        command itself fails, matching ``_run_secret_command`` semantics.
+        """
+        cfg = self._registry.get(host_name)
+        if cfg is None or not cfg.sudo_password_command:
+            return None
+        return await self._run_secret_command(
+            cfg.sudo_password_command, host=host_name, kind="sudo_password_command",
+        )
 
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
         if cfg.use_ssh_config:

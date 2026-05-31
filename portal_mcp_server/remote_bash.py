@@ -145,3 +145,43 @@ def remote_bash_status() -> Dict[str, str]:
     """Map of host -> cached session_id."""
     return dict(_HOST_SESSIONS)
 
+
+async def remote_sudo_exec(host: str, command: str, password: str,
+                           timeout: float = 3600.0) -> Dict[str, object]:
+    """Run a command under ``sudo`` on <host>, feeding the password via stdin.
+
+    Uses a one-shot ``conn.run`` (not the persistent session): ``sudo -S`` reads
+    the password from stdin, which would collide with the persistent shell's
+    sentinel protocol. ``-p ''`` suppresses the prompt; ``-k`` forces a fresh
+    auth so a previously-cached sudo ticket can't mask a wrong password. cwd/env
+    from the persistent ``portal_bash`` session therefore do NOT apply here.
+
+    The password is never logged and never echoed (``sudo -S`` reads silently).
+    """
+    from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
+    from .safety import quote_shell
+
+    mgr = get_manager()
+    conn = await mgr.get_connection(host)
+    wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(command)}"
+    try:
+        result = await asyncio.wait_for(
+            conn.run(wrapped, input=password + "\n", check=False,
+                     errors=DEFAULT_DECODE_ERRORS),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return {"host": host, "error": f"sudo command timed out after {timeout}s",
+                "exit_code": -1}
+    finally:
+        mgr.release_connection(host, conn)
+
+    stdout = result.stdout or ""
+    stderr = (result.stderr or "").strip()
+    # sudo emits auth failures on stderr; surface them so the agent can react,
+    # but keep them out of the audit log (handled by the caller).
+    output = _clean(stdout)
+    if stderr:
+        output = (output + "\n" if output else "") + f"[stderr] {stderr}"
+    return {"host": host, "output": output, "exit_code": result.returncode}
+

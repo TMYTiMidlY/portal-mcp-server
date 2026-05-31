@@ -196,7 +196,8 @@ class TestFileOpsExceptionPath:
         local = tmp_path / "x.txt"
         local.write_text("hi")
         out = await ssh_upload_file("h", str(local), "/tmp/x.txt")
-        assert "Upload failed" in out, out
+        assert out["status"] == "error", out
+        assert "Upload failed" in out["error"], out
         # Even though sftp.put raised, we must have released the pooled conn.
         assert rec.conn_balance == 0
 

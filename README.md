@@ -88,7 +88,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 |---|---|
 | `portal_read` / `portal_patch` | 读远端文件并拿 SHA-256；patch 用 `file_hash` + per-range hash 防并发覆盖，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验 |
 | `portal_grep` / `portal_glob` | 远端 `rg --json` / `find` 结构化输出，首次连接探测一次缓存 |
-| `portal_bash` / `portal_bash_close` / `portal_bash_status` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作 |
+| `portal_bash` / `portal_bash_close` / `portal_bash_status` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；`use_sudo=True` 走一次性 `sudo -S`（密码从内存缓存 / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--sudo-login)） |
 | `portal_cleanup_tmps` | 清理 patch 中断后留下的孤儿 `*.mcp_tmp.*` |
 
 ### 10 个高层工具（mode 切换）
@@ -96,13 +96,27 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 | 工具 | mode / 参数 | 用途 |
 |---|---|---|
 | `portal_host` | `action=list\|register\|remove` | 主机注册（用于 tag 分组；`~/.ssh/config` 别名自动解析无需登记） |
-| `portal_transfer` | `direction=upload\|download\|sync` | SFTP 文件传输（二进制安全） |
+| `portal_transfer` | `direction=upload\|download\|sync\|mirror` | SFTP 文件传输（二进制安全）；`sync` 推目录、`mirror` 拉目录，默认按 size+mtime 增量短路（传输用 `preserve=True` 保留源 mtime，做 rclone 式精确相等比较，不会误跳 out-of-band 改动），`checksum=True` 改用 sha256 比对；返回结构化 JSON（传输字节数 / 跳过数 / 失败列表 / 耗时），大文件传输期间用 MCP progress 心跳防 client idle 超时 |
 | `portal_tunnel_open` / `_close` / `_list` | `mode=local\|reverse\|socks` | SSH 隧道（端口转发 / 反向 / SOCKS5） |
 | `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`，`hosts_json\|group_tag` | 多机命令编排 |
 | `portal_playbook` | `host\|group_tag` | 多步骤剧本 |
 | `portal_ping` | optional `hosts_json` | 健康检查（单机或全 fleet） |
 | `portal_audit` | `view=snapshot\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection |
 | `portal_check` | `host`，optional `command` | 安全策略 dry-run |
+
+### 专用工具 vs `portal_bash`：怎么选
+
+`portal_bash` 能跑任意命令，但**能用专用工具就别用 `portal_bash` 替代**——专用工具要么有安全保证，要么有结构化输出，agent 用起来更可靠：
+
+| 你要做的事 | 用这个（**不要** 用 `portal_bash` 裸命令） | 为什么 |
+|---|---|---|
+| 读 / 改远端文件 | `portal_read` → `portal_patch` | SHA-256 + per-range hash 防并发覆盖，atomic rename，写后 rehash；裸 `cat`/`>` 没有这些 |
+| 搜文件内容 / 找文件 | `portal_grep` / `portal_glob` | `rg --json` / `find` 结构化输出，agent 不用解析 raw 文本 |
+| 传文件 / 同步目录 | `portal_transfer` | SFTP 二进制安全 + 增量短路 + progress 心跳；`scp` 在循环里既无增量也会断 idle |
+| 多机执行 | `portal_multi_exec` / `portal_playbook` | 并发 / 滚动 / 广播 + 两阶段 gate；bash 里 `for h in ...; ssh $h` 没有 gate |
+| 开隧道 | `portal_tunnel_*` | 受管生命周期，`portal_audit` 可见；bash 里 `ssh -L` 跑飞了没人收 |
+
+**剩下的一切**（跑进程、看日志、systemctl、docker、临时一行命令…）才是 `portal_bash` 的地盘——一个持久 `bash -i` 会话覆盖上游 27 个被砍掉的工具。原则：**同一任务里别把 `portal_*` 和 bash 里的 `ssh`/`scp` 混用**，否则会绕过 hash 校验或打断 sudo 流。
 
 ### 给 agent 的使用约定
 
@@ -113,7 +127,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 - **默认沙箱 `/tmp/`**——写操作默认落在远端 `/tmp/` 下；改 `$HOME` 或项目源码前必须先确认
 - **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
 - **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
-- **sudo 走交互**——需要交互式 sudo 的操作 `portal_bash` 处理不了，让用户在 terminal 里 `ssh -t host sudo ...`
+- **sudo 三选一**——需要 sudo 时：① 优先让 host 配 `sudo_password_command`（密码管理器拉，全自动）；② 或用户在另一终端 `portal-mcp-server sudo-login <host>` 预先塞密码进缓存，再 `portal_bash(..., use_sudo=True)`；③ 真正需要交互式 prompt（改密码、首次 TTY 校验）的，让用户 `ssh -t host sudo ...`。`use_sudo` 走一次性 exec，**不继承** 之前 `portal_bash` 的 cwd / env
 
 ## 设计理念
 
@@ -514,7 +528,32 @@ hosts:
 
 ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headless / CI 这种没有交互终端的场景下用。
 
-## 安全
+### 非交互 sudo：`use_sudo` + `sudo-login`
+
+`portal_bash(host, cmd, use_sudo=True)` 让 agent 跑需要 root 的命令，但 **sudo 密码永远不进 LLM**——`portal_bash` 没有 password 参数，密码由 server 端就地解析。两条来源（同 SSH 密码一样的哲学）：
+
+1. **密码管理器（1a，全自动）**——`hosts.yaml` 里给 host 配 `sudo_password_command`，机制与 `password_command` 完全对称：
+
+   ```yaml
+   hosts:
+     prod-box:
+       host: 10.0.0.50
+       user: deploy
+       sudo_password_command: pass show sudo/prod-box   # 或 op read / bw get / printf "$ENV"
+   ```
+
+2. **临时塞入（1b，交互一次）**——在**另一个终端**（不是 agent 对话）跑：
+
+   ```bash
+   portal-mcp-server sudo-login prod-box        # getpass 隐藏输入，不回显
+   portal-mcp-server sudo-login prod-box --ttl 1800   # 自定义 TTL（秒），默认 900（15 分钟）
+   ```
+
+   密码经本地 unix socket（`$XDG_RUNTIME_DIR/portal-mcp-server/control.sock`，目录 0700 / socket 0600，仅本用户可达）推进**正在运行的** server 内存缓存，**从不落盘、从不进 LLM**，TTL 到期自动清除。
+
+取密码顺序：**内存缓存（1b）→ `sudo_password_command`（1a）→ 报错**（提示去 `sudo-login` 或配 `sudo_password_command`）。
+
+实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `bash -i` 会话（`sudo -S` 读 stdin 会和 sentinel 协议打架）。因此 sudo 命令**不继承** 之前 `portal_bash` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_bash` 处理不了，让用户 `ssh -t host sudo ...`。
 
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）

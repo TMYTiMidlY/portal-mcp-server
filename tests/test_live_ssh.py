@@ -126,9 +126,9 @@ class TestFileTransfer:
         local_down = local_up + ".down"
         try:
             up_msg = await ssh_upload_file(TEST_HOST_NAME, local_up, remote)
-            assert "Uploaded" in up_msg
+            assert up_msg["status"] == "ok", up_msg
             down_msg = await ssh_download_file(TEST_HOST_NAME, remote, local_down)
-            assert "Downloaded" in down_msg
+            assert down_msg["status"] == "ok", down_msg
             with open(local_down) as f:
                 assert f.read() == content
         finally:
@@ -166,7 +166,8 @@ class TestFileTransfer:
                 with open(os.path.join(d, f"file{i}.txt"), "w") as f:
                     f.write(f"content {i}")
             result = await ssh_sync_directory(TEST_HOST_NAME, d, "/tmp/_mcp_sync_test")
-        assert "Synced 3 files" in result
+        assert result["status"] == "ok", result
+        assert result["uploaded"] == 3, result
 
 
 # ════════════════════════════════════════════════════════
