@@ -1,3 +1,10 @@
+## v1.2.0 (2026-05-31)
+
+### Feat
+
+- **transfer**: add upload-list/download-list modes for explicit file batches
+- **transfer,sudo**: structured incremental transfers + out-of-band sudo
+
 ## v1.1.2 (2026-05-30)
 
 ### Fix
