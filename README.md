@@ -20,6 +20,28 @@
 
 ---
 
+<details>
+<summary>📖 目录</summary>
+
+- [简介](#简介)
+- [项目特色](#项目特色)
+- [快速开始](#快速开始)
+- [架构](#架构)
+- [工具列表](#工具列表)
+- [设计理念](#设计理念)
+- [安装](#安装)
+- [接入方式](#接入方式)
+- [环境变量](#环境变量)
+- [认证](#认证)
+- [安全](#安全)
+- [测试](#测试)
+- [CI / Release](#ci--release)
+- [常见问题](#常见问题)
+- [贡献](#贡献)
+- [协议与致谢](#协议与致谢)
+
+</details>
+
 ## 简介
 
 `portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 18 个面向 agent 的 `portal_*` 工具：
@@ -128,6 +150,50 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 - **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
 - **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
 - **sudo 三选一**——需要 sudo 时：① 优先让 host 配 `sudo_password_command`（密码管理器拉，全自动）；② 或用户在另一终端 `portal-mcp-server sudo-login <host>` 预先塞密码进缓存，再 `portal_bash(..., use_sudo=True)`；③ 真正需要交互式 prompt（改密码、首次 TTY 校验）的，让用户 `ssh -t host sudo ...`。`use_sudo` 走一次性 exec，**不继承** 之前 `portal_bash` 的 cwd / env
+
+<details>
+<summary>📋 完整签名与源码位置</summary>
+
+> 下面是所有工具对大模型可见的签名（`ctx` 由 FastMCP 注入，不出现在 schema 里），以及各工具实现所在的模块。
+
+### 工具签名
+
+| 工具 | 签名 |
+| --- | --- |
+| `portal_read` | `(host, path, start=1, end=None, encoding='utf-8')` |
+| `portal_patch` | `(host, path, file_hash, patches_json, encoding='utf-8', auto_newline=False)` |
+| `portal_cleanup_tmps` | `(host, directory, max_age_s=3600)` |
+| `portal_grep` | `(host, path, pattern, glob='', file_type='', ignore_case=False, max_count=0)` |
+| `portal_glob` | `(host, pattern, path='.')` |
+| `portal_bash` | `(host, command, timeout=3600.0, use_sudo=False)` |
+| `portal_bash_close` | `(host)` |
+| `portal_bash_status` | `()` |
+| `portal_host` | `(action, name='', host='', user='root', port=22, key_path='', tags='')` |
+| `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False)` |
+| `portal_tunnel_open` | `(mode, host, local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
+| `portal_tunnel_close` | `(tunnel_id)` |
+| `portal_tunnel_list` | `()` |
+| `portal_multi_exec` | `(mode, command='', commands_json='', hosts_json='', group_tag='', timeout=3600, delay_s=2.0, stop_on_error=True)` |
+| `portal_playbook` | `(playbook_json, host='', group_tag='')` |
+| `portal_ping` | `(hosts_json='')` |
+| `portal_check` | `(host, command='')` |
+| `portal_audit` | `(view='snapshot', limit=50, host_filter='')` |
+
+### 源码位置
+
+| 模块 | 负责的工具 / 职责 |
+| --- | --- |
+| `connection_manager.py` | 所有工具共用的连接池 |
+| `remote_text_editor.py` | `portal_read`、`portal_patch`、`portal_cleanup_tmps` |
+| `remote_search.py` | `portal_grep`、`portal_glob` |
+| `remote_bash.py` | `portal_bash`、`portal_bash_close`、`portal_bash_status` |
+| `file_ops.py` | `portal_transfer` |
+| `network_tools.py` | `portal_tunnel_*` |
+| `orchestrator.py` | `portal_multi_exec`、`portal_playbook` |
+| `security.py` | `_gate()` / `_gate_many()` / `_gate_playbook()` 策略闸门 |
+| `audit.py` | `audit_log()` 写入 + `portal_audit` introspection |
+
+</details>
 
 ## 设计理念
 
@@ -555,6 +621,8 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `bash -i` 会话（`sudo -S` 读 stdin 会和 sentinel 协议打架）。因此 sudo 命令**不继承** 之前 `portal_bash` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_bash` 处理不了，让用户 `ssh -t host sudo ...`。
 
+## 安全
+
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）
 - **认证**：默认且推荐 SSH key；密码登录支持但只走 `hosts.yaml` 的 `password_command`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
@@ -645,7 +713,7 @@ uvx portal-mcp-server@latest --help
 
 - Python 3.10+，I/O 全部 `async/await`，无阻塞调用
 - 不出现硬编码 hostname / username / IP / path
-- 新工具写好 docstring（FastMCP 用作 MCP description）+ 同步 `docs/tools.md`
+- 新工具写好 docstring（FastMCP 用作 MCP description）+ 同步 README「工具列表」节（含折叠的完整签名 + 源码位置表）
 - 状态变更工具必须过 `_gate` + 写 `audit_log`
 - 测试覆盖关键路径；`pytest tests/ -v` 必须全绿
 - 不 commit secret；`config/hosts.example.yaml` 是唯一 schema 模板

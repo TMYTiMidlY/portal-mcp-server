@@ -52,7 +52,7 @@ The defences below are layered:
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
 | Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
 | Audit log             | `logs/audit.jsonl`             | Every state-changing op recorded; fail-closed by default                     |
-| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` only — plaintext `password:` fields in yaml are rejected and logged at ERROR; no MCP tool accepts a password parameter |
+| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` only — plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `sudo-login`); no MCP tool accepts a password parameter (SSH or sudo) |
 | Strict host-key check | `connection_manager.py`        | Defaults to OpenSSH-equivalent `StrictHostKeyChecking`                       |
 
 ### Default constraint: sandbox `/tmp/`
@@ -204,6 +204,51 @@ choice is deliberate:
   caching the secret in process memory would create another exposure
   surface (heap dumps, Python `__dict__` walks) for marginal CPU
   savings on a code path that already runs rarely.
+
+#### Sudo auth — same boundary, in-memory side-channel
+
+`portal_bash(..., use_sudo=True)` runs a command under `sudo` on the
+remote. The boundary is identical to SSH password auth: **`use_sudo` is a
+boolean, not a password** — no sudo password (or path to one) is ever an
+MCP tool parameter, so nothing lands in the agent context or tool-call
+trace. The password is resolved server-side from one of two sources:
+
+- **`sudo_password_command`** in `hosts.yaml` — reuses the *exact* same
+  machinery and guarantees as `password_command` above (10 s timeout,
+  one trailing newline stripped, stderr never logged, hard-fail on
+  non-zero / empty / non-UTF-8). Fully automatic; preferred.
+- **`portal-mcp-server sudo-login <host>`** — an out-of-band CLI run in a
+  *separate* terminal (not the agent) that prompts with
+  `getpass.getpass` (no echo) and pushes the password into the running
+  server over a local unix socket.
+
+**Why an in-memory cache here, when SSH password auth deliberately
+avoids one** (see directly above): SSH auth has a natural per-connection
+trigger, so the command can run on demand and never persist. Sudo has no
+such trigger — the agent calls `use_sudo` ad-hoc, and an interactive
+prompt cannot be routed back through the MCP channel. The `sudo-login`
+path therefore caches the password in process memory, and that exposure
+is bounded by:
+
+- **TTL expiry** (default 15 min) — the entry is dropped automatically;
+  it is **never written to disk**.
+- **Socket hardening** — `$XDG_RUNTIME_DIR/portal-mcp-server/control.sock`,
+  directory `0700`, socket `0600`, same-uid only; a peer-credential
+  check rejects other users. The server probes for a live socket on
+  startup and **declines** (does not clobber) if another instance owns
+  it, so a second process cannot hijack the channel.
+- **No tool surface** — the cache is reachable only via the local socket
+  and the in-process resolver; no MCP tool reads or writes it.
+
+The `sudo_password_command` path needs no cache at all — it re-runs per
+sudo invocation, exactly like the SSH variant.
+
+Execution detail: sudo runs as a **one-shot** `sudo -S -k -p '' -- bash
+-c <cmd>` via `conn.run(input=<pw>)`, *not* through the persistent
+`bash -i` session (`sudo -S` consumes stdin, which would collide with the
+sentinel-completion protocol). Consequence: a `use_sudo` command does
+**not** inherit `cwd` / env from prior `portal_bash` calls. `-k` forces
+fresh authentication each time; `-p ''` suppresses the prompt text.
 
 ### Audit log
 

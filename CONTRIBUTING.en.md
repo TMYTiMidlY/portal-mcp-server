@@ -61,9 +61,10 @@ When adding a new `@mcp.tool()`:
 4. **Emit an audit entry.** State-changing happy paths end with
    `audit_log(host, op_str, result, operation="...")`. Read-only
    tools intentionally skip auditing.
-5. **Update [`docs/tools.md`](./docs/tools.md).** It's the
-   user-facing tool index; keep it in sync when you add or change a
-   tool's modes.
+5. **Update the README Tools section** in [`README.md`](./README.md) /
+   [`README.en.md`](./README.en.md). The "Tools" section (including the
+   collapsible full-signature + source-map tables) is the user-facing
+   tool index; keep it in sync when you add or change a tool's modes.
 6. **Tests** — at minimum one happy path and one policy-reject path.
    Use the recorder pattern in
    `tests/test_pool_leak_regression.py` for resource-lifecycle tests.
@@ -110,6 +111,14 @@ Add a scope where it helps: `fix(remote-edit): …`,
 
 If a commit does several things, **split it** — one logical change per
 commit makes review and revert dramatically easier.
+
+> 📌 **This project uses [Commitizen](https://commitizen-tools.github.io/commitizen/)
+> to manage the version number and CHANGELOG** (`[tool.commitizen]` in
+> `pyproject.toml`). `cz bump` reads these conventional-commit prefixes to
+> decide the semver increment: `feat` → minor, `fix` / `security` → patch,
+> a `BREAKING CHANGE` footer or `!` → major. A wrong prefix makes the
+> automatic version bump wrong — get it right. `docs` / `test` /
+> `refactor` / `chore` don't trigger a bump.
 
 ## Pull requests
 
@@ -189,30 +198,43 @@ including) the next `## `:
 
 > ⚠️ Each version header must contain the plain version number (e.g.
 > `1.1.0`), or awk returns an empty string and the GitHub Release body
-> ends up blank.
+> ends up blank. The `## v<x.y.z> (<date>)` header that `cz bump`
+> generates satisfies this constraint out of the box.
 
 ### Cutting a new release
 
-1. Bump `version` in `pyproject.toml` (semver: BREAKING bumps major,
-   new feature bumps minor, bugfix bumps patch).
-2. `uv lock` so `uv.lock` picks up the new self-version.
-3. Local pre-flight: `pytest tests/ -v && ruff check portal_mcp_server/`.
-4. Prepend a `## v<x.y.z> (<YYYY-MM-DD>)` block to `CHANGELOG.md`,
-   grouped under `### BREAKING CHANGES` / `### Feat` / `### Fix` /
-   `### Tests` / `### Docs`, etc.
-5. Commit and `git push origin main`.
-6. `git tag v<x.y.z> -m "..."` then `git push origin v<x.y.z>`.
-7. Watch the [Actions page](https://github.com/TMYTiMidlY/portal-mcp-server/actions)
+**The version number, CHANGELOG, and `uv.lock` are all managed by
+[Commitizen](https://commitizen-tools.github.io/commitizen/)** —
+`pyproject.toml` sets `version_provider = "uv"`, so `cz bump` also
+updates the self-version inside `uv.lock` and includes it in the same
+bump commit. **Do not hand-edit `version` in `pyproject.toml`, do not
+hand-write `CHANGELOG.md`, and you don't need to run `uv lock`
+manually.**
+
+1. Make sure everything to ship is merged into `main` and you're on a
+   clean `main` HEAD.
+2. Local pre-flight: `pytest tests/ -v && ruff check portal_mcp_server/`.
+3. Preview the version and CHANGELOG: `uv run cz bump --dry-run`.
+4. Release: `uv run cz bump` — a single command that bumps `version`
+   in `pyproject.toml` per the commit history, updates `uv.lock`,
+   prepends a `## v<x.y.z> (<date>)` block to `CHANGELOG.md`, creates
+   the bump commit, and tags an annotated `v<x.y.z>` (`annotated_tag = true`).
+5. Push to trigger the release: `git push origin main --follow-tags`.
+6. Watch the [Actions page](https://github.com/TMYTiMidlY/portal-mcp-server/actions)
    until all three jobs go green.
-8. Verify: https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\>
+7. Verify: https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\>
    and https://pypi.org/project/portal-mcp-server/\<x.y.z\>/.
+
+> `cz bump` does not push on its own (so you can still back out).
+> `--follow-tags` pushes the annotated tag together with `main`;
+> release.yml is triggered by `push: tags: ['v*.*.*']`.
 
 ### When a release fails
 
 | Red job | Most likely cause | What to do |
 |---|---|---|
 | `release-build` | broken `pyproject.toml` / build backend error | Read the build log; reproduce locally with `python -m build` |
-| `create-release` | CHANGELOG section not extractable (version string missing from header / earlier header truncated) | Fix CHANGELOG, delete the tag, retag |
+| `create-release` | CHANGELOG section not extractable (version string missing from header / earlier header truncated) | Usually a hand-edit broke the format — prefer what `cz bump` generates; delete the tag, fix, retag |
 | `pypi-publish` | trusted publisher not configured / version already on PyPI | Configure trusted publishing; `skip-existing` already accepts a duplicate version so no re-upload needed |
 
 > History lesson: before v1.1.0, `release.yml` read the version from

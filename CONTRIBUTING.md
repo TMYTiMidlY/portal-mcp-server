@@ -42,7 +42,7 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 2. **写完整 docstring**——FastMCP 直接把 docstring 当 MCP description 暴露给 agent，写得好坏决定 agent 用得对不对
 3. **接入安全闸门**——任何状态变更都必须 `_gate(host, command)`；多机操作走 `_gate_many` / `_gate_playbook`
 4. **写 audit**——状态变更的 happy path 末尾写 `audit_log(host, op_str, result, operation="...")`；只读工具显式不写
-5. **更新 [`docs/tools.md`](./docs/tools.md)**——是用户能看到的工具索引，新增 / 修改 mode 时一定要同步
+5. **更新 README 工具节**——[`README.md`](./README.md) / [`README.en.md`](./README.en.md) 的「工具列表」是用户能看到的工具索引（含折叠的完整签名 + 源码位置表），新增 / 修改 mode 时一定要同步
 6. **测试**——至少 1 个 happy path + 1 个 policy reject path；用现有的 `recorder` 模式（参考 `tests/test_pool_leak_regression.py`）
 
 ## 测试要求
@@ -75,6 +75,8 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 在 `feat:` / `fix:` / `security:` 后面适合时加 scope：`fix(remote-edit): ...`、`security(audit): ...`。
 
 如果一个 commit 同时做多件事，**拆开**——每个 commit 一件事更易 review、更易 revert。
+
+> 📌 **本项目用 [Commitizen](https://commitizen-tools.github.io/commitizen/) 托管版本号与 CHANGELOG**（`pyproject.toml` 的 `[tool.commitizen]`）。`cz bump` 直接读这些 conventional commit 前缀来决定语义化版本的递增方向：`feat` → minor、`fix` / `security` → patch、带 `BREAKING CHANGE` 脚注或 `!` → major。所以前缀写错会让自动定版出错——务必准确。`docs` / `test` / `refactor` / `chore` 不触发版本递增。
 
 ## PR 流程
 
@@ -137,25 +139,28 @@ GH environment `pypi` 在仓库 Settings → Environments 里绑到 https://pypi
 ...
 ```
 
-> ⚠️ 每个版本头行必须包含纯版本号（如 `1.1.0`），否则 awk 抓不到，GH Release body 会是空字符串。
+> ⚠️ 每个版本头行必须包含纯版本号（如 `1.1.0`），否则 awk 抓不到，GH Release body 会是空字符串。`cz bump` 生成的 `## v<x.y.z> (<日期>)` 头行天然满足这条约束。
 
 ### 发布新版本步骤
 
-1. 改 `pyproject.toml` 的 `version`（语义化版本：BREAKING bump major，新功能 bump minor，bugfix bump patch）
-2. `uv lock`（让 `uv.lock` 同步到新自身版本号）
-3. 本地预检：`pytest tests/ -v && ruff check portal_mcp_server/`
-4. 在 `CHANGELOG.md` 顶部加 `## v<x.y.z> (<YYYY-MM-DD>)` 段，下面按 `### BREAKING CHANGES` / `### Feat` / `### Fix` / `### Tests` / `### Docs` 等子标题分类
-5. commit + `git push origin main`
-6. `git tag v<x.y.z> -m "..."` 然后 `git push origin v<x.y.z>`
-7. 在 [Actions 页](https://github.com/TMYTiMidlY/portal-mcp-server/actions) 等三个 job 全绿
-8. 验收：https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\> + https://pypi.org/project/portal-mcp-server/\<x.y.z\>/
+**版本号、CHANGELOG、`uv.lock` 全部由 [Commitizen](https://commitizen-tools.github.io/commitizen/) 托管**——`pyproject.toml` 里配了 `version_provider = "uv"`，`cz bump` 会把 `uv.lock` 里的自身版本号一起更新并纳入同一个 bump commit。**不要手改 `pyproject.toml` 的 `version`，不要手写 `CHANGELOG.md`，也不用手动 `uv lock`。**
+
+1. 确保要发版的 commit 都已 merge 进 `main`，本地在干净的 `main` HEAD 上
+2. 本地预检：`pytest tests/ -v && ruff check portal_mcp_server/`
+3. 预览将要发的版本和 CHANGELOG：`uv run cz bump --dry-run`
+4. 正式发版：`uv run cz bump` —— 一条命令完成：按 commit 历史递增 `pyproject.toml` 的 `version`、更新 `uv.lock`、在 `CHANGELOG.md` 顶部生成 `## v<x.y.z> (<日期>)` 段、建 bump commit、打 annotated `v<x.y.z>` tag（`annotated_tag = true`）
+5. 推送触发 release：`git push origin main --follow-tags`
+6. 在 [Actions 页](https://github.com/TMYTiMidlY/portal-mcp-server/actions) 等三个 job 全绿
+7. 验收：https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\> + https://pypi.org/project/portal-mcp-server/\<x.y.z\>/
+
+> `cz bump` 不会自己 push（给你留了反悔的机会）。`--follow-tags` 会把 annotated tag 跟 `main` 一起推上去；release.yml 由 `push: tags: ['v*.*.*']` 触发。
 
 ### Release 出错怎么办
 
 | 哪个 job 红 | 多半原因 | 处理 |
 |---|---|---|
 | `release-build` | `pyproject.toml` 写错 / build backend 报错 | 看构建日志，本地 `python -m build` 复现 |
-| `create-release` | CHANGELOG 段抽不到（版本号串不在头行 / 上一段头行被吞了） | 修 CHANGELOG → 删 tag → 重打 tag |
+| `create-release` | CHANGELOG 段抽不到（版本号串不在头行 / 上一段头行被吞了） | 一般是手改 CHANGELOG 破坏了格式——优先回到 `cz bump` 生成的内容；删 tag → 修好 → 重打 tag |
 | `pypi-publish` | trusted publisher 没配 / PyPI 上已有同版本 | 配 trusted publishing；同版本已发就接受，无须重传 |
 
 > 历史教训：v1.1.0 之前 release.yml 曾从 `pyproject.toml` 直接读 version，导致 tag 和包版本号不一致；commit `8e33ea3 fix(ci): derive release version from tag name instead of pyproject.toml` 改成从 `GITHUB_REF_NAME` 拿，更可靠。
