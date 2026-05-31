@@ -301,6 +301,27 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码；含 pytest �
 pip install -e .
 ```
 
+### 短命令别名 `portal`
+
+`uv tool install portal-mcp-server`（或上面的 `uv tool install --force .`）之后，PATH 里同时出现两个等价的 entry point：
+
+```bash
+portal-mcp-server sudo-login web01   # 全名
+portal sudo-login web01              # 短名（推荐手敲场景）
+portal ssh-login web01
+portal secret-set GITHUB_TOKEN
+```
+
+`uvx portal-mcp-server xxx` 模式仍然要全名（`uvx` 不接受 alias）。短名只在 `uv tool install` / `pip install` 之后的常驻命令里生效。
+
+> **⚠️ 已知命名冲突**：[`SpatiumPortae/portal`](https://github.com/SpatiumPortae/portal)（一个 P2P 文件传输 CLI，Homebrew core 收录）也叫 `portal`。**Homebrew 用户可能撞名**——`uv tool install` 把二进制放 `~/.local/bin/portal`，Homebrew 装在 `/opt/homebrew/bin/portal` 或 `/usr/local/bin/portal`，哪个先在 `$PATH` 里哪个赢。排查：
+>
+> ```bash
+> which -a portal      # 列出所有同名可执行；上面一条是当前生效的
+> ```
+>
+> 撞了就用全名 `portal-mcp-server`，或调整 PATH 顺序。`uv tool install` 不会静默覆盖别人的二进制——文件已存在时会报错让你确认。
+
 ## 接入方式
 
 [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlciJdfQ==)

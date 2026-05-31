@@ -61,6 +61,7 @@ dev = [
 
 [project.scripts]
 portal-mcp-server = "portal_mcp_server:main"
+portal = "portal_mcp_server:main"
 
 [project.urls]
 Homepage = "https://github.com/TMYTiMidlY/portal-mcp-server"
