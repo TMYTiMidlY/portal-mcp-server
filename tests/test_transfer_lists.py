@@ -297,3 +297,33 @@ async def test_portal_transfer_bad_paths_json(patch_manager):
         direction="download-list", host="h", local_path="", remote_path="",
         ctx=None, paths_json="[]")
     assert "non-empty JSON array" in out2
+
+
+@pytest.mark.asyncio
+async def test_portal_transfer_list_blocked_by_policy(monkeypatch, tmp_path):
+    """A host outside the allowlist must be rejected by _gate before any
+    transfer happens — same gate every other state-changing tool goes through.
+    """
+    from portal_mcp_server import security, cli
+
+    pol_yaml = tmp_path / "p.yaml"
+    pol_yaml.write_text(
+        "policies:\n"
+        "  host_allowlist:\n"
+        "    - 'safe-*'\n"
+        "  rate_limit_rps: 1000\n"
+    )
+    pol = security.SecurityPolicy(policies_yaml=pol_yaml)
+    monkeypatch.setattr(security, "_policy", pol)
+    monkeypatch.setattr(cli, "get_policy", lambda: pol)
+
+    paths_json = '[{"local": "/tmp/a", "remote": "/r/a"}]'
+    out = await cli.portal_transfer(
+        direction="upload-list", host="evil-host", local_path="",
+        remote_path="", ctx=None, paths_json=paths_json)
+    assert out.startswith("BLOCKED:"), out
+
+    out2 = await cli.portal_transfer(
+        direction="download-list", host="evil-host", local_path="",
+        remote_path="", ctx=None, paths_json=paths_json)
+    assert out2.startswith("BLOCKED:"), out2
