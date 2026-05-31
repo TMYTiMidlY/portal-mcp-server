@@ -1,3 +1,11 @@
+## v1.3.0 (2026-05-31)
+
+### Feat
+
+- **auth**: ssh-login CLI + key→password fallback + peer-uid socket guard
+- **secrets**: inject named API tokens into local/remote exec without exposing values to the LLM
+- **registry**: surface hosts.yaml config warnings to the agent
+
 ## v1.2.0 (2026-05-31)
 
 ### Feat
