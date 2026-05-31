@@ -118,7 +118,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | Tool | mode / params | Purpose |
 |---|---|---|
 | `portal_host` | `action=list\|register\|remove` | Host registry (for tag-based grouping; `~/.ssh/config` aliases are auto-resolved without registration) |
-| `portal_transfer` | `direction=upload\|download\|sync\|mirror` | SFTP file transfer (binary-safe); `sync` pushes a dir, `mirror` pulls one, both skipping unchanged files by size+mtime (transfers use `preserve=True`, so it's a precise rclone-style equality, not a newer-than heuristic), or sha256 with `checksum=True`; returns structured JSON (bytes / skipped / failed[] / duration); MCP progress during transfer doubles as a keepalive against client idle timeouts |
+| `portal_transfer` | `direction=upload\|download\|sync\|mirror\|upload-list\|download-list` | SFTP file transfer (binary-safe); `sync` pushes a dir, `mirror` pulls one, `upload-list` / `download-list` move an explicit batch of arbitrary local↔remote file pairs given in `paths_json`, all skipping unchanged files by size+mtime (transfers use `preserve=True`, so it's a precise rclone-style equality, not a newer-than heuristic), or sha256 with `checksum=True`; returns structured JSON (bytes / skipped / failed[] / duration), a single file's failure lands in `failed[]` without aborting the batch; MCP progress during transfer doubles as a keepalive against client idle timeouts |
 | `portal_tunnel_open` / `_close` / `_list` | `mode=local\|reverse\|socks` | SSH tunnels (port forward / reverse / SOCKS5) |
 | `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`, `hosts_json\|group_tag` | Multi-host command orchestration |
 | `portal_playbook` | `host\|group_tag` | Multi-step playbook |
@@ -169,7 +169,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `portal_bash_close` | `(host)` |
 | `portal_bash_status` | `()` |
 | `portal_host` | `(action, name='', host='', user='root', port=22, key_path='', tags='')` |
-| `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False)` |
+| `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False, paths_json='')` |
 | `portal_tunnel_open` | `(mode, host, local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
 | `portal_tunnel_close` | `(tunnel_id)` |
 | `portal_tunnel_list` | `()` |

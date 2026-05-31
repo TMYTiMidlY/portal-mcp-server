@@ -355,6 +355,124 @@ async def ssh_sync_directory(host_name: str, local_dir: str, remote_dir: str,
     return res
 
 
+async def ssh_upload_list(host_name: str, pairs: list[tuple[str, str]],
+                          checksum: bool = False,
+                          progress_cb: ProgressCB = None) -> dict:
+    """Upload an explicit list of (local, remote) file pairs (skip-existing).
+
+    Unlike ``sync`` (which walks a whole directory tree), this transfers exactly
+    the files you name — an arbitrary local→remote mapping, not "many sources
+    into one dir". Each pair is handled independently in a loop so the skip
+    decision (size+mtime, or sha256 when ``checksum=True``, via the same
+    :func:`_files_match` helper) and per-file failure collection are precise. A
+    single file's failure does not abort the batch; it lands in ``failed[]`` and
+    the overall ``status`` becomes ``partial``.
+    """
+    res = {"status": "error", "direction": "upload-list", "host": host_name,
+           "uploaded": 0, "skipped": 0, "failed": [],
+           "bytes_total": 0, "bytes_transferred": 0, "duration_s": 0.0}
+    t0 = time.monotonic()
+    try:
+        async with _conn_and_sftp(host_name) as (conn, sftp):
+            for local_path, remote_path in pairs:
+                try:
+                    validate_remote_path(remote_path)
+                except ValueError as e:
+                    res["failed"].append({"path": local_path,
+                                          "error": f"Invalid remote_path: {e}"})
+                    continue
+                p = Path(local_path)
+                if not p.is_file():
+                    res["failed"].append({"path": local_path,
+                                          "error": "Local file not found"})
+                    continue
+                st = p.stat()
+                size = st.st_size
+                res["bytes_total"] += size
+                try:
+                    if await _files_match(conn, sftp, str(p), remote_path,
+                                          size, st.st_mtime, checksum):
+                        res["skipped"] += 1
+                        continue
+                    remote_parent = str(PurePosixPath(remote_path).parent)
+                    await sftp.makedirs(remote_parent, exist_ok=True)
+                    await sftp.put(str(p), remote_path, preserve=True,
+                                   progress_handler=_make_handler(progress_cb))
+                    res["uploaded"] += 1
+                    res["bytes_transferred"] += size
+                except Exception as e:
+                    res["failed"].append({"path": local_path, "error": str(e)})
+    except Exception as e:
+        res["error"] = f"Upload-list failed: {e}"
+        res["duration_s"] = round(time.monotonic() - t0, 3)
+        return res
+    res["status"] = "ok" if not res["failed"] else "partial"
+    res["duration_s"] = round(time.monotonic() - t0, 3)
+    return res
+
+
+async def ssh_download_list(host_name: str, pairs: list[tuple[str, str]],
+                            checksum: bool = False,
+                            progress_cb: ProgressCB = None) -> dict:
+    """Download an explicit list of (remote, local) file pairs (skip-existing).
+
+    The remote→local counterpart of :func:`ssh_upload_list`: same per-file loop,
+    same skip logic (size+mtime, or sha256 when ``checksum=True``), same
+    ``failed[]`` collection that turns ``status`` into ``partial`` without
+    aborting the batch.
+    """
+    res = {"status": "error", "direction": "download-list", "host": host_name,
+           "downloaded": 0, "skipped": 0, "failed": [],
+           "bytes_total": 0, "bytes_transferred": 0, "duration_s": 0.0}
+    t0 = time.monotonic()
+    try:
+        async with _conn_and_sftp(host_name) as (conn, sftp):
+            for remote_path, local_path in pairs:
+                try:
+                    validate_remote_path(remote_path)
+                except ValueError as e:
+                    res["failed"].append({"path": remote_path,
+                                          "error": f"Invalid remote_path: {e}"})
+                    continue
+                try:
+                    rstat = await sftp.stat(remote_path)
+                except Exception:
+                    res["failed"].append({"path": remote_path,
+                                          "error": "Remote file not found"})
+                    continue
+                size = rstat.size or 0
+                res["bytes_total"] += size
+                local_file = Path(local_path)
+                try:
+                    if local_file.is_file():
+                        lst = local_file.stat()
+                        skip = lst.st_size == size
+                        if skip and checksum:
+                            rhash = await _remote_sha256(conn, remote_path)
+                            skip = (rhash is not None
+                                    and rhash == await _local_sha256(str(local_file)))
+                        elif skip:
+                            skip = (rstat.mtime is not None
+                                    and _mtime_match(lst.st_mtime, rstat.mtime))
+                        if skip:
+                            res["skipped"] += 1
+                            continue
+                    local_file.parent.mkdir(parents=True, exist_ok=True)
+                    await sftp.get(remote_path, str(local_file), preserve=True,
+                                   progress_handler=_make_handler(progress_cb))
+                    res["downloaded"] += 1
+                    res["bytes_transferred"] += size
+                except Exception as e:
+                    res["failed"].append({"path": remote_path, "error": str(e)})
+    except Exception as e:
+        res["error"] = f"Download-list failed: {e}"
+        res["duration_s"] = round(time.monotonic() - t0, 3)
+        return res
+    res["status"] = "ok" if not res["failed"] else "partial"
+    res["duration_s"] = round(time.monotonic() - t0, 3)
+    return res
+
+
 async def _walk_remote(sftp, root: str) -> list[tuple[str, int, Optional[float]]]:
     """Recursively list regular files under a remote dir.
 

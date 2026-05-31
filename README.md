@@ -118,7 +118,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 | 工具 | mode / 参数 | 用途 |
 |---|---|---|
 | `portal_host` | `action=list\|register\|remove` | 主机注册（用于 tag 分组；`~/.ssh/config` 别名自动解析无需登记） |
-| `portal_transfer` | `direction=upload\|download\|sync\|mirror` | SFTP 文件传输（二进制安全）；`sync` 推目录、`mirror` 拉目录，默认按 size+mtime 增量短路（传输用 `preserve=True` 保留源 mtime，做 rclone 式精确相等比较，不会误跳 out-of-band 改动），`checksum=True` 改用 sha256 比对；返回结构化 JSON（传输字节数 / 跳过数 / 失败列表 / 耗时），大文件传输期间用 MCP progress 心跳防 client idle 超时 |
+| `portal_transfer` | `direction=upload\|download\|sync\|mirror\|upload-list\|download-list` | SFTP 文件传输（二进制安全）；`sync` 推目录、`mirror` 拉目录、`upload-list` / `download-list` 传 `paths_json` 给定的一批任意 local↔remote 文件对，默认按 size+mtime 增量短路（传输用 `preserve=True` 保留源 mtime，做 rclone 式精确相等比较，不会误跳 out-of-band 改动），`checksum=True` 改用 sha256 比对；返回结构化 JSON（传输字节数 / 跳过数 / 失败列表 / 耗时），单个文件失败进 `failed[]` 不中断整批，大文件传输期间用 MCP progress 心跳防 client idle 超时 |
 | `portal_tunnel_open` / `_close` / `_list` | `mode=local\|reverse\|socks` | SSH 隧道（端口转发 / 反向 / SOCKS5） |
 | `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`，`hosts_json\|group_tag` | 多机命令编排 |
 | `portal_playbook` | `host\|group_tag` | 多步骤剧本 |
@@ -169,7 +169,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 | `portal_bash_close` | `(host)` |
 | `portal_bash_status` | `()` |
 | `portal_host` | `(action, name='', host='', user='root', port=22, key_path='', tags='')` |
-| `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False)` |
+| `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False, paths_json='')` |
 | `portal_tunnel_open` | `(mode, host, local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
 | `portal_tunnel_close` | `(tunnel_id)` |
 | `portal_tunnel_list` | `()` |

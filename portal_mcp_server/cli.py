@@ -15,7 +15,7 @@ from .paths import default_log_dir
 from .connection_manager import get_manager
 from .shell_engine import ssh_exec
 from .file_ops import (ssh_upload_file, ssh_download_file, ssh_sync_directory,
-                       ssh_mirror_directory)
+                       ssh_mirror_directory, ssh_upload_list, ssh_download_list)
 from .network_tools import get_tunnel_manager
 from .orchestrator import (ssh_parallel_exec, ssh_rolling_exec,
                             ssh_broadcast, run_playbook, run_playbook_on_group)
@@ -245,7 +245,8 @@ def portal_host(action: str, name: str = "", host: str = "",
 @mcp.tool()
 async def portal_transfer(direction: str, host: str,
                            local_path: str, remote_path: str,
-                           ctx: Context, checksum: bool = False) -> str:
+                           ctx: Context, checksum: bool = False,
+                           paths_json: str = "") -> str:
     """Transfer files between local and remote via SFTP (binary-safe, atomic).
 
     ## Modes
@@ -264,18 +265,32 @@ async def portal_transfer(direction: str, host: str,
         directory (download); the remote→local counterpart of "sync".
         Example: portal_transfer(direction="mirror", host="web01",
                                   remote_path="/srv/www/", local_path="./www/")
+    - direction="upload-list" / "download-list": transfer an explicit list of
+        file pairs given in paths_json (an arbitrary local→remote mapping, not a
+        whole directory). Each pair is skipped when already present with a
+        matching size+mtime (or sha256 when checksum=True), so re-runs only move
+        the changed files; a single pair's failure is collected in failed[]
+        without aborting the batch. local_path / remote_path are ignored in
+        these modes.
+        Example: portal_transfer(direction="upload-list", host="web01",
+            paths_json='[{"local":"/tmp/a.conf","remote":"/etc/app/a.conf"},
+                         {"local":"/tmp/b.conf","remote":"/etc/app/b.conf"}]')
 
     Args:
-        checksum: for sync/mirror, compare files by sha256 instead of size+mtime
+        checksum: for the incremental modes (sync/mirror/upload-list/
+            download-list), compare files by sha256 instead of size+mtime
             (slower, requires `sha256sum` on the remote; missing remote files or
             an unavailable sha256sum force a re-transfer).
+        paths_json: JSON array of {"local": ..., "remote": ...} objects, required
+            by the upload-list / download-list modes (ignored otherwise).
 
     Progress is reported to the MCP client during transfers, which also keeps
     the connection alive so large files don't trip client idle timeouts.
 
     Returns a JSON status dict. Single-file: {status, direction, host, bytes,
-    duration_s, ...}. sync/mirror: {status, uploaded|downloaded, skipped,
-    failed[], bytes_total, bytes_transferred, duration_s}.
+    duration_s, ...}. sync/mirror/upload-list/download-list: {status,
+    uploaded|downloaded, skipped, failed[], bytes_total, bytes_transferred,
+    duration_s}.
 
     For text-only edits prefer portal_patch (hash-protected). Use portal_transfer
     when SFTP semantics are needed: binary files, large files, whole directory
@@ -298,9 +313,33 @@ async def portal_transfer(direction: str, host: str,
     elif direction == "mirror":
         result = await ssh_mirror_directory(host, remote_path, local_path,
                                             checksum=checksum, progress_cb=progress_cb)
+    elif direction in ("upload-list", "download-list"):
+        try:
+            entries = json.loads(paths_json or "[]")
+        except (json.JSONDecodeError, TypeError) as e:
+            return f"Error: paths_json is not valid JSON: {e}"
+        if not isinstance(entries, list) or not entries:
+            return ('Error: paths_json must be a non-empty JSON array of '
+                    '{"local": ..., "remote": ...} objects.')
+        pairs = []
+        for i, item in enumerate(entries):
+            if not isinstance(item, dict) or "local" not in item or "remote" not in item:
+                return (f'Error: paths_json[{i}] must be an object with "local" '
+                        'and "remote" string keys.')
+            pairs.append((str(item["local"]), str(item["remote"])))
+        if direction == "upload-list":
+            result = await ssh_upload_list(host, pairs, checksum=checksum,
+                                           progress_cb=progress_cb)
+        else:
+            dl_pairs = [(remote, local) for local, remote in pairs]
+            result = await ssh_download_list(host, dl_pairs, checksum=checksum,
+                                             progress_cb=progress_cb)
+        audit_log(host, f"{direction}:{len(pairs)} files",
+                  result.get("status", "?"), operation=f"file_{direction}")
+        return json.dumps(result, indent=2, ensure_ascii=False)
     else:
-        return (f'Error: unknown direction {direction!r}. '
-                'Valid: upload, download, sync, mirror.')
+        return (f'Error: unknown direction {direction!r}. Valid: upload, '
+                'download, sync, mirror, upload-list, download-list.')
     audit_log(host, f"{direction}:{local_path}<->{remote_path}",
               result.get("status", "?"), operation=f"file_{direction}")
     return json.dumps(result, indent=2, ensure_ascii=False)
