@@ -80,9 +80,15 @@ async def _resolve_secrets(names: "list[str]"):
             return env, values, f"secret '{name}' could not be resolved: {e}"
         if value is None:
             return env, values, (
-                f"secret '{name}' is not available. Add it to secrets.yaml "
-                f"(a '{name}: {{command: ...}}' entry) or, in a separate "
-                f"terminal, run `portal-mcp-server secret-set {name}`."
+                f"secret '{name}' is not available and the command was NOT run. "
+                f"Ask the user to provide it out-of-band: prefer an interactive "
+                f"input/choice tool (e.g. ask_user) to request that they run "
+                f"`portal-mcp-server secret-set {name}` in a separate terminal and "
+                f"confirm when done, then retry this call. If you have no such tool, "
+                f"tell the user what to run and end your turn to wait for their next "
+                f"message. (Alternatively an operator can add a "
+                f"'{name}: {{command: ...}}' entry to secrets.yaml.) Never ask the "
+                f"user to paste the secret value into this conversation."
             )
         env[secrets_store.env_var_name(name)] = value
         values.append(value)
@@ -923,9 +929,17 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         if password is None:
             return json.dumps({
                 "host": host,
-                "error": ("No sudo password available for this host. In a "
-                          f"separate terminal run `portal-mcp-server sudo-login {host}`, "
-                          "or set `sudo_password_command` for the host in hosts.yaml."),
+                "error": ("No sudo password available for this host; the command "
+                          "was NOT run. Ask the user to provide it out-of-band: "
+                          "prefer an interactive input/choice tool (e.g. ask_user) "
+                          "to request that they run "
+                          f"`portal-mcp-server sudo-login {host}` in a separate "
+                          "terminal and confirm when done, then retry this call. If "
+                          "you have no such tool, tell the user what to run and end "
+                          "your turn to wait for their next message. (Alternatively "
+                          "an operator can set `sudo_password_command` for the host "
+                          "in hosts.yaml.) Never ask the user to paste the password "
+                          "into this conversation."),
             }, indent=2, ensure_ascii=False)
         res = await _re_sudo_exec(host, command, password, timeout=timeout)
         audit_log(host, "sudo: " + command, res.get("exit_code", "?"),

@@ -625,6 +625,8 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 需要给命令一个 API token（GitHub token、部署密钥等）、又**不想让它进 session 历史、不想发给第三方 LLM 后端**时用这个。和 sudo 密码同一套威胁模型：agent 只传 secret 的**名字**，server 端解析出值、作为**环境变量**注入一次性命令，值经进程环境 / SSH stdin 传递（不进 argv，所以 `ps` 和审计都看不到），命令输出里任何对该值的回显都会在返回给 agent 前替换成 `***`。
 
+> **为什么不直接 `export`？** 痛点在于：临时 `export TOKEN=…` 注入不进 agent 的执行上下文——它只对你手里那个新开的终端生效，agent 跑命令用的是 MCP server 进程的环境，根本看不到。要让 agent 用上，过去只能 `vim` 一个 `.env` / secrets 文件让它去 source，于是 secret 又落了盘、又容易忘删。这个设计把"临时给一次密钥"做成了**原生的无回显 CLI 输入**（`secret-set` 走 `getpass`，和你平时输密码一样），值只进**正在运行的** server 内存、带 TTL 自动过期，既不落盘也不进 LLM。
+
 - 远程：`portal_bash(host, cmd, secrets=["github_token"])`，命令里写 `$GITHUB_TOKEN`（secret 名大写）。
 - 本地：`portal_local_exec(cmd, secrets=["github_token"])`，在 **MCP server 本机**跑命令（不走 SSH）。本地执行威胁面更大，**默认禁用**，须给 server 进程设 `PORTAL_ALLOW_LOCAL_EXEC=1` 才开。
 
@@ -648,6 +650,16 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
    值经本地 unix socket（`$XDG_RUNTIME_DIR/portal-mcp-server/control-secrets.sock`，目录 0700 / socket 0600，仅本用户可达）推进**正在运行的** server 内存缓存，**从不落盘、从不进 LLM**，TTL 到期自动清除。
 
 完整配置见 [`config/secrets.example.yaml`](./config/secrets.example.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_bash` 调用里互斥。
+
+#### 等待语义：fail-fast → `ask_user` → 重试
+
+无回显输入天然要"等人输完"，但**这个等待绝不挂在 agent 的关键路径上**——MCP server 通常 headless、没有用户的 tty，既弹不出 `getpass`、也不该把工具调用阻塞到撞超时。所以约定是：
+
+1. **fail-fast**：secret（或 sudo 密码）没就绪时，工具**立刻返回错误、命令不执行**，错误串里不含任何值。
+2. **让 agent 把球踢给用户**：错误串显式建议 agent 用 `ask_user` 这类**要求用户输入/选择的工具**，请用户在**另一个终端**跑 `secret-set <name>` / `sudo-login <host>`，搞定后回个"ok"；agent 收到 ok 再重试本次调用。
+3. **没有这类工具就结束这轮**：若当前 agent 环境没有 `ask_user` 之类的交互工具，就**把要跑的命令告诉用户、主动结束这一轮**，等用户下一个 prompt 再重试——而不是干等或反复轮询。
+
+于是"等待"只体现为一次正常的对话轮次交接：阻塞的是用户自己终端里的 `getpass`，agent 端永远是"查缓存 → 命中就跑 / 没命中就 fail-fast 给指令"。**绝不要让用户把值粘进对话**——那等于把它喂给了第三方 LLM，整套设计就白做了。
 
 ## 安全
 

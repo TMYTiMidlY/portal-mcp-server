@@ -612,6 +612,8 @@ Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` execu
 
 Use this to hand a command an API token (a GitHub token, a deploy key, …) **without it entering the session history or being sent to the third-party LLM backend**. Same threat model as the sudo password: the agent passes only the secret's **name**, the server resolves the value and injects it as an **environment variable** into a one-shot command. The value travels via the process environment / SSH stdin (never on argv, so `ps` and the audit log can't see it), and any echo of it in the command output is redacted to `***` before the result reaches the agent.
 
+> **Why not just `export`?** The pain point: a throwaway `export TOKEN=…` never reaches the agent's execution context — it only affects the new terminal *you* opened, while the agent runs commands in the MCP server process's environment, which can't see it. The only way to make the agent use it was to `vim` a `.env` / secrets file for it to source — which puts the secret back on disk and is easy to forget to delete. This design turns "hand over a key once" into a **native no-echo CLI prompt** (`secret-set` uses `getpass`, just like typing a password), with the value living only in the *running* server's memory and auto-expiring on a TTL — never on disk, never to the LLM.
+
 - Remote: `portal_bash(host, cmd, secrets=["github_token"])`, referencing `$GITHUB_TOKEN` (the uppercased name) in `cmd`.
 - Local: `portal_local_exec(cmd, secrets=["github_token"])` runs on the **MCP server host** (not over SSH). Local execution is a larger threat surface, so it is **disabled** unless the server process has `PORTAL_ALLOW_LOCAL_EXEC=1`.
 
@@ -635,6 +637,16 @@ Two sources (order: in-memory cache → `secrets.yaml`):
    The value is pushed over a local unix socket (`$XDG_RUNTIME_DIR/portal-mcp-server/control-secrets.sock`, dir 0700 / socket 0600, same-user only) into the *running* server's in-memory cache — never written to disk, never seen by the LLM, cleared on TTL expiry.
 
 See [`config/secrets.example.yaml`](./config/secrets.example.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_bash` call.
+
+#### Wait semantics: fail-fast → `ask_user` → retry
+
+No-echo input inherently means "wait for the human to type it," but **that wait is never put on the agent's critical path** — the MCP server is usually headless with no access to the user's tty, so it can neither pop a `getpass` prompt nor block the tool call until it times out. The contract is therefore:
+
+1. **Fail-fast**: when the secret (or sudo password) isn't ready, the tool **returns an error immediately and does not run the command**; the error never contains the value.
+2. **Bounce it back to the user**: the error explicitly nudges the agent to use an interactive input/choice tool (e.g. `ask_user`) to ask the user to run `secret-set <name>` / `sudo-login <host>` in a *separate* terminal and reply "ok" when done; the agent then retries the call.
+3. **No such tool → end the turn**: if the agent has no `ask_user`-style tool, it should **tell the user what to run and end its turn**, waiting for the user's next prompt to retry — rather than busy-waiting or polling.
+
+So "waiting" surfaces only as a normal conversational turn handoff: the `getpass` block lives in the user's own terminal, while the agent side is always "check cache → run on hit / fail-fast with instructions on miss." **Never ask the user to paste the value into the conversation** — that would feed it straight to the third-party LLM and defeat the entire design.
 
 ## Security
 
