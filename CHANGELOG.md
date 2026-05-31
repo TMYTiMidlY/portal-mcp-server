@@ -1,3 +1,9 @@
+## v1.4.0 (2026-05-31)
+
+### Feat
+
+- **cli**: add short alias `portal` as a second entry point
+
 ## v1.3.0 (2026-05-31)
 
 ### Feat
