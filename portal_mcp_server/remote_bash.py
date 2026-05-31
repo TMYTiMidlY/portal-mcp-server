@@ -185,3 +185,47 @@ async def remote_sudo_exec(host: str, command: str, password: str,
         output = (output + "\n" if output else "") + f"[stderr] {stderr}"
     return {"host": host, "output": output, "exit_code": result.returncode}
 
+
+async def remote_exec_with_env(host: str, command: str, env: dict,
+                               timeout: float = 3600.0) -> dict:
+    """Run a command on <host> with named secrets injected as env vars.
+
+    The secret values are fed to a one-shot ``bash -s`` on **stdin** as
+    ``export VAR=<value>`` lines followed by the command, so the values never
+    appear on argv (out of ``ps``) and never reach the audit log. Like
+    :func:`remote_sudo_exec` this is a one-shot ``conn.run`` (not the persistent
+    session): the command's own stdin is therefore already at EOF (fine for
+    ``curl``/CLI tools that read flags, not stdin). cwd/env from prior
+    ``portal_bash`` calls do NOT apply.
+
+    ``env`` maps already-resolved ``ENV_VAR_NAME -> value``. The caller is
+    responsible for redacting the returned output.
+    """
+    from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
+    from .safety import quote_shell
+
+    mgr = get_manager()
+    conn = await mgr.get_connection(host)
+    exports = "".join(
+        f"export {name}={quote_shell(value)}\n" for name, value in env.items()
+    )
+    script = exports + command + "\n"
+    try:
+        result = await asyncio.wait_for(
+            conn.run("bash -s", input=script, check=False,
+                     errors=DEFAULT_DECODE_ERRORS),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        return {"host": host, "error": f"command timed out after {timeout}s",
+                "exit_code": -1}
+    finally:
+        mgr.release_connection(host, conn)
+
+    stdout = result.stdout or ""
+    stderr = (result.stderr or "").strip()
+    output = _clean(stdout)
+    if stderr:
+        output = (output + "\n" if output else "") + f"[stderr] {stderr}"
+    return {"host": host, "output": output, "exit_code": result.returncode}
+

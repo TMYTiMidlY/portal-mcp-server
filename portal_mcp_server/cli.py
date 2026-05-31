@@ -32,7 +32,9 @@ from .remote_bash import (
     remote_bash_close as _re_bash_close,
     remote_bash_status as _re_bash_status,
     remote_sudo_exec as _re_sudo_exec,
+    remote_exec_with_env as _re_exec_env,
 )
+from .local_exec import local_exec_with_env as _local_exec_env
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
 try:
@@ -58,6 +60,33 @@ mcp = FastMCP("portal-mcp-server")
 def _gate(host: str, command: str = "") -> str | None:
     """Returns error string if blocked, None if allowed."""
     return get_policy().enforce(host, command)
+
+
+async def _resolve_secrets(names: "list[str]"):
+    """Resolve secret names to an injectable env dict + the raw values (for
+    redaction). Returns ``(env, values, error)``: on the first unresolved name,
+    ``env``/``values`` are partial and ``error`` is a friendly JSON-able string
+    naming the missing secret (never the value). The agent only ever passes
+    NAMES; values are fetched from secrets.yaml or the secret-set cache.
+    """
+    from . import secrets_store
+
+    env: dict[str, str] = {}
+    values: list[str] = []
+    for name in names:
+        try:
+            value = await secrets_store.resolve_secret(name)
+        except Exception as e:  # command configured but failed (value-free msg)
+            return env, values, f"secret '{name}' could not be resolved: {e}"
+        if value is None:
+            return env, values, (
+                f"secret '{name}' is not available. Add it to secrets.yaml "
+                f"(a '{name}: {{command: ...}}' entry) or, in a separate "
+                f"terminal, run `portal-mcp-server secret-set {name}`."
+            )
+        env[secrets_store.env_var_name(name)] = value
+        values.append(value)
+    return env, values, None
 
 
 def _make_progress_cb(ctx: "Context | None"):
@@ -653,7 +682,7 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
         Example: portal_audit(view="history", limit=20, host_filter="web01")
     - view="stats": aggregate audit stats (counts by operation, error rate, etc.).
     - view="policy": current security policy details (host allowlist, command
-        blocklist, allowlist, rate limits, sandbox users).
+        blocklist, allowlist, rate limit).
 
     Read-only. Used to introspect what the MCP server has been doing and what
     limits are in place.
@@ -671,9 +700,6 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
             "command_blocklist": pol.command_blocklist,
             "command_allowlist": pol.command_allowlist or ["* (all commands permitted)"],
             "rate_limit_rps": pol.rate_limit_rps,
-            "max_concurrent": pol.max_concurrent,
-            "connection_timeout_s": pol.connection_timeout,
-            "sandbox_users": pol.sandbox_users,
         }, indent=2)
     if view == "snapshot":
         mgr = get_manager()
@@ -842,7 +868,8 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 
 @mcp.tool()
 async def portal_bash(host: str, command: str, timeout: float = 3600.0,
-                      use_sudo: bool = False) -> str:
+                      use_sudo: bool = False,
+                      secrets: "list[str] | None" = None) -> str:
     """Run a command in the persistent bash session for <host>.
 
     Behavior:
@@ -861,10 +888,35 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         from the host's `sudo_password_command` in hosts.yaml. Because sudo
         reads stdin, this runs as a ONE-SHOT command (not the persistent
         session): cwd/env from prior portal_bash calls do not apply.
+
+    secrets: a list of named secrets (e.g. ["github_token"]) to inject as
+        environment variables for THIS command only. You pass the NAME, never
+        the value: the server resolves each from secrets.yaml or the
+        `secret-set` cache and exports it as the uppercased env var (github_token
+        → $GITHUB_TOKEN). Reference it in `command` as `$GITHUB_TOKEN`. The value
+        is fed over SSH stdin (never on argv/audit) and is redacted to *** in the
+        returned output. Like use_sudo this is a ONE-SHOT command (cwd/env from
+        prior calls do not apply). Cannot be combined with use_sudo.
     """
     err = _gate(host, command)
     if err:
         return f"BLOCKED: {err}"
+    if secrets:
+        if use_sudo:
+            return json.dumps({
+                "host": host,
+                "error": "secrets and use_sudo cannot be combined in one call.",
+            }, indent=2, ensure_ascii=False)
+        env, values, serr = await _resolve_secrets(secrets)
+        if serr:
+            return json.dumps({"host": host, "error": serr}, indent=2,
+                              ensure_ascii=False)
+        from . import secrets_store
+        res = await _re_exec_env(host, command, env, timeout=timeout)
+        res["output"] = secrets_store.redact(res.get("output", ""), values)
+        audit_log(host, command + f"  [secrets: {','.join(secrets)}]",
+                  res.get("exit_code", "?"), operation="remote_exec_secrets")
+        return json.dumps(res, indent=2, ensure_ascii=False)
     if use_sudo:
         from .sudo_creds import resolve_sudo_password
         password = await resolve_sudo_password(host)
@@ -881,6 +933,52 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         return json.dumps(res, indent=2, ensure_ascii=False)
     res = await _re_bash(host, command, timeout=timeout)
     audit_log(host, command, "ok", operation="remote_bash")
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
+                            timeout: float = 600.0) -> str:
+    """Run a ONE-SHOT command on the MCP server host (LOCAL), optionally with
+    named secrets injected as environment variables.
+
+    Unlike every other portal_* tool (which runs over SSH on a remote host),
+    this executes locally — a larger threat surface — so it is DISABLED unless
+    the operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` for the server process.
+
+    secrets: a list of named secrets (e.g. ["github_token"]). You pass the NAME,
+        never the value: the server resolves each from secrets.yaml or the
+        `secret-set` cache and exports it as the uppercased env var (github_token
+        → $GITHUB_TOKEN) into the child process environment (never on argv/audit).
+        Reference it in `command` as `$GITHUB_TOKEN`. Any echo of the value in the
+        output is redacted to ***.
+
+    Use this to run a local command/script that needs an API token without the
+    token ever entering this conversation or being sent to the model backend.
+    """
+    if os.environ.get("PORTAL_ALLOW_LOCAL_EXEC", "").lower() not in (
+        "1", "true", "yes", "on",
+    ):
+        return json.dumps({
+            "error": ("portal_local_exec is disabled. The operator must set "
+                      "PORTAL_ALLOW_LOCAL_EXEC=1 for the MCP server process to "
+                      "allow running commands on the local host."),
+        }, indent=2, ensure_ascii=False)
+    err = _gate("<local>", command)
+    if err:
+        return f"BLOCKED: {err}"
+    env: dict[str, str] = {}
+    values: list[str] = []
+    if secrets:
+        env, values, serr = await _resolve_secrets(secrets)
+        if serr:
+            return json.dumps({"error": serr}, indent=2, ensure_ascii=False)
+    from . import secrets_store
+    res = await _local_exec_env(command, env, timeout=timeout)
+    res["output"] = secrets_store.redact(res.get("output", ""), values)
+    suffix = f"  [secrets: {','.join(secrets)}]" if secrets else ""
+    audit_log("<local>", command + suffix, res.get("exit_code", "?"),
+              operation="local_exec")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
@@ -945,12 +1043,57 @@ def _sudo_login_cli(argv: list[str]) -> None:
         sys.exit(1)
 
 
+def _secret_set_cli(argv: list[str]) -> None:
+    """`portal-mcp-server secret-set <name>` — push a named secret (API token)
+    to a running server, out-of-band (prompted with no echo; never via the LLM)."""
+    import argparse
+    import getpass
+    from .secrets_store import (send_secret, control_secrets_socket_path,
+                                DEFAULT_TTL_SEC)
+
+    p = argparse.ArgumentParser(
+        prog="portal-mcp-server secret-set",
+        description="Provide a named secret (e.g. an API token) to a running "
+                    "portal-mcp-server (cached in memory with a TTL; never "
+                    "written to disk, never seen by the agent). Reference it "
+                    "later by name via the tools' `secrets` parameter.",
+    )
+    p.add_argument("name", help="secret name (e.g. github_token)")
+    p.add_argument("--ttl", type=int, default=DEFAULT_TTL_SEC,
+                   help=f"seconds before the cached secret expires "
+                        f"(default {DEFAULT_TTL_SEC})")
+    a = p.parse_args(argv)
+
+    path = control_secrets_socket_path()
+    if not path.exists():
+        print(f"No running portal-mcp-server secrets control socket at {path}.\n"
+              "Start the MCP server first (your MCP client launches it), then "
+              "retry.", file=sys.stderr)
+        sys.exit(1)
+    value = getpass.getpass(f"value for secret '{a.name}': ")
+    if not value:
+        print("Empty value, aborted.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        resp = send_secret(a.name, value, ttl=a.ttl)
+    except OSError as e:
+        print(f"Failed to reach control socket: {e}", file=sys.stderr)
+        sys.exit(1)
+    if resp.get("status") == "ok":
+        print(f"secret '{a.name}' cached (expires in {a.ttl}s).")
+    else:
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def main() -> None:
-    """CLI entrypoint registered as `portal-mcp-server` (and the legacy
-    `portal-mcp-server` alias for backward compat with existing .mcp.json)."""
+    """CLI entrypoint registered as `portal-mcp-server`."""
     import argparse
     if len(sys.argv) >= 2 and sys.argv[1] == "sudo-login":
         _sudo_login_cli(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "secret-set":
+        _secret_set_cli(sys.argv[2:])
         return
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
@@ -992,6 +1135,14 @@ def main() -> None:
         start_control_server()
     except Exception as e:  # pragma: no cover - never block startup on this
         logger.warning("could not start sudo control server: %s", e)
+
+    # Best-effort: start the named-secret control socket so `secret-set` from a
+    # separate terminal can push API tokens into this process's memory.
+    try:
+        from .secrets_store import start_secrets_control_server
+        start_secrets_control_server()
+    except Exception as e:  # pragma: no cover - never block startup on this
+        logger.warning("could not start secrets control server: %s", e)
 
     if args.transport == "streamable_http":
         import uvicorn

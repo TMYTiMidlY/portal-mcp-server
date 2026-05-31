@@ -56,6 +56,14 @@ def policies_yaml_path() -> Path:
     )
 
 
+def secrets_yaml_path() -> Path:
+    return _resolve(
+        "PORTAL_SECRETS_YAML",
+        "config/secrets.yaml",
+        xdg_config_home() / "secrets.yaml",
+    )
+
+
 def default_log_dir() -> Path:
     override = os.environ.get("PORTAL_LOG_DIR")
     if override:

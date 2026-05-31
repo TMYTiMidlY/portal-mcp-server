@@ -44,7 +44,7 @@
 
 ## 简介
 
-`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 18 个面向 agent 的 `portal_*` 工具：
+`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 19 个面向 agent 的 `portal_*` 工具：
 
 - **2 个** hash-protected 的远端文件编辑工具（`portal_read` / `portal_patch`），算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT），针对 SFTP 重写
 - **6 个** 核心 IO / 搜索 / 持久 bash 工具
@@ -58,7 +58,7 @@
 - **Windows 上同样快**：不依赖 OpenSSH `ControlMaster`，连接池是纯 Python 对象，三大平台获得一致的复用性能。
 - **持久 bash 会话**：`portal_bash` 为每台 host 维护一个 `bash -i`，cwd / env 跨调用保留；agent 不需要每条命令重建上下文。
 - **hash 保护的远端编辑**：`portal_read` + `portal_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
-- **agent-first 工具数量**：把上游 57 个工具收敛到 18 个，tool-list context 从 ~7.5k tokens 降到 ~2.5k；`mode` 字段合并语义重复的入口。
+- **agent-first 工具数量**：把上游 57 个工具收敛到 19 个，tool-list context 从 ~7.5k tokens 降到 ~2.5k；`mode` 字段合并语义重复的入口。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
@@ -85,7 +85,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 │  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
 │ (Claude Code │                    │                                     │
 │  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
-│  Cursor ...) │                    │  │ 18 tools │──►│ security gate  │  │
+│  Cursor ...) │                    │  │ 19 tools │──►│ security gate  │  │
 └──────────────┘                    │  └──────────┘   │ + audit log    │  │
                                     │                  └───────┬────────┘  │
                                     │                          │           │
@@ -197,7 +197,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 
 ## 设计理念
 
-### 工具精简：18 vs. 57
+### 工具精简：19 vs. 57
 
 Anthropic 的 [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) 明确说：
 
@@ -621,6 +621,34 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `bash -i` 会话（`sudo -S` 读 stdin 会和 sentinel 协议打架）。因此 sudo 命令**不继承** 之前 `portal_bash` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_bash` 处理不了，让用户 `ssh -t host sudo ...`。
 
+### 命名 secret 注入：`secrets=[…]` + `secret-set`
+
+需要给命令一个 API token（GitHub token、部署密钥等）、又**不想让它进 session 历史、不想发给第三方 LLM 后端**时用这个。和 sudo 密码同一套威胁模型：agent 只传 secret 的**名字**，server 端解析出值、作为**环境变量**注入一次性命令，值经进程环境 / SSH stdin 传递（不进 argv，所以 `ps` 和审计都看不到），命令输出里任何对该值的回显都会在返回给 agent 前替换成 `***`。
+
+- 远程：`portal_bash(host, cmd, secrets=["github_token"])`，命令里写 `$GITHUB_TOKEN`（secret 名大写）。
+- 本地：`portal_local_exec(cmd, secrets=["github_token"])`，在 **MCP server 本机**跑命令（不走 SSH）。本地执行威胁面更大，**默认禁用**，须给 server 进程设 `PORTAL_ALLOW_LOCAL_EXEC=1` 才开。
+
+两条来源（顺序：内存缓存 → `secrets.yaml`）：
+
+1. **secret 管理器（secrets.yaml）**——和 `password_command` 对称，写一条打印 secret 到 stdout 的命令：
+
+   ```yaml
+   secrets:
+     github_token:
+       command: pass show api/github      # 或 op read / printf "$ENV"
+   ```
+
+2. **临时塞入（`secret-set`，交互一次）**——在**另一个终端**跑：
+
+   ```bash
+   portal-mcp-server secret-set github_token            # getpass 隐藏输入，不回显
+   portal-mcp-server secret-set github_token --ttl 1800 # 自定义 TTL（秒），默认 900
+   ```
+
+   值经本地 unix socket（`$XDG_RUNTIME_DIR/portal-mcp-server/control-secrets.sock`，目录 0700 / socket 0600，仅本用户可达）推进**正在运行的** server 内存缓存，**从不落盘、从不进 LLM**，TTL 到期自动清除。
+
+完整配置见 [`config/secrets.example.yaml`](./config/secrets.example.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_bash` 调用里互斥。
+
 ## 安全
 
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
@@ -727,7 +755,7 @@ Apache License 2.0（见 [`LICENSE`](LICENSE)）。
 
 衍生关系与 third-party 算法引用见 [`NOTICE`](NOTICE)：
 
-- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）**——git ancestry，底层模块（asyncssh 引擎、连接池、tunnel 管理、orchestrator、安全策略）沿用；上层 18 个 `portal_*` 工具是新设计
+- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）**——git ancestry，底层模块（asyncssh 引擎、连接池、tunnel 管理、orchestrator、安全策略）沿用；上层 19 个 `portal_*` 工具是新设计
 - **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT）**——`remote_text_editor.py` 的 SHA-256 hash-protected edit 算法参考来源，针对 AsyncSSH SFTP 重写
 
 > ⚠️ 本工具让 agent 拥有对远端系统的 SSH 访问能力。请只在你拥有或被授权的系统上使用。

@@ -50,6 +50,55 @@ DEFAULT_MAX_CONN_AGE = 3600.0
 DEFAULT_DECODE_ERRORS = "backslashreplace"
 
 
+async def _exec_secret_command(cmd: str, *, label: str) -> str:
+    """Execute a user-supplied shell command and return its stdout as a secret.
+
+    Shared by SSH/sudo password sources (:meth:`ConnectionManager._run_secret_command`)
+    and the named-secret store (:mod:`secrets_store`). ``label`` is only used in
+    error messages — it must NOT contain the secret. The command's stdout is the
+    secret; stderr is captured but never logged or returned (it commonly contains
+    the secret on misconfigured commands). One trailing newline is stripped.
+    """
+    loop = asyncio.get_running_loop()
+
+    def _run() -> subprocess.CompletedProcess:
+        return subprocess.run(
+            cmd,
+            shell=True,
+            capture_output=True,
+            timeout=SECRET_COMMAND_TIMEOUT_SEC,
+            check=False,
+            env=os.environ.copy(),
+        )
+
+    try:
+        result = await loop.run_in_executor(None, _run)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"{label} timed out after {SECRET_COMMAND_TIMEOUT_SEC}s"
+        ) from None
+
+    if result.returncode != 0:
+        raise RuntimeError(f"{label} exited with code {result.returncode}")
+
+    try:
+        secret = result.stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        raise RuntimeError(
+            f"{label} produced non-UTF-8 output. Ensure the command writes a "
+            "plain-text secret to stdout."
+        ) from None
+    # Most secret stores append a single trailing newline. Strip exactly one so
+    # secrets that legitimately end in whitespace survive.
+    if secret.endswith("\r\n"):
+        secret = secret[:-2]
+    elif secret.endswith("\n"):
+        secret = secret[:-1]
+    if not secret:
+        raise RuntimeError(f"{label} produced empty output")
+    return secret
+
+
 @dataclass
 class HostConfig:
     name: str
@@ -326,53 +375,9 @@ class ConnectionManager:
           * On failure, we raise ``RuntimeError`` with the host and exit
             code only — no command string, no output.
         """
-        loop = asyncio.get_running_loop()
-
-        def _run() -> subprocess.CompletedProcess:
-            return subprocess.run(
-                cmd,
-                shell=True,
-                capture_output=True,
-                timeout=SECRET_COMMAND_TIMEOUT_SEC,
-                check=False,
-                env=os.environ.copy(),
-            )
-
-        try:
-            result = await loop.run_in_executor(None, _run)
-        except subprocess.TimeoutExpired:
-            raise RuntimeError(
-                f"{kind} for host '{host}' timed out after "
-                f"{SECRET_COMMAND_TIMEOUT_SEC}s"
-            ) from None
-
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"{kind} for host '{host}' exited with code "
-                f"{result.returncode}"
-            )
-
-        try:
-            secret = result.stdout.decode("utf-8", errors="strict")
-        except UnicodeDecodeError:
-            # Don't surface the offending bytes — they may contain the secret
-            # on misconfigured commands (e.g. a binary key file printed by
-            # mistake). Give the operator enough to fix the config.
-            raise RuntimeError(
-                f"{kind} for host '{host}' produced non-UTF-8 output. "
-                "Ensure the command writes a plain-text secret to stdout."
-            ) from None
-        # Most secret stores append a single trailing newline. Strip exactly
-        # one so passwords that legitimately end in whitespace survive.
-        if secret.endswith("\r\n"):
-            secret = secret[:-2]
-        elif secret.endswith("\n"):
-            secret = secret[:-1]
-        if not secret:
-            raise RuntimeError(
-                f"{kind} for host '{host}' produced empty output"
-            )
-        return secret
+        return await _exec_secret_command(
+            cmd, label=f"{kind} for host '{host}'"
+        )
 
     async def sudo_password_command_for(self, host_name: str) -> Optional[str]:
         """Run a host's ``sudo_password_command`` and return its output.
