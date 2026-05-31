@@ -532,6 +532,24 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 
 按你的认证方式跳——优先 SSH key，passphrase 走 ssh-agent；密码登录支持但需要走 `password_command`，命令行明文密码从不进 LLM。
 
+### 凭据流总览
+
+口令/密钥类凭据一共四条流，各自的"密码管理器派（命令源）"和"无回显交互派（getpass + 本地 socket）"如下（**按当前实现**）：
+
+| 凭据流 | 命令源（密码管理器派） | 无回显交互入口（getpass 派） | 缓存 key | 缓存语义 | 触发点 |
+|---|---|---|---|---|---|
+| **A. 远程 SSH 登录密码** | `password_command`（hosts.yaml） | ❌ 暂无 | 不缓存 | 每次连接现取 | 连接时自动 |
+| **B. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `sudo-login <host>` | host | 内存 TTL（默认 900s） | `portal_bash(use_sudo=True)` |
+| **C. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `secret-set <name>` | name | 内存 TTL（默认 900s，`--ttl` 可调） | `portal_bash(secrets=[…])` |
+| **D. secret 注入·本地** | 同 C（共用 `secrets.yaml`） | 同 C（共用 `secret-set`） | 同 C | 同 C | `portal_local_exec(secrets=[…])` |
+
+几点要知道：
+
+- **C 和 D 是同一套凭据管道**——共用 `secrets.yaml` + `secret-set` + 同一个 socket + 同一个按 name 的 TTL 缓存，区别只在消费它的工具不同（远程走 SSH stdin 注入 / 本地走 subprocess env）。
+- **B 和 C/D 故意不合并**：缓存 key 维度不同（sudo 按 host、secret 按 name）、威胁面不同，且 socket 分开（`control.sock` vs `control-secrets.sock`），免得动 secret 把已测稳的 sudo 路径搞回归。
+- **A 目前缺无回显交互入口**——想用密码登录必须事先在 hosts.yaml 配 `password_command`，没有 `ssh-login <host>` 这种临时塞入口（这是当前唯一的不对称，后续可补）。
+- **交互入口（getpass 派）= 内存 TTL 缓存**：默认 900 秒、TTL 内可复用、到期自动清、server 重启即丢、从不落盘。**命令源（密码管理器派）= 每次现取**，无 TTL。
+
 ### SSH key（首选）
 
 用 ed25519 即可：

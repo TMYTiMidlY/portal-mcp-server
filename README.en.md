@@ -519,6 +519,24 @@ Only relevant when running `tests/`; regular MCP deployments do not need these. 
 
 Pick the path for your setup — SSH keys preferred, encrypted keys via ssh-agent; password auth is supported but goes through `password_command`, so plaintext credentials never reach the LLM.
 
+### Credential-flow overview
+
+There are four credential flows, each with a "password-manager style" (command source) and/or a "no-echo interactive style" (getpass + local socket). **As currently implemented:**
+
+| Credential flow | Command source (password-manager style) | No-echo interactive entry (getpass style) | Cache key | Cache semantics | Trigger |
+|---|---|---|---|---|---|
+| **A. Remote SSH login password** | `password_command` (hosts.yaml) | ❌ none yet | not cached | fetched per connection | automatic on connect |
+| **B. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `sudo-login <host>` | host | in-memory TTL (default 900s) | `portal_bash(use_sudo=True)` |
+| **C. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `secret-set <name>` | name | in-memory TTL (default 900s, `--ttl` configurable) | `portal_bash(secrets=[…])` |
+| **D. Secret injection · local** | same as C (shares `secrets.yaml`) | same as C (shares `secret-set`) | same as C | same as C | `portal_local_exec(secrets=[…])` |
+
+Things to know:
+
+- **C and D are one and the same credential pipeline** — they share `secrets.yaml` + `secret-set` + the same socket + the same name-keyed TTL cache; only the consuming tool differs (remote injects via SSH stdin, local via subprocess env).
+- **B and C/D are deliberately not merged**: different cache-key dimension (sudo by host, secret by name), different threat surface, and separate sockets (`control.sock` vs `control-secrets.sock`) so touching secrets can't regress the battle-tested sudo path.
+- **A currently lacks a no-echo interactive entry** — password login requires a pre-configured `password_command` in hosts.yaml; there is no `ssh-login <host>` live-input entry (the only asymmetry today; could be added later).
+- **Interactive entries (getpass style) = in-memory TTL cache**: default 900s, reusable within the TTL, auto-cleared on expiry, gone on server restart, never written to disk. **Command sources (password-manager style) = fetched each time**, no TTL.
+
 ### SSH keys (preferred)
 
 Use ed25519:
