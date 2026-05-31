@@ -22,9 +22,6 @@ class SecurityPolicy:
         self.command_blocklist: list[str] = []    # patterns of blocked commands
         self.command_allowlist: list[str] = []    # if set, only these allowed
         self.rate_limit_rps: float = 10.0         # requests per second per host
-        self.max_concurrent: int = 20
-        self.connection_timeout: int = 30
-        self.sandbox_users: dict[str, str] = {}   # host -> forced username
         self._rate_counters: dict[str, list[float]] = defaultdict(list)
         path = str(policies_yaml) if policies_yaml else str(policies_yaml_path())
         self._load(path)
@@ -41,9 +38,6 @@ class SecurityPolicy:
         self.command_blocklist = pol.get("command_blocklist", [])
         self.command_allowlist = pol.get("command_allowlist", [])
         self.rate_limit_rps = float(pol.get("rate_limit_rps", 10.0))
-        self.max_concurrent = int(pol.get("max_concurrent", 20))
-        self.connection_timeout = int(pol.get("connection_timeout", 30))
-        self.sandbox_users = pol.get("sandbox_users", {})
         logger.info("Security policies loaded")
 
     def check_host(self, host_name: str) -> Optional[str]:

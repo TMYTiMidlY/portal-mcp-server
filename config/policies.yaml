@@ -1,5 +1,5 @@
 # ─────────────────────────────────────────────────────────────────
-# ssh-shell-mcp  |  policies.yaml
+# portal-mcp-server  |  policies.yaml
 # Security policy configuration.
 # All fields are optional — omitting them uses permissive defaults.
 # ─────────────────────────────────────────────────────────────────
@@ -48,19 +48,3 @@ policies:
   # ── Rate limiting ──────────────────────────────────────────────
   # Maximum requests per second per host (sliding window).
   rate_limit_rps: 20
-
-  # ── Concurrency ────────────────────────────────────────────────
-  # Maximum concurrent SSH operations.
-  max_concurrent: 50
-
-  # ── Connection timeout ─────────────────────────────────────────
-  # Seconds to wait when establishing an SSH connection.
-  connection_timeout: 30
-
-  # ── Sandbox users ─────────────────────────────────────────────
-  # Force specific hosts to use a restricted user for all connections.
-  # This overrides the user set in hosts.yaml.
-  sandbox_users: {}
-  # sandbox_users:
-  #   prod-server: "readonly"
-  #   db01: "monitor"
