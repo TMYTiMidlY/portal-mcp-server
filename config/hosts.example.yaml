@@ -80,6 +80,30 @@ hosts:
   #   # password_command: op read "op://Private/legacy-host/password"
   #   tags: [legacy]
 
+  # ── Non-interactive sudo (portal_bash use_sudo=True) ─────────────────────
+  # Run sudo on a remote host WITHOUT the password ever becoming a tool
+  # parameter or hitting a log. The password is fed over the existing SSH
+  # channel to `sudo -S` on stdin. Two ways to provide it:
+  #   (a) sudo_password_command (below) — a shell command that prints the
+  #       sudo password to stdout. Fully automatic; same contract as
+  #       password_command (one trailing newline stripped, 10s timeout).
+  #   (b) Out-of-band cache — no yaml needed. In a terminal run:
+  #         portal-mcp-server sudo-login sudo-box           # hidden getpass
+  #         portal-mcp-server sudo-login sudo-box --ttl 1800  # TTL secs (default 900)
+  #       which pushes the password into an in-memory TTL cache.
+  # Lookup order at sudo time: in-memory cache (b) -> sudo_password_command
+  # (a) -> error. NOTE: use_sudo runs a one-shot `sudo -S -k` exec, so it does
+  # NOT inherit the cwd/env of your persistent portal_bash session.
+  # sudo-box:
+  #   host: 10.0.0.50
+  #   user: deploy
+  #   key: ~/.ssh/deploy_key
+  #   # Path (a): pull the sudo password from a manager / env var.
+  #   sudo_password_command: pass show sudo/sudo-box
+  #   # sudo_password_command: op read "op://Private/sudo-box/password"
+  #   # sudo_password_command: printf '%s' "$SUDO_BOX_PASSWORD"
+  #   tags: [sudo]
+
   # ── Jump host / bastion ──────────────────────────────────────────────────
   # bastion:
   #   host: bastion.example.com
