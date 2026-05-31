@@ -203,6 +203,13 @@ including) the next `## `:
 
 ### Cutting a new release
 
+> ## ⚠️ Release rules (TL;DR)
+> 1. **Do not hand-edit** `version` in `pyproject.toml`
+> 2. **Do not hand-write** `CHANGELOG.md`
+> 3. **Do not run** `uv lock` manually
+>
+> Releasing is **a single command**: `uv run cz bump` — with `version_provider = "uv"`, `cz bump` updates `pyproject.toml`, the self-version inside `uv.lock`, and `CHANGELOG.md`, then folds all of it into the same bump commit + the same annotated tag.
+
 **The version number, CHANGELOG, and `uv.lock` are all managed by
 [Commitizen](https://commitizen-tools.github.io/commitizen/)** —
 `pyproject.toml` sets `version_provider = "uv"`, so `cz bump` also

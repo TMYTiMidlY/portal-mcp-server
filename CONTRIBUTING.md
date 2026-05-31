@@ -143,7 +143,14 @@ GH environment `pypi` 在仓库 Settings → Environments 里绑到 https://pypi
 
 ### 发布新版本步骤
 
-**版本号、CHANGELOG、`uv.lock` 全部由 [Commitizen](https://commitizen-tools.github.io/commitizen/) 托管**——`pyproject.toml` 里配了 `version_provider = "uv"`，`cz bump` 会把 `uv.lock` 里的自身版本号一起更新并纳入同一个 bump commit。**不要手改 `pyproject.toml` 的 `version`，不要手写 `CHANGELOG.md`，也不用手动 `uv lock`。**
+> ## ⚠️ 发版铁律（TL;DR）
+> 1. **不要手改** `pyproject.toml` 的 `version`
+> 2. **不要手写** `CHANGELOG.md`
+> 3. **不用手动** `uv lock`
+>
+> 发版**只一条命令**：`uv run cz bump` —— `version_provider = "uv"` 会让 `cz bump` 把 `pyproject.toml`、`uv.lock` 自身版本号、`CHANGELOG.md` 全部更新并打进同一个 bump commit + 同一个 annotated tag。
+
+**版本号、CHANGELOG、`uv.lock` 全部由 [Commitizen](https://commitizen-tools.github.io/commitizen/) 托管**——`pyproject.toml` 里配了 `version_provider = "uv"`，`cz bump` 会把 `uv.lock` 里的自身版本号一起更新并纳入同一个 bump commit。
 
 1. 确保要发版的 commit 都已 merge 进 `main`，本地在干净的 `main` HEAD 上
 2. 本地预检：`pytest tests/ -v && ruff check portal_mcp_server/`
