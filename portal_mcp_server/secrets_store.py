@@ -43,6 +43,7 @@ from typing import Optional
 
 import yaml
 
+from ._peer_creds import is_same_uid_peer, peer_uid
 from .paths import secrets_yaml_path
 
 logger = logging.getLogger("portal_mcp.secrets")
@@ -288,6 +289,13 @@ def start_secrets_control_server() -> Optional[threading.Thread]:
         async def handle(reader: asyncio.StreamReader,
                          writer: asyncio.StreamWriter) -> None:
             try:
+                sock = writer.get_extra_info("socket")
+                if sock is not None and not is_same_uid_peer(sock):
+                    logger.warning(
+                        "secrets control: rejecting peer uid %r (server uid %d)",
+                        peer_uid(sock), os.getuid(),
+                    )
+                    return
                 data = await asyncio.wait_for(reader.read(65536), timeout=10)
                 msg = json.loads(data.decode("utf-8"))
                 name = msg.get("name")
@@ -339,6 +347,11 @@ def send_secret(name: str, value: str, ttl: float = DEFAULT_TTL_SEC) -> dict:
     s.settimeout(10)
     try:
         s.connect(str(path))
+        if not is_same_uid_peer(s):
+            raise RuntimeError(
+                f"control socket {path} peer uid {peer_uid(s)!r} "
+                f"does not match our uid {os.getuid()}; refusing to send"
+            )
         s.sendall(json.dumps({"name": name, "value": value, "ttl": ttl}).encode())
         s.shutdown(socket.SHUT_WR)
         resp = s.recv(4096)

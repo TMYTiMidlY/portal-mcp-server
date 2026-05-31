@@ -1,23 +1,37 @@
-"""sudo_creds — out-of-band sudo password provisioning.
+"""ssh_creds — out-of-band SSH login password provisioning.
 
-The agent (LLM) must never see a sudo password: if a password were passed as
-an MCP tool parameter it would land in the model's context / tool-call trace.
-This module provides two password sources that both keep the secret out of the
-model entirely, then feeds it to ``sudo -S`` on stdin (see remote_bash):
+Symmetric to :mod:`sudo_creds` but for the *SSH login* password (the one
+asyncssh feeds during connection setup), not the sudo password (the one fed to
+``sudo -S`` on stdin after a session is open). Same threat model: the agent
+(LLM) must never see the value, so the password reaches asyncssh through a
+side channel and is never an MCP tool parameter.
 
-  1. **Live input (1b)** — ``portal-mcp-server sudo-login <host>`` prompts with
-     :func:`getpass.getpass` (no echo) in a *separate* terminal and pushes the
-     password into the *running* MCP server's memory over a local unix-domain
-     socket (mode 0600, same-user only). Cached with a TTL (default 15 min).
+Two sources, both keeping the value out of the model:
 
-  2. **Password manager (1a)** — ``hosts.yaml`` ``sudo_password_command`` (a
-     shell command that prints the password, e.g. ``pass show sudo/web01`` or
-     ``secret-tool lookup sudo web01``). Symmetric to the existing
-     ``password_command`` for SSH login; executed via
-     :meth:`ConnectionManager._run_secret_command`.
+  1. **Live input (A·getpass)** — ``portal-mcp-server ssh-login <host>``
+     prompts with :func:`getpass.getpass` (no echo) in a *separate* terminal
+     and pushes the password into the *running* MCP server's memory over a
+     local unix-domain socket (mode 0600, same-user only). Cached with a TTL
+     (default 15 min) keyed by host name.
 
-:func:`resolve_sudo_password` checks the in-memory cache first, then falls back
-to ``sudo_password_command``. Nothing is ever written to disk by this module.
+  2. **Password manager (A·command)** — ``hosts.yaml`` ``password_command``
+     (a shell command that prints the password, e.g. ``pass show ssh/web01``).
+     Same execution model as the existing :attr:`HostConfig.password_command`;
+     fetched on demand via :meth:`ConnectionManager.password_command_for`.
+
+:func:`resolve_ssh_password` checks the in-memory cache first, then falls
+back to ``password_command``. Nothing is ever written to disk by this module.
+
+Routing into the connection path
+--------------------------------
+The connection manager calls :func:`resolve_ssh_password` in two situations:
+
+* host has ``auth: password`` in hosts.yaml — the side channel is the *only*
+  password source (key auth was opted out of); cache → command → friendly error.
+* host is key-based but asyncssh raised ``PermissionDenied`` — the manager
+  tries this fallback once before re-raising. Pure key hosts where neither
+  source is set fall straight through (we return ``None``) so the original
+  ``PermissionDenied`` surfaces unchanged.
 """
 from __future__ import annotations
 
@@ -33,9 +47,9 @@ from typing import Optional
 
 from ._peer_creds import is_same_uid_peer, peer_uid
 
-logger = logging.getLogger("portal_mcp.sudo")
+logger = logging.getLogger("portal_mcp.ssh_creds")
 
-# Default lifetime of a cached sudo password before it must be re-entered.
+# Default lifetime of a cached SSH password before it must be re-entered.
 DEFAULT_TTL_SEC = 15 * 60
 
 _cache_lock = threading.Lock()
@@ -48,8 +62,8 @@ _cache: dict[str, tuple[str, float]] = {}
 # control-socket thread; guarded by a plain threading.Lock).
 # ─────────────────────────────────────────────────────────────────────
 
-def cache_sudo_password(host: str, password: str,
-                        ttl: float = DEFAULT_TTL_SEC) -> None:
+def cache_ssh_password(host: str, password: str,
+                       ttl: float = DEFAULT_TTL_SEC) -> None:
     with _cache_lock:
         _cache[host] = (password, time.monotonic() + ttl)
 
@@ -66,7 +80,7 @@ def _get_cached(host: str) -> Optional[str]:
         return pw
 
 
-def clear_sudo_password(host: Optional[str] = None) -> None:
+def clear_ssh_password(host: Optional[str] = None) -> None:
     with _cache_lock:
         if host is None:
             _cache.clear()
@@ -74,36 +88,30 @@ def clear_sudo_password(host: Optional[str] = None) -> None:
             _cache.pop(host, None)
 
 
-async def resolve_sudo_password(host: str) -> Optional[str]:
-    """Return a sudo password for ``host`` or ``None`` if no source is set.
-
-    Order: in-memory cache (set via ``sudo-login``) → host's
-    ``sudo_password_command``. Never raises for a missing/failed command —
-    returns ``None`` so the caller can emit a friendly hint.
+def get_cached_password(host: str) -> Optional[str]:
+    """Read the in-memory SSH-login password cache. Returns ``None`` if no
+    valid entry exists for ``host`` (missing or TTL-expired). Sync because the
+    underlying lookup is a constant-time guarded dict access; the connection
+    manager wraps this in its own async chain. Callers MUST treat the
+    returned string as a secret (do not log it, do not echo it).
     """
-    pw = _get_cached(host)
-    if pw is not None:
-        return pw
-    try:
-        from .connection_manager import get_manager
-        return await get_manager().sudo_password_command_for(host)
-    except Exception as e:  # pragma: no cover - defensive
-        logger.warning("sudo_password_command failed for %s: %s", host, e)
-        return None
+    return _get_cached(host)
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Local control socket (the side-channel for `sudo-login`).
+# Local control socket (the side-channel for `ssh-login`).
 # ─────────────────────────────────────────────────────────────────────
 
 def control_socket_path() -> Path:
-    """Per-user path for the sudo control socket.
+    """Per-user path for the SSH-login control socket.
 
-    Prefers ``$XDG_RUNTIME_DIR`` (a tmpfs, cleared on logout); falls back to
-    a uid-scoped /tmp directory.
+    Deliberately distinct from the sudo control socket (``control.sock``) and
+    the named-secret control socket (``control-secrets.sock``) so the three
+    side-channels stay isolated. Prefers ``$XDG_RUNTIME_DIR`` (tmpfs, cleared
+    on logout); falls back to a uid-scoped /tmp directory.
     """
     base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/portal-mcp-{os.getuid()}"
-    return Path(base) / "portal-mcp-server" / "control.sock"
+    return Path(base) / "portal-mcp-server" / "control-ssh.sock"
 
 
 def _socket_is_live(path: Path) -> bool:
@@ -118,23 +126,23 @@ def _socket_is_live(path: Path) -> bool:
 
 
 def start_control_server() -> Optional[threading.Thread]:
-    """Start a daemon thread serving the sudo control socket.
+    """Start a daemon thread serving the SSH-login control socket.
 
     Best-effort: if another live server already owns the socket, or the socket
     cannot be created, returns ``None`` and the server runs without the live
-    side-channel (the ``sudo_password_command`` path still works).
+    side-channel (the ``password_command`` path still works).
     """
     path = control_socket_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
     except OSError as e:
-        logger.warning("sudo control dir setup failed (%s); live sudo-login disabled", e)
+        logger.warning("ssh control dir setup failed (%s); live ssh-login disabled", e)
         return None
 
     if path.exists():
         if _socket_is_live(path):
-            logger.info("another portal-mcp-server owns %s; live sudo-login deferred to it", path)
+            logger.info("another portal-mcp-server owns %s; live ssh-login deferred to it", path)
             return None
         try:
             path.unlink()  # stale socket from a crashed instance
@@ -148,15 +156,10 @@ def start_control_server() -> Optional[threading.Thread]:
         async def handle(reader: asyncio.StreamReader,
                          writer: asyncio.StreamWriter) -> None:
             try:
-                # Defence-in-depth: reject any peer not running under our uid
-                # *before* parsing the message. The socket-mode 0600 +
-                # XDG_RUNTIME_DIR 0700 prevent cross-user connect on healthy
-                # systems; this catches the edge case where the fallback
-                # /tmp directory was pre-created with weaker permissions.
                 sock = writer.get_extra_info("socket")
                 if sock is not None and not is_same_uid_peer(sock):
                     logger.warning(
-                        "sudo control: rejecting peer uid %r (server uid %d)",
+                        "ssh control: rejecting peer uid %r (server uid %d)",
                         peer_uid(sock), os.getuid(),
                     )
                     return
@@ -166,8 +169,8 @@ def start_control_server() -> Optional[threading.Thread]:
                 pw = msg.get("password")
                 ttl = float(msg.get("ttl", DEFAULT_TTL_SEC))
                 if host and pw:
-                    cache_sudo_password(host, pw, ttl)
-                    logger.info("sudo password cached for host '%s' (ttl=%ss)", host, int(ttl))
+                    cache_ssh_password(host, pw, ttl)
+                    logger.info("ssh password cached for host '%s' (ttl=%ss)", host, int(ttl))
                     writer.write(b'{"status":"ok"}')
                 else:
                     writer.write(b'{"status":"error","error":"host and password required"}')
@@ -190,32 +193,28 @@ def start_control_server() -> Optional[threading.Thread]:
                 os.chmod(path, 0o600)
             except OSError:
                 pass
-            logger.info("sudo control socket listening at %s", path)
+            logger.info("ssh control socket listening at %s", path)
             async with server:
                 await server.serve_forever()
 
         try:
             loop.run_until_complete(_main())
         except Exception as e:  # pragma: no cover - defensive
-            logger.warning("sudo control server stopped: %s", e)
+            logger.warning("ssh control server stopped: %s", e)
 
-    t = threading.Thread(target=_serve, name="portal-sudo-control", daemon=True)
+    t = threading.Thread(target=_serve, name="portal-ssh-control", daemon=True)
     t.start()
     return t
 
 
-def send_sudo_password(host: str, password: str,
-                       ttl: float = DEFAULT_TTL_SEC) -> dict:
-    """Client side of ``sudo-login``: push a password to the running server."""
+def send_ssh_password(host: str, password: str,
+                      ttl: float = DEFAULT_TTL_SEC) -> dict:
+    """Client side of ``ssh-login``: push a password to the running server."""
     path = control_socket_path()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(10)
     try:
         s.connect(str(path))
-        # Mirror the server-side peer-uid check: refuse to hand the password
-        # to a socket that's not owned by our own uid (catches the case where
-        # an attacker pre-created the fallback directory and ran their own
-        # listener at our expected socket path).
         if not is_same_uid_peer(s):
             raise RuntimeError(
                 f"control socket {path} peer uid {peer_uid(s)!r} "

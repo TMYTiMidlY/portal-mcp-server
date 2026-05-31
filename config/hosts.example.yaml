@@ -65,9 +65,18 @@ hosts:
   #   2. The MCP `portal_host(action="register", ...)` tool does NOT accept
   #      a password — yaml is the only entry point, so the secret cannot
   #      land in LLM tool-call traces.
-  # The `password_command` is a shell command that prints the password to
-  # stdout. Same pattern as Borg's BORG_PASSCOMMAND and restic's
-  # RESTIC_PASSWORD_COMMAND. A single trailing newline is stripped.
+  # Two sources for the password (order: in-memory cache → password_command
+  # → error):
+  #   - `password_command` (this file): shell command that prints the
+  #     password to stdout. Same pattern as Borg's BORG_PASSCOMMAND and
+  #     restic's RESTIC_PASSWORD_COMMAND. A single trailing newline is
+  #     stripped.
+  #   - `portal-mcp-server ssh-login <host>` (out-of-band): getpass prompt
+  #     in a separate terminal pushes the password into the running
+  #     server's per-host in-memory cache (default TTL 900s). Works even
+  #     when `password_command` is not set, AND for key-mode hosts (the
+  #     default — no `auth:` field below) as an automatic fallback if
+  #     asyncssh raises PermissionDenied.
   # legacy-host:
   #   host: 10.0.0.40
   #   user: admin

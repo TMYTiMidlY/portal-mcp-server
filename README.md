@@ -538,7 +538,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 
 | 凭据流 | 命令源（密码管理器派） | 无回显交互入口（getpass 派） | 缓存 key | 缓存语义 | 触发点 |
 |---|---|---|---|---|---|
-| **A. 远程 SSH 登录密码** | `password_command`（hosts.yaml） | ❌ 暂无 | 不缓存 | 每次连接现取 | 连接时自动 |
+| **A. 远程 SSH 登录密码** | `password_command`（hosts.yaml） | ✅ `ssh-login <host>` | host | 内存 TTL（默认 900s，仅交互入口；命令源每次现取） | `auth: password` 连接时 / 密钥失败时自动 fallback |
 | **B. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `sudo-login <host>` | host | 内存 TTL（默认 900s） | `portal_bash(use_sudo=True)` |
 | **C. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `secret-set <name>` | name | 内存 TTL（默认 900s，`--ttl` 可调） | `portal_bash(secrets=[…])` |
 | **D. secret 注入·本地** | 同 C（共用 `secrets.yaml`） | 同 C（共用 `secret-set`） | 同 C | 同 C | `portal_local_exec(secrets=[…])` |
@@ -546,8 +546,8 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 几点要知道：
 
 - **C 和 D 是同一套凭据管道**——共用 `secrets.yaml` + `secret-set` + 同一个 socket + 同一个按 name 的 TTL 缓存，区别只在消费它的工具不同（远程走 SSH stdin 注入 / 本地走 subprocess env）。
-- **B 和 C/D 故意不合并**：缓存 key 维度不同（sudo 按 host、secret 按 name）、威胁面不同，且 socket 分开（`control.sock` vs `control-secrets.sock`），免得动 secret 把已测稳的 sudo 路径搞回归。
-- **A 目前缺无回显交互入口**——想用密码登录必须事先在 hosts.yaml 配 `password_command`，没有 `ssh-login <host>` 这种临时塞入口（这是当前唯一的不对称，后续可补）。
+- **A 和 B 故意不合并**：A 的密码进 `asyncssh.connect()` 的密码字段做 SSH 握手，B 的密码在握手后喂 `sudo -S` 的 stdin，时机和注入点完全不同；socket 也分开（`control-ssh.sock` vs `control.sock` vs `control-secrets.sock`），免得动一个把另两个搞回归。
+- **A 的回落顺序**：`auth: password` 主动登录走 `cache（ssh-login）→ password_command → 错误`；纯密钥 host 在 asyncssh 抛 `PermissionDenied` 时自动 retry 一次密码路径（同一条 chain），有 cache 或 `password_command` 才 retry，否则原异常透传——免得"配置缺失"的报错盖掉"密钥真不对"的真因。
 - **交互入口（getpass 派）= 内存 TTL 缓存**：默认 900 秒、TTL 内可复用、到期自动清、server 重启即丢、从不落盘。**命令源（密码管理器派）= 每次现取**，无 TTL。
 
 ### SSH key（首选）
@@ -572,30 +572,45 @@ ssh-add ~/.ssh/id_ed25519        # 输一次 passphrase
 
 headless / CI 跑不动 ssh-agent 时，可在 `hosts.yaml` 写 `passphrase_command:`（见下）。
 
-### 密码登录：opt-in 走 `password_command`
+### 密码登录：`password_command` 或 `ssh-login`
 
 兼容历史不让换 key 的远端机器。两条铁律：
 
 1. **绝不** 在 `hosts.yaml` 写 `password: 明文`——启动会 ERROR 拒绝、字段被丢
 2. **绝不** 通过 MCP 工具传——`portal_host` 没有 password 参数，密码不会进 LLM tool-call trace
 
-写法（hosts.yaml 里 `auth: password` + 一段输出密码到 stdout 的 shell 命令，思路同 Borg 的 `BORG_PASSCOMMAND`、restic 的 `RESTIC_PASSWORD_COMMAND`、msmtp 的 `passwordeval`）：
+两条来源（顺序：内存缓存 → `password_command` → 报错），同 sudo / secret 一脉相承：
 
-```yaml
-hosts:
-  legacy-host:
-    host: 10.0.0.40
-    user: admin
-    auth: password
-    # CI / 环境变量（GitHub Secrets、Vault 注入到 env 后直接取）：
-    password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
-    # 或从密码管理器拉：
-    # password_command: pass show ssh/legacy-host
-    # password_command: bw get password legacy-host
-    # password_command: op read "op://Private/legacy-host/password"
-```
+1. **密码管理器（1a，全自动）**——hosts.yaml 里 `auth: password` + 一段输出密码到 stdout 的 shell 命令，思路同 Borg 的 `BORG_PASSCOMMAND`、restic 的 `RESTIC_PASSWORD_COMMAND`、msmtp 的 `passwordeval`：
 
-运行时行为：每次新建连接执行一次（连接池复用，所以实际很少触发），10 秒超时，结尾换行剥掉一个，stderr 永不进日志（防泄密），非 0 退出 / 空输出 / 非 UTF-8 输出全部硬失败。设计细节（为什么 `shell=True`、为什么强制 `client_keys=[]`、为什么 stderr 不进日志…）见 **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**。
+   ```yaml
+   hosts:
+     legacy-host:
+       host: 10.0.0.40
+       user: admin
+       auth: password
+       # CI / 环境变量（GitHub Secrets、Vault 注入到 env 后直接取）：
+       password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
+       # 或从密码管理器拉：
+       # password_command: pass show ssh/legacy-host
+       # password_command: bw get password legacy-host
+       # password_command: op read "op://Private/legacy-host/password"
+   ```
+
+2. **临时塞入（1b，`ssh-login`，交互一次）**——在**另一个终端**（不是 agent 对话）跑：
+
+   ```bash
+   portal-mcp-server ssh-login legacy-host        # getpass 隐藏输入，不回显
+   portal-mcp-server ssh-login legacy-host --ttl 1800   # 自定义 TTL（秒），默认 900（15 分钟）
+   ```
+
+   密码经本地 unix socket（`$XDG_RUNTIME_DIR/portal-mcp-server/control-ssh.sock`，目录 0700 / socket 0600，且服务端会用 `SO_PEERCRED` 校验对端 uid，仅本用户可达）推进**正在运行的** server 内存缓存，**从不落盘、从不进 LLM**，TTL 到期自动清除。即使 host 没在 `hosts.yaml` 里写 `password_command`、甚至根本是默认的密钥模式（hosts.yaml 不写 `auth:` 字段），`ssh-login` 推一条进去就能用。
+
+#### 自动 fallback：密钥失败 → 密码
+
+密钥模式的 host（即默认；hosts.yaml 不写 `auth:` 字段）在 asyncssh 抛 `PermissionDenied` 时，会自动 retry 一次密码路径（cache → `password_command`），有源才 retry。**没源**（既没 ssh-login 缓存也没 `password_command`）时原 `PermissionDenied` 直接透传——避免"我以为是密钥坏，实际是配置漏了"。所以**密钥首选**仍然成立，密码是 opt-in 的兜底。
+
+运行时行为：`password_command` 10 秒超时，结尾换行剥掉一个，stderr 永不进日志（防泄密），非 0 退出 / 空输出 / 非 UTF-8 输出全部硬失败。设计细节（为什么 `shell=True`、为什么强制 `client_keys=[]`、为什么 stderr 不进日志…）见 **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**。
 
 ### 加密私钥的 passphrase：`passphrase_command`
 

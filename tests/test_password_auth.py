@@ -344,23 +344,83 @@ async def test_password_command_non_utf8_output_is_rejected(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_auth_password_without_command_is_refused(tmp_path):
-    """Configuration error guard: `auth: password` without
-    `password_command` must refuse rather than silently fall through to
-    key auth (which would mask the misconfiguration)."""
+async def test_auth_password_without_any_source_is_refused(tmp_path):
+    """Configuration error guard: `auth: password` with neither a
+    `password_command` NOR an in-memory ssh-login cache entry must refuse
+    rather than silently fall through to key auth (which would mask the
+    misconfiguration). The friendly error names both side-channels so the
+    operator knows which one to set up."""
     from portal_mcp_server.connection_manager import ConnectionManager, HostConfig
+    from portal_mcp_server import ssh_creds
 
     yml = tmp_path / "hosts.yaml"
     yml.write_text("hosts: {}\n")
     m = ConnectionManager(hosts_yaml=yml)
 
+    ssh_creds.clear_ssh_password()  # make sure no leftover cache entry exists
     cfg = HostConfig(
         name="web01", host="1.2.3.4",
         auth="password",
         password_command=None,
     )
-    with pytest.raises(RuntimeError, match="no 'password_command'"):
+    with pytest.raises(RuntimeError, match="no password source"):
         await m._build_connect_kwargs(cfg)
+
+
+@pytest.mark.asyncio
+async def test_auth_password_uses_ssh_login_cache_when_no_command(tmp_path):
+    """The ssh-login cache is the second password source. With no
+    `password_command` configured but a cached password pushed via
+    `portal-mcp-server ssh-login <host>`, `_build_connect_kwargs` must hand
+    that cached value to asyncssh and still suppress client_keys so a wrong
+    cached password cannot mask itself by silently falling back to keys."""
+    from portal_mcp_server.connection_manager import ConnectionManager, HostConfig
+    from portal_mcp_server import ssh_creds
+
+    yml = tmp_path / "hosts.yaml"
+    yml.write_text("hosts: {}\n")
+    m = ConnectionManager(hosts_yaml=yml)
+
+    ssh_creds.clear_ssh_password()
+    ssh_creds.cache_ssh_password("web01", "from-ssh-login", ttl=60)
+    try:
+        cfg = HostConfig(
+            name="web01", host="1.2.3.4",
+            auth="password",
+            password_command=None,
+        )
+        kwargs = await m._build_connect_kwargs(cfg)
+        assert kwargs["password"] == "from-ssh-login"
+        assert kwargs["client_keys"] == []
+    finally:
+        ssh_creds.clear_ssh_password()
+
+
+@pytest.mark.asyncio
+async def test_auth_password_cache_takes_precedence_over_command(tmp_path):
+    """When both sources exist the in-memory cache wins (user explicitly
+    pushed a value via ssh-login, treat that as the authoritative override).
+    The `password_command` is not invoked, so even a broken command does not
+    leak its error while the cache is valid."""
+    from portal_mcp_server.connection_manager import ConnectionManager, HostConfig
+    from portal_mcp_server import ssh_creds
+
+    yml = tmp_path / "hosts.yaml"
+    yml.write_text("hosts: {}\n")
+    m = ConnectionManager(hosts_yaml=yml)
+
+    ssh_creds.clear_ssh_password()
+    ssh_creds.cache_ssh_password("web01", "from-cache", ttl=60)
+    try:
+        cfg = HostConfig(
+            name="web01", host="1.2.3.4",
+            auth="password",
+            password_command="echo this-would-fail >&2; exit 99",
+        )
+        kwargs = await m._build_connect_kwargs(cfg)
+        assert kwargs["password"] == "from-cache"
+    finally:
+        ssh_creds.clear_ssh_password()
 
 
 def test_hosts_yaml_auth_password_without_command_logs_error(tmp_path, caplog):

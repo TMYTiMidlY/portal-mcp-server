@@ -1015,6 +1015,49 @@ async def portal_bash_status() -> str:
 # ENTRYPOINT
 # ═══════════════════════════════════════════════════════════════════
 
+def _ssh_login_cli(argv: list[str]) -> None:
+    """`portal-mcp-server ssh-login <host>` — push an SSH-login password to a
+    running server, out-of-band (prompted with no echo; never via the LLM)."""
+    import argparse
+    import getpass
+    from .ssh_creds import (send_ssh_password, control_socket_path,
+                            DEFAULT_TTL_SEC)
+
+    p = argparse.ArgumentParser(
+        prog="portal-mcp-server ssh-login",
+        description="Provide an SSH-login password to a running portal-mcp-server "
+                    "(cached in memory with a TTL; never written to disk, never "
+                    "seen by the agent). Used as a side-channel for `auth: "
+                    "password` hosts and as a fallback when key auth is refused.",
+    )
+    p.add_argument("host", help="host alias the password is for")
+    p.add_argument("--ttl", type=int, default=DEFAULT_TTL_SEC,
+                   help=f"seconds before the cached password expires "
+                        f"(default {DEFAULT_TTL_SEC})")
+    a = p.parse_args(argv)
+
+    path = control_socket_path()
+    if not path.exists():
+        print(f"No running portal-mcp-server ssh control socket at {path}.\n"
+              "Start the MCP server first (your MCP client launches it), then "
+              "retry.", file=sys.stderr)
+        sys.exit(1)
+    pw = getpass.getpass(f"SSH password for host '{a.host}': ")
+    if not pw:
+        print("Empty password, aborted.", file=sys.stderr)
+        sys.exit(1)
+    try:
+        resp = send_ssh_password(a.host, pw, ttl=a.ttl)
+    except OSError as e:
+        print(f"Failed to reach control socket: {e}", file=sys.stderr)
+        sys.exit(1)
+    if resp.get("status") == "ok":
+        print(f"SSH password cached for '{a.host}' (expires in {a.ttl}s).")
+    else:
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        sys.exit(1)
+
+
 def _sudo_login_cli(argv: list[str]) -> None:
     """`portal-mcp-server sudo-login <host>` — push a sudo password to a running
     server, out-of-band (prompted with no echo; never via the LLM)."""
@@ -1103,6 +1146,9 @@ def _secret_set_cli(argv: list[str]) -> None:
 def main() -> None:
     """CLI entrypoint registered as `portal-mcp-server`."""
     import argparse
+    if len(sys.argv) >= 2 and sys.argv[1] == "ssh-login":
+        _ssh_login_cli(sys.argv[2:])
+        return
     if len(sys.argv) >= 2 and sys.argv[1] == "sudo-login":
         _sudo_login_cli(sys.argv[2:])
         return
@@ -1149,6 +1195,16 @@ def main() -> None:
         start_control_server()
     except Exception as e:  # pragma: no cover - never block startup on this
         logger.warning("could not start sudo control server: %s", e)
+
+    # Best-effort: start the ssh-login control socket so `ssh-login` from a
+    # separate terminal can push SSH login passwords into this process's
+    # memory (consumed by ConnectionManager for `auth: password` hosts and
+    # as a fallback when key auth is refused).
+    try:
+        from .ssh_creds import start_control_server as start_ssh_control_server
+        start_ssh_control_server()
+    except Exception as e:  # pragma: no cover - never block startup on this
+        logger.warning("could not start ssh control server: %s", e)
 
     # Best-effort: start the named-secret control socket so `secret-set` from a
     # separate terminal can push API tokens into this process's memory.

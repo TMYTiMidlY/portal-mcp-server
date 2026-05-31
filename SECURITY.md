@@ -52,7 +52,7 @@ The defences below are layered:
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
 | Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
 | Audit log             | `logs/audit.jsonl`             | Every state-changing op recorded; fail-closed by default                     |
-| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` only — plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `sudo-login`); no MCP tool accepts a password parameter (SSH or sudo) |
+| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` or out-of-band `ssh-login` — plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `sudo-login`); no MCP tool accepts a password parameter (SSH or sudo) |
 | Strict host-key check | `connection_manager.py`        | Defaults to OpenSSH-equivalent `StrictHostKeyChecking`                       |
 
 ### Default constraint: sandbox `/tmp/`
@@ -184,7 +184,7 @@ choice is deliberate:
 | Timeout (10 s) | `RuntimeError` naming `host`, **command string not included** | Same leak surface — the command may name a sensitive secret-store entry. |
 | Empty stdout (exit 0, no output) | `RuntimeError` naming `host` with `"empty output"` | An empty password to `asyncssh.connect` has poorly-defined behaviour (server-dependent). Empty output almost always means a misconfiguration: entry not found, GPG agent locked but not error-coded, command typo. Hard-failing surfaces that, instead of producing a confusing downstream auth failure. |
 | Non-UTF-8 stdout | `RuntimeError` naming `host` with `"non-UTF-8 output"`, **bytes not surfaced** | Defends against accidentally piping a binary file (private key, .gpg blob) into the password slot — the offending bytes might *be* the secret. |
-| `auth: password` set but `password_command` missing | `RuntimeError` at connect time + ERROR log at registry load | Without explicit failure, asyncssh would silently fall back to key auth; a key that happens to work would mask the misconfiguration permanently. |
+| `auth: password` set but no source (no `password_command` AND no `ssh-login` cache) | `RuntimeError` at connect time + ERROR log at registry load when no `password_command` is configured | Without explicit failure, asyncssh would silently fall back to key auth; a key that happens to work would mask the misconfiguration permanently. The startup ERROR also points the operator at `ssh-login` so they know either source counts. |
 
 ##### Other invariants worth noting
 
@@ -199,11 +199,66 @@ choice is deliberate:
   `secret-tool lookup`), but the integration boundary stays at the
   shell. This keeps the surface auditable in one place and avoids a
   per-platform dependency matrix.
-- **No password caching across connections.** The pool reuses TCP
-  connections, so the command runs at most once per pool reconnect;
-  caching the secret in process memory would create another exposure
-  surface (heap dumps, Python `__dict__` walks) for marginal CPU
-  savings on a code path that already runs rarely.
+- **No password caching for the `password_command` path.** The pool
+  reuses TCP connections, so the command runs at most once per pool
+  reconnect; caching its output in process memory would create another
+  exposure surface (heap dumps, Python `__dict__` walks) for marginal
+  CPU savings on a code path that already runs rarely. The
+  `ssh-login` side-channel *does* cache (see below) because it has
+  no on-demand command to re-run.
+
+#### SSH login interactive password — out-of-band, in-memory side-channel
+
+`portal-mcp-server ssh-login <host>` is the no-echo counterpart to
+`password_command`: an out-of-band CLI run in a *separate* terminal (not
+the agent) that prompts with `getpass.getpass` and pushes the password
+into the *running* server over a local unix socket. It exists for two
+reasons:
+
+- **`auth: password` hosts that can't or shouldn't pre-stage a
+  `password_command`** (no password manager available; rotating
+  credentials a human types each time; CI variants).
+- **Key-mode hosts (the default — no `auth:` field in hosts.yaml)
+  whose key happens to be rejected** — when asyncssh raises
+  `PermissionDenied`, the server retries *once* via the same chain
+  (cache → `password_command`), but only when a source is available.
+  With nothing seeded and no command configured, the original
+  `PermissionDenied` propagates unchanged so a stale config cannot
+  mask a real key failure.
+
+Resolution order for any password attempt is uniformly **cache
+(`ssh-login`) → `password_command` → error**. Cache wins on purpose:
+an operator who just typed a password into `ssh-login` is signalling
+explicit override.
+
+Bounds on the in-memory cache (identical model to `sudo-login`):
+
+- **TTL expiry** (default 15 min, `--ttl` configurable) — entries are
+  dropped automatically; **never written to disk**.
+- **Per-host key** — one entry per host alias; no fan-out across the
+  fleet.
+- **Socket hardening** — `$XDG_RUNTIME_DIR/portal-mcp-server/control-ssh.sock`,
+  directory `0700`, socket `0600`. On Linux the server also calls
+  `getsockopt(SO_PEERCRED)` on every accepted connection (and the
+  client mirrors it after `connect`) and closes the socket on a uid
+  mismatch — a hostile local user who somehow landed a listener at
+  the expected path still cannot exfiltrate the password, and the
+  server refuses to cache anything from a foreign uid. On non-Linux
+  hosts the peer-cred check is unavailable and the channel degrades
+  to filesystem permissions only (still same-uid in practice because
+  `$XDG_RUNTIME_DIR` is `0700`). The server probes for a live socket
+  on startup and **declines** (does not clobber) if another instance
+  owns it.
+- **No tool surface** — the cache is reachable only via the local
+  socket and the in-process resolver; no MCP tool reads or writes it.
+
+The three side-channels — `control.sock` (sudo), `control-ssh.sock`
+(SSH login), `control-secrets.sock` (named secrets) — are deliberately
+kept separate. Different cache-key dimensions (sudo / SSH by host,
+secret by name), different injection points (sudo via stdin
+post-handshake, SSH login into the connect kwargs, secret into the
+subprocess environment), and a regression in one path cannot taint the
+others.
 
 #### Sudo auth — same boundary, in-memory side-channel
 
@@ -233,10 +288,17 @@ is bounded by:
 - **TTL expiry** (default 15 min) — the entry is dropped automatically;
   it is **never written to disk**.
 - **Socket hardening** — `$XDG_RUNTIME_DIR/portal-mcp-server/control.sock`,
-  directory `0700`, socket `0600`, same-uid only; a peer-credential
-  check rejects other users. The server probes for a live socket on
-  startup and **declines** (does not clobber) if another instance owns
-  it, so a second process cannot hijack the channel.
+  directory `0700`, socket `0600`. On Linux the server also calls
+  `getsockopt(SO_PEERCRED)` on every accepted connection (and the
+  client mirrors it after `connect`) and closes the socket on a uid
+  mismatch — so even a hostile local process that races into the
+  expected socket path cannot exfiltrate the password, and the server
+  refuses to cache anything from a foreign uid. On non-Linux hosts
+  the peer-cred check is unavailable and the channel degrades to
+  filesystem permissions only (still same-uid in practice because
+  `$XDG_RUNTIME_DIR` is `0700`). The server probes for a live socket
+  on startup and **declines** (does not clobber) if another instance
+  owns it, so a second process cannot hijack the channel.
 - **No tool surface** — the cache is reachable only via the local socket
   and the in-process resolver; no MCP tool reads or writes it.
 

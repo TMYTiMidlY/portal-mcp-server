@@ -47,6 +47,8 @@ These are the tools an agent should reach for first. They share one SSH connecti
 
 > **Sudo (`use_sudo=True`)** — the password is **never** supplied by the agent. It comes from an in-memory cache populated out-of-band by `portal-mcp-server sudo-login <host>` (prompted with no echo in a separate terminal), or from the host's `sudo_password_command` in `hosts.yaml`. If neither is available the call returns an error telling you to run `sudo-login`. The command runs via `sudo -S -k` with the password fed on stdin (never on the command line) and is audited as `remote_sudo`.
 
+> **SSH login password (auth)** — never an agent-supplied parameter either. Sources are resolved in the order **in-memory cache (populated by `portal-mcp-server ssh-login <host>`, no echo, separate terminal) → host `password_command` in `hosts.yaml` → error**. For key-mode hosts (the default — no `auth:` field in hosts.yaml) the chain is only consulted as a *fallback* when asyncssh raises `PermissionDenied` and a source is actually configured, so a missing config never masks a real key-rejection failure. Live cache is per-host with TTL (default 900s, `--ttl` configurable).
+
 ### Local execution
 
 | Tool | Signature | Purpose |

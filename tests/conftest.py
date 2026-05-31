@@ -55,3 +55,19 @@ def _reset_singletons():
         rb._HOST_LOCKS.clear()
     except Exception:
         pass
+    # Clear the three credential caches (sudo / ssh-login / named-secret).
+    # Each is consulted on the SSH connect path or by command execution, so a
+    # leaked entry from one test can silently override another test's
+    # `password_command` / value resolution. Clearing here is cheap and makes
+    # test order irrelevant.
+    for mod_name, clearer in (
+        ("portal_mcp_server.sudo_creds", "clear_sudo_password"),
+        ("portal_mcp_server.ssh_creds", "clear_ssh_password"),
+        ("portal_mcp_server.secrets_store", "clear_secret"),
+    ):
+        try:
+            import importlib
+            mod = importlib.import_module(mod_name)
+            getattr(mod, clearer)()  # None -> clear all
+        except Exception:
+            pass

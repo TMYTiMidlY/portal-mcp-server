@@ -224,9 +224,11 @@ class ConnectionManager:
             sudo_password_command = cfg.get("sudo_password_command")
             if auth == "password" and not password_command:
                 msg = (
-                    "declares 'auth: password' but has no 'password_command' — "
-                    "the host is loaded but connection attempts will fail. Add a "
-                    "'password_command:' that prints the password to stdout "
+                    "declares 'auth: password' but has no 'password_command' "
+                    "— the host is loaded but every connection will require "
+                    f"`portal-mcp-server ssh-login {name}` to push a password "
+                    "into the in-memory cache first. For unattended use, add "
+                    "a 'password_command:' that prints the password to stdout "
                     f"(e.g. 'pass show ssh/{name}' or 'printf %s \"${name.upper()}_PASSWORD\"')."
                 )
                 logger.error("Host '%s' %s", name, msg)
@@ -394,6 +396,26 @@ class ConnectionManager:
             cfg.sudo_password_command, host=host_name, kind="sudo_password_command",
         )
 
+    async def _resolve_ssh_password(self, cfg: HostConfig) -> Optional[str]:
+        """SSH-login password chain: in-memory ssh-login cache → host's
+        ``password_command``. Returns ``None`` only when neither source is
+        available; a configured ``password_command`` that fails raises
+        ``RuntimeError`` (host-named, exit-code only; never the secret).
+
+        Takes a ``HostConfig`` (not just a host name) so callers exercising a
+        fresh, un-registered ``HostConfig`` — including the unit tests — keep
+        working without going through the module-level singleton.
+        """
+        from .ssh_creds import get_cached_password
+        pw = get_cached_password(cfg.name)
+        if pw is not None:
+            return pw
+        if cfg.password_command:
+            return await self._run_secret_command(
+                cfg.password_command, host=cfg.name, kind="password_command",
+            )
+        return None
+
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
         if cfg.use_ssh_config:
             # asyncssh resolves everything from ~/.ssh/config using the alias.
@@ -409,24 +431,25 @@ class ConnectionManager:
             known_hosts=self._known_hosts_arg(cfg),
         )
 
-        # ── Password auth (opt-in via `auth: password` + `password_command`) ──
-        # No key is loaded; asyncssh will negotiate `password` (or
-        # keyboard-interactive that prompts for password) using the secret
-        # produced by the user-supplied command.
+        # ── Password auth (opt-in via `auth: password`) ────────────────
+        # The side-channel password chain: in-memory cache (populated by
+        # `portal-mcp-server ssh-login <host>` in a separate terminal) →
+        # hosts.yaml `password_command`. Either alone is enough; if both are
+        # absent, refuse rather than silently falling back to key auth.
         if cfg.auth == "password":
-            if not cfg.password_command:
+            pw = await self._resolve_ssh_password(cfg)
+            if pw is None:
                 raise RuntimeError(
-                    f"Host '{cfg.name}' has 'auth: password' but no "
-                    "'password_command' configured in hosts.yaml. Refusing "
-                    "to attempt password auth without a password source."
+                    f"Host '{cfg.name}' has 'auth: password' but no password "
+                    "source is available. Either configure 'password_command:' "
+                    "in hosts.yaml (a shell command that prints the password) "
+                    f"or run `portal-mcp-server ssh-login {cfg.name}` in a "
+                    "separate terminal to push one into the in-memory cache."
                 )
-            password = await self._run_secret_command(
-                cfg.password_command, host=cfg.name, kind="password_command",
-            )
-            kwargs["password"] = password
+            kwargs["password"] = pw
             # Disable client_keys so asyncssh does not silently fall back to
             # default key locations and, on success, mask a misconfigured
-            # password_command.
+            # password source.
             kwargs["client_keys"] = []
             return kwargs
 
@@ -550,7 +573,30 @@ class ConnectionManager:
             # ── Create new connection ──
             kwargs = await self._build_connect_kwargs(cfg)
             logger.info(f"Opening SSH connection to {host_name} ({cfg.user}@{cfg.host}:{cfg.port})")
-            conn = await asyncssh.connect(**kwargs)
+            try:
+                conn = await asyncssh.connect(**kwargs)
+            except asyncssh.PermissionDenied:
+                # Key auth refused. If this is a key-mode host (or a
+                # ~/.ssh/config alias) AND we have a side-channel password
+                # (ssh-login cache or hosts.yaml password_command), retry
+                # once with password auth. `auth: password` hosts already
+                # ran the password chain inside _build_connect_kwargs, so
+                # skip the retry to avoid masking a wrong password.
+                if cfg.auth == "password":
+                    raise
+                pw = await self._resolve_ssh_password(cfg)
+                if pw is None:
+                    raise
+                logger.info(
+                    "Key auth refused by '%s'; retrying with side-channel "
+                    "password (ssh-login cache or password_command).",
+                    host_name,
+                )
+                pw_kwargs = dict(kwargs)
+                pw_kwargs["password"] = pw
+                pw_kwargs["client_keys"] = []
+                pw_kwargs.pop("passphrase", None)
+                conn = await asyncssh.connect(**pw_kwargs)
             pc = PooledConnection(
                 host_name=host_name, conn=conn,
                 created_at=now, last_used=now, in_use=1,

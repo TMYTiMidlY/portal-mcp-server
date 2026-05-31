@@ -525,7 +525,7 @@ There are four credential flows, each with a "password-manager style" (command s
 
 | Credential flow | Command source (password-manager style) | No-echo interactive entry (getpass style) | Cache key | Cache semantics | Trigger |
 |---|---|---|---|---|---|
-| **A. Remote SSH login password** | `password_command` (hosts.yaml) | ❌ none yet | not cached | fetched per connection | automatic on connect |
+| **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `ssh-login <host>` | host | in-memory TTL (default 900s, interactive entry only; command source fetched per connection) | on connect for `auth: password` / auto fallback when key auth refused |
 | **B. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `sudo-login <host>` | host | in-memory TTL (default 900s) | `portal_bash(use_sudo=True)` |
 | **C. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `secret-set <name>` | name | in-memory TTL (default 900s, `--ttl` configurable) | `portal_bash(secrets=[…])` |
 | **D. Secret injection · local** | same as C (shares `secrets.yaml`) | same as C (shares `secret-set`) | same as C | same as C | `portal_local_exec(secrets=[…])` |
@@ -533,8 +533,8 @@ There are four credential flows, each with a "password-manager style" (command s
 Things to know:
 
 - **C and D are one and the same credential pipeline** — they share `secrets.yaml` + `secret-set` + the same socket + the same name-keyed TTL cache; only the consuming tool differs (remote injects via SSH stdin, local via subprocess env).
-- **B and C/D are deliberately not merged**: different cache-key dimension (sudo by host, secret by name), different threat surface, and separate sockets (`control.sock` vs `control-secrets.sock`) so touching secrets can't regress the battle-tested sudo path.
-- **A currently lacks a no-echo interactive entry** — password login requires a pre-configured `password_command` in hosts.yaml; there is no `ssh-login <host>` live-input entry (the only asymmetry today; could be added later).
+- **A and B are deliberately not merged**: A's password goes into the `asyncssh.connect()` password field during the SSH handshake; B's password is fed to `sudo -S` on stdin *after* the handshake — different timing and injection points entirely. Sockets are also separate (`control-ssh.sock` vs `control.sock` vs `control-secrets.sock`), so touching one can't regress the others.
+- **A's resolution chain**: explicit `auth: password` login goes `cache (ssh-login) → password_command → error`. Pure key hosts retry that same chain *once* when asyncssh raises `PermissionDenied`, but **only when a source is available**; with no cache and no `password_command` the original `PermissionDenied` propagates — so a stale config never masks the real "your key is rejected" failure.
 - **Interactive entries (getpass style) = in-memory TTL cache**: default 900s, reusable within the TTL, auto-cleared on expiry, gone on server restart, never written to disk. **Command sources (password-manager style) = fetched each time**, no TTL.
 
 ### SSH keys (preferred)
@@ -559,30 +559,45 @@ ssh-add ~/.ssh/id_ed25519        # passphrase prompted once
 
 For headless / CI environments where ssh-agent is impractical, configure `passphrase_command:` in `hosts.yaml` (see below).
 
-### Password auth: opt-in via `password_command`
+### Password auth: `password_command` or `ssh-login`
 
 Provided for legacy hosts that cannot be re-keyed. Two non-negotiable rules:
 
 1. **Never** write `password: <plaintext>` in `hosts.yaml` — startup logs an ERROR and drops the field.
 2. **Never** flow a password through an MCP tool — `portal_host` has no password parameter, so credentials cannot land in LLM tool-call traces.
 
-Configure with `auth: password` plus a shell command that prints the password to stdout — same pattern as Borg's `BORG_PASSCOMMAND`, restic's `RESTIC_PASSWORD_COMMAND`, and msmtp's `passwordeval`:
+Two sources (order: in-memory cache → `password_command` → error), same shape as sudo / secret:
 
-```yaml
-hosts:
-  legacy-host:
-    host: 10.0.0.40
-    user: admin
-    auth: password
-    # CI / env-var pattern (GitHub Secrets, Vault inject into env, then read):
-    password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
-    # Or pull from a password manager:
-    # password_command: pass show ssh/legacy-host
-    # password_command: bw get password legacy-host
-    # password_command: op read "op://Private/legacy-host/password"
-```
+1. **Password manager (1a, fully automatic)** — in `hosts.yaml` set `auth: password` plus a shell command that prints the password to stdout, same pattern as Borg's `BORG_PASSCOMMAND`, restic's `RESTIC_PASSWORD_COMMAND`, and msmtp's `passwordeval`:
 
-Runtime behaviour: the command runs once per new connection (the pool reuses connections, so it triggers rarely), with a 10-second timeout, exactly one trailing newline stripped, stderr never logged (leak defence), and non-zero exit / empty output / non-UTF-8 output all hard-failing. Design rationale (why `shell=True`, why `client_keys=[]` is forced, why stderr never reaches the logs, …) lives in **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**.
+   ```yaml
+   hosts:
+     legacy-host:
+       host: 10.0.0.40
+       user: admin
+       auth: password
+       # CI / env-var pattern (GitHub Secrets, Vault inject into env, then read):
+       password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
+       # Or pull from a password manager:
+       # password_command: pass show ssh/legacy-host
+       # password_command: bw get password legacy-host
+       # password_command: op read "op://Private/legacy-host/password"
+   ```
+
+2. **Seed it once (1b, `ssh-login`, interactive)** — in a **separate terminal** (not the agent chat):
+
+   ```bash
+   portal-mcp-server ssh-login legacy-host        # getpass, no echo
+   portal-mcp-server ssh-login legacy-host --ttl 1800   # custom TTL (seconds); default 900 (15 min)
+   ```
+
+   The password travels over a local unix socket (`$XDG_RUNTIME_DIR/portal-mcp-server/control-ssh.sock`, dir `0700` / socket `0600`, plus an `SO_PEERCRED` same-uid check on the server side) into the **running** server's in-memory cache — **never written to disk, never sent to the LLM** — and is dropped automatically when the TTL expires. Works even when the host has no `password_command` in `hosts.yaml`, or is a key-mode host (the default — no `auth:` field in hosts.yaml).
+
+#### Auto-fallback: key failure → password
+
+When asyncssh raises `PermissionDenied` for a key-mode host (the default — no `auth:` field in hosts.yaml), the server retries *once* via the password chain (cache → `password_command`), but **only when a source is available**. With no cache and no `password_command` the original `PermissionDenied` propagates — so a missing config never masks the real "your key is rejected" failure. Keys remain the preferred path; password is an opt-in safety net.
+
+Runtime behaviour: `password_command` runs with a 10-second timeout, exactly one trailing newline stripped, stderr never logged (leak defence), and non-zero exit / empty output / non-UTF-8 output all hard-failing. Design rationale (why `shell=True`, why `client_keys=[]` is forced, why stderr never reaches the logs, …) lives in **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**.
 
 ### Encrypted-key passphrases: `passphrase_command`
 
