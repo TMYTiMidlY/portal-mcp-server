@@ -39,11 +39,13 @@ These are the tools an agent should reach for first. They share one SSH connecti
 
 | Tool | Signature | Purpose |
 |---|---|---|
-| `portal_bash` | `(host, command, timeout=60.0)` | Run `command` in a sticky `bash -i` for `<host>`. First call auto-creates the session; subsequent calls reuse the same shell so `cwd` and exported env vars survive. PTY echo + bracketed-paste are disabled so sentinel parsing is reliable. ⚠️ Each command is gated by the security policy — a persistent session does not authorise arbitrary commands. |
+| `portal_bash` | `(host, command, timeout=3600.0, use_sudo=False)` | Run `command` in a sticky `bash -i` for `<host>`. First call auto-creates the session; subsequent calls reuse the same shell so `cwd` and exported env vars survive. PTY echo + bracketed-paste are disabled so sentinel parsing is reliable. ⚠️ Each command is gated by the security policy — a persistent session does not authorise arbitrary commands. `use_sudo=True` runs the command via `sudo -S` using a password obtained out-of-band (never passed by the agent) — see the sudo note below; this runs as a one-shot command, so the persistent session's `cwd`/env do not apply. |
 | `portal_bash_close` | `(host)` | Close the cached default bash session for `<host>` (next `portal_bash` call reopens). |
 | `portal_bash_status` | `()` | Return the `host → session_id` mapping for all cached default sessions. |
 
 > Prompt-layer convention (not enforced in code): write operations should target remote `/tmp/` unless the user has explicitly approved another path. `portal_bash` itself does **not** scope paths — see the README's *Agent-side conventions* section for the recommended ruleset.
+
+> **Sudo (`use_sudo=True`)** — the password is **never** supplied by the agent. It comes from an in-memory cache populated out-of-band by `portal-mcp-server sudo-login <host>` (prompted with no echo in a separate terminal), or from the host's `sudo_password_command` in `hosts.yaml`. If neither is available the call returns an error telling you to run `sudo-login`. The command runs via `sudo -S -k` with the password fed on stdin (never on the command line) and is audited as `remote_sudo`.
 
 ---
 
@@ -61,7 +63,9 @@ Each tool below takes a `mode`, `direction`, `action`, or `view` parameter that 
 
 | Tool | Modes | Purpose |
 |---|---|---|
-| `portal_transfer` | `direction=upload \| download \| sync` | Binary-safe SFTP transfer. `upload` / `download` move a single file; `sync` recursively syncs a local directory tree. For text-only edits prefer `portal_patch` (which is hash-protected). |
+| `portal_transfer` | `direction=upload \| download \| sync \| mirror \| upload-list \| download-list` | Binary-safe, atomic SFTP transfer. `upload` / `download` move a single file. `sync` recursively syncs a local directory tree → remote (upload); `mirror` is the remote → local counterpart (download). `upload-list` / `download-list` move an explicit list of file pairs from `paths_json` (an arbitrary local→remote mapping, not a whole directory). The four incremental modes (`sync` / `mirror` / `upload-list` / `download-list`) skip files already present with a matching size+mtime — or sha256 when `checksum=True` — so re-runs only move changed files; a single file's failure is collected in `failed[]` without aborting the batch. For text-only edits prefer `portal_patch` (which is hash-protected). |
+
+Full signature: `(direction, host, local_path, remote_path, checksum=False, paths_json="")` (`ctx` is injected by the MCP runtime and hidden from callers). `paths_json` decodes to `[{"local": ..., "remote": ...}, ...]` and is **required** by the `upload-list` / `download-list` modes (ignored otherwise). Single-file modes return `{status, direction, host, bytes, duration_s, ...}`; the incremental modes return `{status, uploaded|downloaded, skipped, failed[], bytes_total, bytes_transferred, duration_s}`. Directory/list modes copy *files* only — symlinks and special files are skipped.
 
 ### SSH tunnels
 
