@@ -1,3 +1,9 @@
+## v2.0.1 (2026-06-01)
+
+### Refactor
+
+- rename credential broker to credential agent + restructure CLI to portal {agent,ssh,sudo,secret} <verb> tree
+
 ## v2.0.0 (2026-06-01)
 
 ### BREAKING CHANGE
