@@ -13,6 +13,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras           # creates .venv with prod + dev deps
 source .venv/bin/activate
+ruff check portal_mcp_server/  # lint, should report zero errors
 pytest                         # should be all green (live SSH tests skip by default)
 ```
 
@@ -72,8 +73,14 @@ When adding a new `@mcp.tool()`:
 
 ## Testing requirements
 
-- `pytest tests/ -v` must be **all green** before you submit (live
-  SSH tests are skipped by default and don't need real hosts).
+- Before you submit, **both** checks must pass (CI runs the same two
+  checks on four Python versions — failing either locally means a red
+  CI run):
+  - `ruff check portal_mcp_server/` must report **zero errors** (CI
+    lints product code only, not tests).
+  - `pytest tests/ -v` must be **all green** (live SSH tests are
+    skipped by default and don't need real hosts).
+- One-line pre-flight: `ruff check portal_mcp_server/ && pytest tests/ -v`.
 - For bug fixes: **write the regression test first**, then fix the
   code. This prevents the bug from coming back.
 - Security and resource-lifecycle fixes get tests in

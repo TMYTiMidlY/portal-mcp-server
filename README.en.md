@@ -313,6 +313,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
+ruff check portal_mcp_server/ # lint, should report zero errors
 pytest                        # should be all green (live SSH tests skip by default)
 ```
 
@@ -894,7 +895,7 @@ Issues and PRs welcome. Quick rules:
 - No hardcoded hostnames / usernames / IPs / paths
 - Every new tool needs a docstring (FastMCP uses it as the MCP description) and an entry in the README "Tools" section (including the collapsible full-signature + source-map tables)
 - State-changing tools must call `_gate` and emit `audit_log`
-- `pytest tests/ -v` must be green
+- Both `ruff check portal_mcp_server/` and `pytest tests/ -v` must be green
 - Never commit secrets; `examples/hosts.yaml` is the only schema template
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages
 

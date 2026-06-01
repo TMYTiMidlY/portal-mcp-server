@@ -11,6 +11,7 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras           # 准备 .venv + 所有 dev 依赖
 source .venv/bin/activate
+ruff check portal_mcp_server/  # lint，应零 error
 pytest                         # 应全绿（live SSH 测试默认 skip）
 ```
 
@@ -47,7 +48,10 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 
 ## 测试要求
 
-- 提交前 `pytest tests/ -v` 必须**全绿**（live SSH 测试默认 skip，不需要真实 host）
+- 提交前两条**都**必须过（CI 在 4 个 Python 版本上跑同样的检查，本地任意一条挂 CI 就会红）：
+  - `ruff check portal_mcp_server/` 必须**零 error**（CI 只 lint 产品代码，不 lint 测试）
+  - `pytest tests/ -v` 必须**全绿**（live SSH 测试默认 skip，不需要真实 host）
+- 一行预检：`ruff check portal_mcp_server/ && pytest tests/ -v`
 - 修复 bug 时**先写测试**重现问题，再修代码——这样能防止 regression
 - 安全 / 资源生命周期相关的修复，配套测试要进入 `tests/test_pool_leak_regression.py` 或 `tests/test_gate_coverage_fixes.py` 系列
 - 跑端到端验证用 `tests/live_smoke.py`（需要真实 SSH host，详见 README "测试" 节）
