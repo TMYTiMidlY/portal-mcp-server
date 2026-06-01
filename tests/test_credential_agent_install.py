@@ -37,12 +37,9 @@ def test_install_user_units_uses_systemd_percent_t(monkeypatch, tmp_path):
     assert res["socket_path"] == agent_config["socket_path"]
 
 
-def test_install_user_units_unit_basename_drops_mcp_prefix():
-    """The systemd unit basename moved from 'portal-mcp-credential-broker'
-    to the shorter, more focused 'portal-credential-agent' when the broker
-    was renamed to credential agent. Pin the basename so an accidental
-    revert is caught in CI rather than at a user's `systemctl --user
-    enable` time."""
+def test_install_user_units_unit_basename_pinned():
+    """Pin the systemd unit basename so an accidental rename is caught
+    in CI rather than at a user's `systemctl --user enable` time."""
     from portal_mcp_server import credential_agent
     assert credential_agent.UNIT_BASENAME == "portal-credential-agent"
     assert credential_agent.SOCKET_UNIT == "portal-credential-agent.socket"
