@@ -7,6 +7,22 @@ import sys
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_xdg(monkeypatch):
+    """Force XDG path lookups to fall back to the monkeypatched HOME.
+
+    ``install_user_units`` / ``uninstall_user_units`` resolve
+    ``agent.json`` through ``xdg_config_home()``, which prefers
+    ``$XDG_CONFIG_HOME`` over ``$HOME/.config``. On hosted CI runners
+    (and many dev shells) ``XDG_CONFIG_HOME`` is set globally, so
+    without this fixture the install tests would silently write to —
+    and the uninstall tests would try to delete — the runner's real
+    ``~/.config/portal-mcp-server/agent.json``.
+    """
+    for var in ("XDG_CONFIG_HOME", "XDG_STATE_HOME"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_install_user_units_uses_systemd_percent_t(monkeypatch, tmp_path):
     from portal_mcp_server import credential_agent
 
