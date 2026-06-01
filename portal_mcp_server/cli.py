@@ -1419,7 +1419,7 @@ def _build_kind_subparser(sub, kind: str):
 
     p_confirm = ksub.add_parser(
         "confirm",
-        help=f"Prompt twice (no echo) and cache only if the two entries match.")
+        help="Prompt twice (no echo) and cache only if the two entries match.")
     p_confirm.add_argument(noun, help=f"{noun} the value is for")
     p_confirm.add_argument(
         "--ttl", type=int, default=DEFAULT_TTL_SEC,
