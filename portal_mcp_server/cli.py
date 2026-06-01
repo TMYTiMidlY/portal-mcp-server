@@ -11,6 +11,7 @@ import sys
 import time
 
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp.exceptions import ToolError
 from .paths import default_log_dir
 from .connection_manager import get_manager
 from .shell_engine import ssh_exec
@@ -249,7 +250,7 @@ def portal_host(action: str, name: str = "", host: str = "",
         return json.dumps(hosts, indent=2) if hosts else "No hosts registered."
     if action == "register":
         if not name or not host:
-            return 'Error: action="register" requires both `name` and `host`.'
+            raise ToolError('action="register" requires both `name` and `host`.')
         # Gate against the *target* (the actual host/IP that traffic will
         # reach), not the alias the agent picked. Otherwise an agent can
         # register an arbitrary alias pointing at a non-allowlisted host
@@ -257,7 +258,7 @@ def portal_host(action: str, name: str = "", host: str = "",
         # see the alias.
         err = _gate(host)
         if err:
-            return f"BLOCKED: {err}"
+            raise ToolError(f"BLOCKED: {err}")
         tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         result = mgr.register_host(name=name, host=host, user=user, port=port,
                                     key=key_path or None, tags=tag_list)
@@ -266,16 +267,16 @@ def portal_host(action: str, name: str = "", host: str = "",
         return result
     if action == "remove":
         if not name:
-            return 'Error: action="remove" requires `name`.'
+            raise ToolError('action="remove" requires `name`.')
         # Gate the alias being removed — same surface as any other
         # state-changing op against that alias.
         err = _gate(name)
         if err:
-            return f"BLOCKED: {err}"
+            raise ToolError(f"BLOCKED: {err}")
         result = mgr.remove_host(name)
         audit_log(name, "remove_host", "ok", operation="host_remove")
         return result
-    return f'Error: unknown action {action!r}. Valid: list, register, remove.'
+    raise ToolError(f'unknown action {action!r}. Valid: list, register, remove.')
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -339,7 +340,7 @@ async def portal_transfer(direction: str, host: str,
     """
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     progress_cb = _make_progress_cb(ctx)
     if direction == "upload":
         result = await ssh_upload_file(host, local_path, remote_path,
@@ -357,15 +358,15 @@ async def portal_transfer(direction: str, host: str,
         try:
             entries = json.loads(paths_json or "[]")
         except (json.JSONDecodeError, TypeError) as e:
-            return f"Error: paths_json is not valid JSON: {e}"
+            raise ToolError(f"paths_json is not valid JSON: {e}")
         if not isinstance(entries, list) or not entries:
-            return ('Error: paths_json must be a non-empty JSON array of '
-                    '{"local": ..., "remote": ...} objects.')
+            raise ToolError('paths_json must be a non-empty JSON array of '
+                            '{"local": ..., "remote": ...} objects.')
         pairs = []
         for i, item in enumerate(entries):
             if not isinstance(item, dict) or "local" not in item or "remote" not in item:
-                return (f'Error: paths_json[{i}] must be an object with "local" '
-                        'and "remote" string keys.')
+                raise ToolError(f'paths_json[{i}] must be an object with "local" '
+                                'and "remote" string keys.')
             pairs.append((str(item["local"]), str(item["remote"])))
         if direction == "upload-list":
             result = await ssh_upload_list(host, pairs, checksum=checksum,
@@ -378,8 +379,8 @@ async def portal_transfer(direction: str, host: str,
                   result.get("status", "?"), operation=f"file_{direction}")
         return json.dumps(result, indent=2, ensure_ascii=False)
     else:
-        return (f'Error: unknown direction {direction!r}. Valid: upload, '
-                'download, sync, mirror, upload-list, download-list.')
+        raise ToolError(f'unknown direction {direction!r}. Valid: upload, '
+                        'download, sync, mirror, upload-list, download-list.')
     audit_log(host, f"{direction}:{local_path}<->{remote_path}",
               result.get("status", "?"), operation=f"file_{direction}")
     return json.dumps(result, indent=2, ensure_ascii=False)
@@ -415,7 +416,7 @@ async def portal_tunnel_open(mode: str, host: str,
     """
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     tm = get_tunnel_manager()
     if mode == "local":
         result = await tm.open_local_forward(host, local_port,
@@ -427,7 +428,7 @@ async def portal_tunnel_open(mode: str, host: str,
         result = await tm.open_dynamic_proxy(host,
                                               local_port or 1080, local_bind)
     else:
-        return f'Error: unknown mode {mode!r}. Valid: local, reverse, socks.'
+        raise ToolError(f'unknown mode {mode!r}. Valid: local, reverse, socks.')
     audit_log(host, f"tunnel:{mode}", "ok", operation="tunnel_open")
     return json.dumps(result, indent=2)
 
@@ -446,10 +447,10 @@ async def portal_tunnel_close(tunnel_id: str) -> str:
     host = next((t["host"] for t in tm.list_tunnels()
                  if t["tunnel_id"] == tunnel_id), None)
     if host is None:
-        return f"Tunnel '{tunnel_id}' not found"
+        raise ToolError(f"Tunnel '{tunnel_id}' not found")
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     result = await tm.close_tunnel(tunnel_id)
     audit_log("tunnel", f"close:{tunnel_id}", "ok", operation="tunnel_close")
     return result
@@ -505,24 +506,24 @@ async def portal_multi_exec(mode: str, command: str = "",
         try:
             hosts = json.loads(hosts_json) if hosts_json else []
         except Exception as e:
-            return f"Invalid hosts_json: {e}"
+            raise ToolError(f"Invalid hosts_json: {e}")
         if not hosts:
-            return 'Error: must provide either hosts_json or group_tag.'
+            raise ToolError('must provide either hosts_json or group_tag.')
 
     if mode == "parallel":
         if not command:
-            return 'Error: mode="parallel" requires `command`.'
+            raise ToolError('mode="parallel" requires `command`.')
         err = _gate_many(hosts, command)
         if err:
-            return f"BLOCKED: {err}"
+            raise ToolError(f"BLOCKED: {err}")
         results = await ssh_parallel_exec(hosts, command, timeout=timeout)
         return json.dumps(results, indent=2)
     if mode == "rolling":
         if not command:
-            return 'Error: mode="rolling" requires `command`.'
+            raise ToolError('mode="rolling" requires `command`.')
         err = _gate_many(hosts, command)
         if err:
-            return f"BLOCKED: {err}"
+            raise ToolError(f"BLOCKED: {err}")
         audit_log(",".join(hosts), command, "rolling", operation="multi_rolling")
         results = await ssh_rolling_exec(hosts, command, delay_s=delay_s,
                                           stop_on_error=stop_on_error,
@@ -530,22 +531,22 @@ async def portal_multi_exec(mode: str, command: str = "",
         return json.dumps(results, indent=2)
     if mode == "broadcast":
         if not commands_json:
-            return 'Error: mode="broadcast" requires `commands_json`.'
+            raise ToolError('mode="broadcast" requires `commands_json`.')
         try:
             commands = json.loads(commands_json)
         except Exception as e:
-            return f"Invalid commands_json: {e}"
+            raise ToolError(f"Invalid commands_json: {e}")
         if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
-            return 'Invalid commands_json: must be a JSON array of strings.'
+            raise ToolError('Invalid commands_json: must be a JSON array of strings.')
         for cmd in commands:
             err = _gate_many(hosts, cmd)
             if err:
-                return f"BLOCKED on command {cmd[:60]!r}: {err}"
+                raise ToolError(f"BLOCKED on command {cmd[:60]!r}: {err}")
         audit_log(",".join(hosts), f"{len(commands)} cmds",
                   "broadcast", operation="multi_broadcast")
         results = await ssh_broadcast(hosts, commands, timeout=timeout)
         return json.dumps(results, indent=2)
-    return f'Error: unknown mode {mode!r}. Valid: parallel, rolling, broadcast.'
+    raise ToolError(f'unknown mode {mode!r}. Valid: parallel, rolling, broadcast.')
 
 
 @mcp.tool()
@@ -569,15 +570,15 @@ async def portal_playbook(playbook_json: str, host: str = "",
     execution begins.
     """
     if bool(host) == bool(group_tag):
-        return 'Error: specify exactly one of `host` or `group_tag`.'
+        raise ToolError('specify exactly one of `host` or `group_tag`.')
     try:
         playbook = json.loads(playbook_json)
     except Exception as e:
-        return f"Invalid playbook_json: {e}"
+        raise ToolError(f"Invalid playbook_json: {e}")
     if host:
         err = _gate_playbook([host], playbook)
         if err:
-            return f"BLOCKED: {err}"
+            raise ToolError(f"BLOCKED: {err}")
         result = await run_playbook(host, playbook)
         return json.dumps(result, indent=2)
     hosts = _resolve_group(group_tag)
@@ -585,7 +586,7 @@ async def portal_playbook(playbook_json: str, host: str = "",
         return json.dumps([{"error": f"No hosts with tag {group_tag!r}"}], indent=2)
     err = _gate_playbook(hosts, playbook)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     audit_log(",".join(hosts),
               f"playbook:{playbook.get('name','unnamed')}",
               f"group:{group_tag}", operation="playbook_group")
@@ -613,7 +614,10 @@ async def portal_ping(hosts_json: str = "") -> str:
     except Exception:
         hosts = list(mgr._registry.keys())
     if not hosts:
-        return "No hosts to ping (registry empty and no hosts_json provided)."
+        return json.dumps({"online": 0, "total": 0, "hosts": [],
+                           "message": "No hosts to ping (registry empty "
+                                      "and no hosts_json provided)."},
+                          indent=2)
 
     async def _ping(h: str) -> dict:
         err = _gate(h)
@@ -656,8 +660,8 @@ def portal_check(host: str, command: str = "") -> str:
     empty host_allowlist (any host), empty command_blocklist / allowlist
     (any command), and only a per-host rate limit. So `portal_check` will
     return ALLOWED for almost anything until you populate
-    `$XDG_CONFIG_HOME/portal-mcp-server/policies.yaml` (or
-    `./config/policies.yaml`)
+    `$XDG_CONFIG_HOME/portal-mcp-server/policies.yaml` (default
+    `~/.config/portal-mcp-server/policies.yaml`)
     with explicit rules. Use `portal_audit(view="policy")` to inspect what
     the server actually has loaded. ALLOWED therefore means "no rule
     currently blocks this", not "this is safe to run".
@@ -722,7 +726,7 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
             },
         }
         return json.dumps(snap, indent=2)
-    return f'Error: unknown view {view!r}. Valid: snapshot, history, stats, policy.'
+    raise ToolError(f'unknown view {view!r}. Valid: snapshot, history, stats, policy.')
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -753,7 +757,7 @@ async def portal_read(host: str, path: str, start: int = 1,
     """
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     res = await _re_read(host, path, start=start, end=end, encoding=encoding)
     return json.dumps(res, indent=2, ensure_ascii=False)
 
@@ -784,11 +788,11 @@ async def portal_patch(host: str, path: str, file_hash: str,
     """
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     try:
         patches = json.loads(patches_json)
     except Exception as e:
-        return json.dumps({"result": "error", "reason": f"invalid patches_json: {e}"})
+        raise ToolError(f"invalid patches_json: {e}")
     res = await _re_patch(host, path, file_hash=file_hash, patches=patches,
                            encoding=encoding, auto_newline=auto_newline)
     audit_log(host, f"patch:{path}",
@@ -818,7 +822,7 @@ async def portal_cleanup_tmps(host: str, directory: str,
     """
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     res = await _re_cleanup_tmps(host, directory, max_age_s=max_age_s)
     removed = res.get("removed", []) if isinstance(res, dict) else []
     audit_log(host, f"cleanup_tmps:{directory}",
@@ -845,7 +849,7 @@ async def portal_grep(host: str, path: str, pattern: str,
     """
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     res = await _re_grep(
         host, path, pattern,
         glob=glob or None,
@@ -867,7 +871,7 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
     """
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     res = await _re_glob(host, pattern, path=path)
     return json.dumps(res, indent=2, ensure_ascii=False)
 
@@ -906,17 +910,13 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
     """
     err = _gate(host, command)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     if secrets:
         if use_sudo:
-            return json.dumps({
-                "host": host,
-                "error": "secrets and use_sudo cannot be combined in one call.",
-            }, indent=2, ensure_ascii=False)
+            raise ToolError("secrets and use_sudo cannot be combined in one call.")
         env, values, serr = await _resolve_secrets(secrets)
         if serr:
-            return json.dumps({"host": host, "error": serr}, indent=2,
-                              ensure_ascii=False)
+            raise ToolError(serr)
         from . import secrets_store
         res = await _re_exec_env(host, command, env, timeout=timeout)
         res["output"] = secrets_store.redact(res.get("output", ""), values)
@@ -927,20 +927,19 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         from .sudo_creds import resolve_sudo_password
         password = await resolve_sudo_password(host)
         if password is None:
-            return json.dumps({
-                "host": host,
-                "error": ("No sudo password available for this host; the command "
-                          "was NOT run. Ask the user to provide it out-of-band: "
-                          "prefer an interactive input/choice tool (e.g. ask_user) "
-                          "to request that they run "
-                          f"`portal-mcp-server sudo-login {host}` in a separate "
-                          "terminal and confirm when done, then retry this call. If "
-                          "you have no such tool, tell the user what to run and end "
-                          "your turn to wait for their next message. (Alternatively "
-                          "an operator can set `sudo_password_command` for the host "
-                          "in hosts.yaml.) Never ask the user to paste the password "
-                          "into this conversation."),
-            }, indent=2, ensure_ascii=False)
+            raise ToolError(
+                "No sudo password available for this host; the command "
+                "was NOT run. Ask the user to provide it out-of-band: "
+                "prefer an interactive input/choice tool (e.g. ask_user) "
+                "to request that they run "
+                f"`portal-mcp-server sudo-login {host}` in a separate "
+                "terminal and confirm when done, then retry this call. If "
+                "you have no such tool, tell the user what to run and end "
+                "your turn to wait for their next message. (Alternatively "
+                "an operator can set `sudo_password_command` for the host "
+                "in hosts.yaml.) Never ask the user to paste the password "
+                "into this conversation."
+            )
         res = await _re_sudo_exec(host, command, password, timeout=timeout)
         audit_log(host, "sudo: " + command, res.get("exit_code", "?"),
                   operation="remote_sudo")
@@ -973,20 +972,18 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     if os.environ.get("PORTAL_ALLOW_LOCAL_EXEC", "").lower() not in (
         "1", "true", "yes", "on",
     ):
-        return json.dumps({
-            "error": ("portal_local_exec is disabled. The operator must set "
-                      "PORTAL_ALLOW_LOCAL_EXEC=1 for the MCP server process to "
-                      "allow running commands on the local host."),
-        }, indent=2, ensure_ascii=False)
+        raise ToolError("portal_local_exec is disabled. The operator must set "
+                        "PORTAL_ALLOW_LOCAL_EXEC=1 for the MCP server process to "
+                        "allow running commands on the local host.")
     err = _gate("<local>", command)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     env: dict[str, str] = {}
     values: list[str] = []
     if secrets:
         env, values, serr = await _resolve_secrets(secrets)
         if serr:
-            return json.dumps({"error": serr}, indent=2, ensure_ascii=False)
+            raise ToolError(serr)
     from . import secrets_store
     res = await _local_exec_env(command, env, timeout=timeout)
     res["output"] = secrets_store.redact(res.get("output", ""), values)
@@ -1001,7 +998,7 @@ async def portal_bash_close(host: str) -> str:
     """Close the cached default bash session for <host> (next call will reopen)."""
     err = _gate(host)
     if err:
-        return f"BLOCKED: {err}"
+        raise ToolError(f"BLOCKED: {err}")
     return await _re_bash_close(host)
 
 

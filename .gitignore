@@ -1,12 +1,4 @@
-# ── ssh-shell-mcp specific ────────────────────────────────────────────────────
-# Live host inventory — contains real credentials, NEVER commit
-config/hosts.yaml
-
-# Live secret registry — references real secret-fetch commands, NEVER commit
-config/secrets.yaml
-
 # Runtime logs — contain real operation data
-logs/
 *.log
 *.jsonl
 

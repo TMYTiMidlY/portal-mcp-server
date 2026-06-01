@@ -47,7 +47,7 @@ The defences below are layered:
 | Layer                 | Where                          | What it does                                                                 |
 |-----------------------|--------------------------------|------------------------------------------------------------------------------|
 | Prompt-layer rules    | Agent system prompt / `AGENTS.md` | The agent is expected to default writes to remote `/tmp/`, ask before touching `$HOME` or project source, and never mix `portal_*` calls with raw `ssh`/`scp` in the same task. See the README's *Agent-side conventions* section. |
-| Server-side policy    | `config/policies.yaml`         | Host allowlist, command blocklist / allowlist, per-host rate limit           |
+| Server-side policy    | `policies.yaml` (default `~/.config/portal-mcp-server/policies.yaml`; override via `PORTAL_POLICIES_YAML`) | Host allowlist, command blocklist / allowlist, per-host rate limit |
 | Per-tool gate         | `cli.py:_gate*`                | Every state-changing tool runs the policy on every call                      |
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
 | Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
@@ -66,8 +66,8 @@ discipline lives at the prompt layer:
 Pin this rule in your agent's system prompt or `AGENTS.md` (a sample
 set of rules ships in the README's *Agent-side conventions* section).
 For machine-level enforcement, add explicit patterns to
-`command_blocklist` in `config/policies.yaml` (e.g.
-`"rm -rf /home/*"`).
+`command_blocklist` in your `policies.yaml` (default
+`~/.config/portal-mcp-server/policies.yaml`; e.g. `"rm -rf /home/*"`).
 
 ### The policy gate
 

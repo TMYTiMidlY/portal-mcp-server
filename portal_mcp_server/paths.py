@@ -1,13 +1,19 @@
 """Default filesystem locations for portal-mcp-server.
 
 Resolution order for each path:
-1. Environment variable override (e.g. PORTAL_HOSTS_YAML).
-2. Legacy `./config/<file>` relative to the current working directory
-   (preserves the original developer-checkout layout).
-3. XDG-style user directory (works for `uvx`/`pipx` installs where the
-   package source is in an isolated tool cache and not writable):
+1. Environment variable override (e.g. ``PORTAL_HOSTS_YAML``).
+2. XDG-style user directory:
      ``$XDG_CONFIG_HOME/portal-mcp-server/`` (default ``~/.config/portal-mcp-server/``)
      ``$XDG_STATE_HOME/portal-mcp-server/`` (default ``~/.local/state/portal-mcp-server/``)
+
+This intentionally does **not** look at the current working directory.
+``portal-mcp-server`` is a long-lived user-level daemon, not a project
+tool: a cwd-relative ``./config/<file>`` lookup would let any directory
+the server happens to be launched from silently override the user's
+real config. No mainstream user-level CLI (``ssh``, ``git`` outside its
+own ``.git/``, ``gh``, ``docker``, ``kubectl``, ``rclone``, ``borg``,
+``mpv``, ``age``) does this. Set ``PORTAL_*`` env vars explicitly
+(e.g. via ``direnv``) if you need a per-checkout config.
 """
 from __future__ import annotations
 
@@ -35,48 +41,27 @@ def xdg_state_home() -> Path:
     return _xdg_dir("XDG_STATE_HOME", ".local/state")
 
 
-def _resolve(env_var: str, legacy: str, xdg_default: Path) -> Path:
+def _resolve(env_var: str, xdg_default: Path) -> Path:
     override = os.environ.get(env_var)
     if override:
         return Path(override).expanduser()
-    legacy_path = Path(legacy)
-    if legacy_path.exists():
-        return legacy_path
     return xdg_default
 
 
 def hosts_yaml_path() -> Path:
-    return _resolve(
-        "PORTAL_HOSTS_YAML",
-        "config/hosts.yaml",
-        xdg_config_home() / "hosts.yaml",
-    )
+    return _resolve("PORTAL_HOSTS_YAML", xdg_config_home() / "hosts.yaml")
 
 
 def policies_yaml_path() -> Path:
-    return _resolve(
-        "PORTAL_POLICIES_YAML",
-        "config/policies.yaml",
-        xdg_config_home() / "policies.yaml",
-    )
+    return _resolve("PORTAL_POLICIES_YAML", xdg_config_home() / "policies.yaml")
 
 
 def secrets_yaml_path() -> Path:
-    return _resolve(
-        "PORTAL_SECRETS_YAML",
-        "config/secrets.yaml",
-        xdg_config_home() / "secrets.yaml",
-    )
+    return _resolve("PORTAL_SECRETS_YAML", xdg_config_home() / "secrets.yaml")
 
 
 def default_log_dir() -> Path:
-    override = os.environ.get("PORTAL_LOG_DIR")
-    if override:
-        return Path(override).expanduser()
-    legacy = Path("logs")
-    if legacy.exists():
-        return legacy
-    return xdg_state_home() / "logs"
+    return _resolve("PORTAL_LOG_DIR", xdg_state_home() / "logs")
 
 
 def systemd_user_runtime_dir() -> Path:

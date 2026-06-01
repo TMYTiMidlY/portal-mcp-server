@@ -1,6 +1,7 @@
 """
 Security Controls — host allowlist, command blocking, rate limiting, policy enforcement.
-Loads policy from config/policies.yaml.
+Loads policy from the file resolved by paths.policies_yaml_path() (default
+~/.config/portal-mcp-server/policies.yaml; override via PORTAL_POLICIES_YAML).
 """
 import fnmatch
 import logging

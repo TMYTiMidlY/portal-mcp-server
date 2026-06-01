@@ -12,6 +12,8 @@ import os
 
 import pytest
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 
 class FakeStat:
     def __init__(self, size, mtime, permissions=0o100644):
@@ -288,15 +290,15 @@ async def test_portal_transfer_upload_list_dispatch(patch_manager, tmp_path):
 async def test_portal_transfer_bad_paths_json(patch_manager):
     from portal_mcp_server import cli
 
-    out = await cli.portal_transfer(
-        direction="upload-list", host="h", local_path="", remote_path="",
-        ctx=None, paths_json="not json")
-    assert out.startswith("Error: paths_json is not valid JSON")
+    with pytest.raises(ToolError, match="paths_json is not valid JSON"):
+        await cli.portal_transfer(
+            direction="upload-list", host="h", local_path="", remote_path="",
+            ctx=None, paths_json="not json")
 
-    out2 = await cli.portal_transfer(
-        direction="download-list", host="h", local_path="", remote_path="",
-        ctx=None, paths_json="[]")
-    assert "non-empty JSON array" in out2
+    with pytest.raises(ToolError, match="non-empty JSON array"):
+        await cli.portal_transfer(
+            direction="download-list", host="h", local_path="", remote_path="",
+            ctx=None, paths_json="[]")
 
 
 @pytest.mark.asyncio
@@ -318,12 +320,12 @@ async def test_portal_transfer_list_blocked_by_policy(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "get_policy", lambda: pol)
 
     paths_json = '[{"local": "/tmp/a", "remote": "/r/a"}]'
-    out = await cli.portal_transfer(
-        direction="upload-list", host="evil-host", local_path="",
-        remote_path="", ctx=None, paths_json=paths_json)
-    assert out.startswith("BLOCKED:"), out
+    with pytest.raises(ToolError, match="BLOCKED:"):
+        await cli.portal_transfer(
+            direction="upload-list", host="evil-host", local_path="",
+            remote_path="", ctx=None, paths_json=paths_json)
 
-    out2 = await cli.portal_transfer(
-        direction="download-list", host="evil-host", local_path="",
-        remote_path="", ctx=None, paths_json=paths_json)
-    assert out2.startswith("BLOCKED:"), out2
+    with pytest.raises(ToolError, match="BLOCKED:"):
+        await cli.portal_transfer(
+            direction="download-list", host="evil-host", local_path="",
+            remote_path="", ctx=None, paths_json=paths_json)

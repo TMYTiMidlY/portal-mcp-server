@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import pytest
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 
 # ─── Common policy fixture ─────────────────────────────────────────────────
 
@@ -73,10 +75,8 @@ class TestPortalHostGate:
         '10.0.0.99' via the alias.
         """
         from portal_mcp_server import cli
-        out = cli.portal_host(action="register", name="safe-pivot", host="evil-host")
-        assert out.startswith("BLOCKED:"), (
-            "register must gate against the actual target, not the alias"
-        )
+        with pytest.raises(ToolError, match="BLOCKED:"):
+            cli.portal_host(action="register", name="safe-pivot", host="evil-host")
         assert "evil-host" not in [h["name"] for h in fresh_mgr.list_hosts()]
         assert "safe-pivot" not in [h["name"] for h in fresh_mgr.list_hosts()]
 
@@ -90,8 +90,8 @@ class TestPortalHostGate:
         fresh_mgr._registry["evil-host"] = fresh_mgr._registry.get(
             "evil-host"
         ) or _make_hostconfig("evil-host")
-        out = cli.portal_host(action="remove", name="evil-host")
-        assert out.startswith("BLOCKED:"), out
+        with pytest.raises(ToolError, match="BLOCKED:"):
+            cli.portal_host(action="remove", name="evil-host")
 
 
 def _make_hostconfig(name: str):
@@ -128,8 +128,8 @@ class TestPortalTunnelCloseGate:
             description="t1",
         )
 
-        out = await cli.portal_tunnel_close("t1")
-        assert out.startswith("BLOCKED:"), out
+        with pytest.raises(ToolError, match="BLOCKED:"):
+            await cli.portal_tunnel_close("t1")
         # Tunnel still alive after blocked close.
         assert "t1" in tm._tunnels
 
@@ -153,8 +153,8 @@ class TestPortalBashCloseGate:
 
         monkeypatch.setattr(cli, "_re_bash_close", _must_not_be_called)
 
-        out = await cli.portal_bash_close("evil-host")
-        assert out.startswith("BLOCKED:"), out
+        with pytest.raises(ToolError, match="BLOCKED:"):
+            await cli.portal_bash_close("evil-host")
 
     @pytest.mark.asyncio
     async def test_bash_close_passes_when_host_in_allowlist(

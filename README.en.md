@@ -69,7 +69,9 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 # 1. Register with Claude Code (see "Client integration" for other MCP hosts)
 claude mcp add portal -- uvx portal-mcp-server
 
-# 2. Make sure the target host is in ~/.ssh/config or config/hosts.yaml
+# 2. Make sure the target host is in ~/.ssh/config or hosts.yaml
+#    (hosts.yaml defaults to ~/.config/portal-mcp-server/hosts.yaml;
+#     override with PORTAL_HOSTS_YAML — see "Environment variables")
 
 # 3. Use it in an agent conversation
 #    "Show me the last 50 lines of /var/log/syslog on myhost"
@@ -260,6 +262,33 @@ Compared to "shell out to `ssh` / `scp`":
 - No new process per command (saves the ~50–100 ms fork)
 - No need to coordinate SSH reuse across multiple OS processes (which is exactly what breaks ControlMaster on Windows)
 - Error handling, retries, and timeouts are first-class Python async primitives, not stderr-string parsing
+
+### Feedback channel: warnings ride tool results, not stderr
+
+Every runtime warning or error a **user needs to see** is emitted inside the tool result returned to the agent — never relied on landing in `stderr` or a server log file. This isn't an aesthetic choice; it's forced by how MCP clients actually treat the protocol's diagnostic channels.
+
+**Protocol layer** — [MCP 2025-06-18 spec · transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio):
+
+> The server **MAY** write UTF-8 strings to its standard error (`stderr`) for logging purposes. **Clients MAY capture, forward, or ignore this logging.**
+
+The second candidate, `notifications/message` ([logging capability](https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/logging)), is equally permissive: *"Implementations are free to expose logging through any interface pattern that suits their needs—the protocol itself does not mandate any specific user interaction model."*
+
+**What major clients actually do**:
+
+| Client | Where server stderr goes | User-visible? |
+|---|---|---|
+| Claude Desktop ([docs](https://modelcontextprotocol.io/docs/develop/connect-local-servers#getting-logs-from-claude-desktop)) | Written to `~/Library/Logs/Claude/mcp-server-<name>.log` | ❌ No in-app indicator; user must `tail -f` the log file |
+| Claude Code ([docs](https://docs.anthropic.com/en/docs/claude-code/debug-your-config#check-mcp-servers)) | Discarded by default; official advice: *"run `claude --debug mcp` to see the server's stderr output"* | ❌ Only after a debug-mode relaunch |
+| Generic Python MCP SDK client | `errlog: TextIO = sys.stderr` — forwarded to the client process's own stderr | Depends on whatever the client process does with its own stderr |
+
+**The only reliable feedback paths** are the tool result `content` array (the agent always reads it) and JSON-RPC error responses (most clients surface them). So:
+
+- **Important warnings** (misconfigured yaml, missing credentials, ignored fields, …) → collected into the server's `_config_warnings` set and attached to the return value of `portal_host(action="list")` (see `connection_manager.py`)
+- **Fatal config errors** → raised inline in the relevant tool result, not just logged at server startup
+- **Info-level stderr** → only useful for the server author at debug time; never assumed to reach the user
+- **Audit log** → written to `$XDG_STATE_HOME/portal-mcp-server/logs/` ([XDG Base Directory Spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) explicitly places "logs, history" in the state-home tier — persistent but non-critical state); for ops review and post-hoc audit, never assumed to be read live
+
+The rule cuts the other way too: **anything the user should know but the server cannot raise immediately** must be attached to the next relevant tool call's return value. A bare `logger.error()` is a dead letter.
 
 ## Install
 
@@ -485,6 +514,7 @@ All configurable knobs in portal-mcp-server are passed as environment variables,
 |---|---|---|
 | File paths | `PORTAL_HOSTS_YAML` | Host registry YAML |
 | File paths | `PORTAL_POLICIES_YAML` | Security policy YAML |
+| File paths | `PORTAL_SECRETS_YAML` | Named secrets YAML (source for `secrets=` in `portal_bash` / `portal_local_exec`) |
 | File paths | `PORTAL_LOG_DIR` | Audit + server log directory |
 | Security & auth | `PORTAL_AUDIT_FAIL_OPEN` | Whether audit-write failure is fail-open |
 | Security & auth | `PORTAL_AUTH_TOKEN` | Bearer token for HTTP transport |
@@ -501,11 +531,28 @@ Detailed breakdown below.
 
 | Env var | Meaning | Default |
 |---|---|---|
-| `PORTAL_HOSTS_YAML` | Host registry YAML | `./config/hosts.yaml` if present, else `~/.config/portal-mcp-server/hosts.yaml` |
-| `PORTAL_POLICIES_YAML` | Security policy YAML | `./config/policies.yaml` if present, else `~/.config/portal-mcp-server/policies.yaml` |
-| `PORTAL_LOG_DIR` | Audit + server log directory | `./logs/` if present, else `~/.local/state/portal-mcp-server/logs/` |
+| `PORTAL_HOSTS_YAML` | Host registry YAML | `~/.config/portal-mcp-server/hosts.yaml` |
+| `PORTAL_POLICIES_YAML` | Security policy YAML | `~/.config/portal-mcp-server/policies.yaml` |
+| `PORTAL_SECRETS_YAML` | Named secrets YAML | `~/.config/portal-mcp-server/secrets.yaml` |
+| `PORTAL_LOG_DIR` | Audit + server log directory | `~/.local/state/portal-mcp-server/logs/` |
 
-Resolution order: env var > `./config/` or `./logs/` in the current directory (developer-checkout layout) > XDG directories. `config/hosts.example.yaml` is the schema template. **`hosts.yaml` contains real credentials and is in `.gitignore` — never commit it.**
+Resolution order: **env var > XDG directory** (`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` honored per the spec). The current working directory is **not** consulted — `portal-mcp-server` is a long-lived user-level daemon, not a project tool, and a cwd-relative auto-load would let any directory the server happens to be launched from silently override your real config (no mainstream user-level CLI — `ssh`, `gh`, `docker`, `kubectl`, `rclone`, … — does this).
+
+The repo's [`examples/`](./examples/) directory holds schema templates — every `*.yaml` in there is **read-only sample**, never auto-loaded. Bootstrap your real config by copying the templates into the XDG directory:
+
+```bash
+mkdir -p ~/.config/portal-mcp-server
+cp examples/hosts.yaml    ~/.config/portal-mcp-server/hosts.yaml
+cp examples/policies.yaml ~/.config/portal-mcp-server/policies.yaml
+cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
+# then edit ~/.config/portal-mcp-server/*.yaml with your real values
+```
+
+**`~/.config/portal-mcp-server/hosts.yaml` contains real credentials — never commit it.**
+
+> **v1.5.0 breaking changes**:
+> - Removed the `./config/hosts.yaml` / `./config/policies.yaml` / `./logs/` cwd-relative fallbacks — resolution is now env > XDG only.
+> - Renamed the repo's `config/` directory to `examples/`; files dropped the `.example.` infix (the directory name now carries the "template" semantics).
 
 ### Security & auth
 
@@ -710,7 +757,7 @@ Two sources (order: broker memory cache → `secrets.yaml`):
 
    The value is pushed over the systemd --user managed local unix socket into the per-user broker memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `broker.json`, the directory is 0700, and the socket is 0600 / same-user only. It is never written to disk, never seen by the LLM, and is cleared on TTL expiry.
 
-See [`config/secrets.example.yaml`](./config/secrets.example.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_bash` call.
+See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_bash` call.
 
 #### Wait semantics: fail-fast → `ask_user` → retry
 
@@ -818,7 +865,7 @@ Issues and PRs welcome. Quick rules:
 - Every new tool needs a docstring (FastMCP uses it as the MCP description) and an entry in the README "Tools" section (including the collapsible full-signature + source-map tables)
 - State-changing tools must call `_gate` and emit `audit_log`
 - `pytest tests/ -v` must be green
-- Never commit secrets; `config/hosts.example.yaml` is the only schema template
+- Never commit secrets; `examples/hosts.yaml` is the only schema template
 - Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages
 
 The full development setup, new-tool checklist, PR template, and security & privacy rules are in **[`CONTRIBUTING.en.md`](./CONTRIBUTING.en.md)** ([中文](./CONTRIBUTING.md)).

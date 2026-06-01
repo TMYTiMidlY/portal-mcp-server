@@ -69,7 +69,9 @@
 # 1. 在 Claude Code 里登记（--scope user 对所有 repo 生效；其他 MCP client 见"接入方式"节）
 claude mcp add --scope user portal -- uvx portal-mcp-server
 
-# 2. 确保目标 host 在 ~/.ssh/config 或 config/hosts.yaml 里
+# 2. 确保目标 host 在 ~/.ssh/config 或 hosts.yaml 里
+#    （hosts.yaml 默认从 ~/.config/portal-mcp-server/hosts.yaml 读，
+#     可用 PORTAL_HOSTS_YAML 覆盖；详见"环境变量"节）
 
 # 3. 在 agent 对话中使用
 #    "帮我看看 myhost 上 /var/log/syslog 最后 50 行"
@@ -260,6 +262,33 @@ Windows 下：
 - 不用每次 fork 新进程（启动 ~50–100 ms 没了）
 - 不用协调多进程之间共享 SSH 复用（这正是 ControlMaster 在 Win 上挂的地方）
 - 错误处理、重试、超时都是 Python 异步原语，不是解析 stderr 字符串
+
+### 反馈通道：warning 走 tool result，不走 stderr
+
+`portal-mcp-server` 把所有**用户需要看到的运行时 warning / error** 都塞进 tool result 的返回内容，不靠 server stderr 或日志文件喊话。这不是审美选择，是 MCP 协议在 client 端实际行为反推出来的硬约束。
+
+**协议层** — [MCP 2025-06-18 spec · transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio) 原文：
+
+> The server **MAY** write UTF-8 strings to its standard error (`stderr`) for logging purposes. **Clients MAY capture, forward, or ignore this logging.**
+
+第二条候选 `notifications/message`（[logging capability](https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/logging)）同样自由："Implementations are free to expose logging through any interface pattern that suits their needs—the protocol itself does not mandate any specific user interaction model."
+
+**主流 client 实测**：
+
+| Client | server stderr 去向 | 用户能否看到 |
+|---|---|---|
+| Claude Desktop（[docs](https://modelcontextprotocol.io/docs/develop/connect-local-servers#getting-logs-from-claude-desktop)） | 写 `~/Library/Logs/Claude/mcp-server-<name>.log` | ❌ 零 UI 提示，要 `tail -f` 该文件 |
+| Claude Code（[docs](https://docs.anthropic.com/en/docs/claude-code/debug-your-config#check-mcp-servers)） | 默认丢弃；官方推荐 "run `claude --debug mcp` to see the server's stderr output" | ❌ 除非用户主动 debug 重启 |
+| Python MCP SDK 通用 client | `errlog: TextIO = sys.stderr` 转发到 client 自己的 stderr | 看 client 进程把自己 stderr 怎么处理 |
+
+**真正可靠的反馈路径只剩两条**：tool result 的 `content` 数组（agent 一定读）和 JSON-RPC error response（多数 client 会展示）。所以我们：
+
+- **重要 warning**（yaml 配错、缺凭据、被忽略的字段……）→ 进 server 内 `_config_warnings` 集合，挂在 `portal_host(action="list")` 的返回值上随调用返回（见 `connection_manager.py`）
+- **致命 config 错误** → 操作时 inline 在 tool result 里 raise，不是启动时打一行 log 就当结案
+- **info 级 stderr** → 只留给 server 作者 debug 时看；不假设用户会看
+- **audit log** → 写 `$XDG_STATE_HOME/portal-mcp-server/logs/`（[XDG Base Directory Spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) 把 logs / history 这种"持久但非关键"状态明确归到 state home），给运维和事后审计用，不假设用户实时读
+
+这条原则倒过来约束 server 内部代码：**任何"用户该知道但 server 自己不能立即 raise"的事**，必须挂到下一次相关 tool call 的返回值里输出。`logger.error()` 完就当结案 = 死信。
 
 ## 安装
 
@@ -498,6 +527,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 |---|---|---|
 | 文件路径 | `PORTAL_HOSTS_YAML` | 主机注册 YAML |
 | 文件路径 | `PORTAL_POLICIES_YAML` | 安全策略 YAML |
+| 文件路径 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML（`portal_bash` / `portal_local_exec` 的 `secrets=` 参数解析源） |
 | 文件路径 | `PORTAL_LOG_DIR` | audit + server log 目录 |
 | 安全与认证 | `PORTAL_AUDIT_FAIL_OPEN` | audit 写盘失败时是否 fail-open |
 | 安全与认证 | `PORTAL_AUTH_TOKEN` | HTTP transport 的 Bearer token |
@@ -514,11 +544,28 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
-| `PORTAL_HOSTS_YAML` | 主机注册 YAML | `./config/hosts.yaml` 若存在，否则 `~/.config/portal-mcp-server/hosts.yaml` |
-| `PORTAL_POLICIES_YAML` | 安全策略 YAML | `./config/policies.yaml` 若存在，否则 `~/.config/portal-mcp-server/policies.yaml` |
-| `PORTAL_LOG_DIR` | audit + server log 目录 | `./logs/` 若存在，否则 `~/.local/state/portal-mcp-server/logs/` |
+| `PORTAL_HOSTS_YAML` | 主机注册 YAML | `~/.config/portal-mcp-server/hosts.yaml` |
+| `PORTAL_POLICIES_YAML` | 安全策略 YAML | `~/.config/portal-mcp-server/policies.yaml` |
+| `PORTAL_SECRETS_YAML` | 命名密钥 YAML | `~/.config/portal-mcp-server/secrets.yaml` |
+| `PORTAL_LOG_DIR` | audit + server log 目录 | `~/.local/state/portal-mcp-server/logs/` |
 
-路径解析优先级：环境变量 > 当前目录下的 `./config/` 或 `./logs/`（兼容开发者 checkout 布局）> XDG 目录。`config/hosts.example.yaml` 给了完整 schema 模板。**`hosts.yaml` 含真实凭据，已在 `.gitignore`，永远别 commit**。
+路径解析优先级：**环境变量 > XDG 目录**（`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` 受 spec 支持）。当前工作目录 **不** 参与解析——`portal-mcp-server` 是用户级常驻服务，不是项目工具，cwd-relative 自动加载会让任意工作目录默默劫持你的真实配置（`ssh` / `gh` / `docker` / `kubectl` / `rclone` 等用户级 CLI 均不这么做）。
+
+仓库的 [`examples/`](./examples/) 目录是 schema 模板——里面所有 `*.yaml` 都是**只读示例**，不会被自动加载。第一次使用从模板拷贝到 XDG 目录：
+
+```bash
+mkdir -p ~/.config/portal-mcp-server
+cp examples/hosts.yaml    ~/.config/portal-mcp-server/hosts.yaml
+cp examples/policies.yaml ~/.config/portal-mcp-server/policies.yaml
+cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
+# 然后把 ~/.config/portal-mcp-server/*.yaml 改成你的真值
+```
+
+**`~/.config/portal-mcp-server/hosts.yaml` 含真实凭据，永远别 commit**。
+
+> **v1.5.0 breaking changes**：
+> - 移除了 `./config/hosts.yaml` / `./config/policies.yaml` / `./logs/` 的 cwd-relative 兜底——现在只走 env > XDG
+> - 仓库内 `config/` 目录改名为 `examples/`，文件不再带 `.example.` 中缀（目录名本身承担"模板"语义）
 
 ### 安全与认证
 
@@ -723,7 +770,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
    值经 systemd --user 管理的本地 unix socket 推进 per-user broker 内存缓存：`.socket` unit 监听 `%t/portal-mcp-server/credentials.sock`，安装器在 `broker.json` 记录解析后的绝对路径，目录 0700 / socket 0600，仅本用户可达。值**从不落盘、从不进 LLM**，TTL 到期自动清除。
 
-完整配置见 [`config/secrets.example.yaml`](./config/secrets.example.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_bash` 调用里互斥。
+完整配置见 [`examples/secrets.yaml`](./examples/secrets.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_bash` 调用里互斥。
 
 #### 等待语义：fail-fast → `ask_user` → 重试
 
@@ -830,7 +877,7 @@ uvx portal-mcp-server@latest --help
 - 新工具写好 docstring（FastMCP 用作 MCP description）+ 同步 README「工具列表」节（含折叠的完整签名 + 源码位置表）
 - 状态变更工具必须过 `_gate` + 写 `audit_log`
 - 测试覆盖关键路径；`pytest tests/ -v` 必须全绿
-- 不 commit secret；`config/hosts.example.yaml` 是唯一 schema 模板
+- 不 commit secret；`examples/hosts.yaml` 是唯一 schema 模板
 - commit message 走 [Conventional Commits](https://www.conventionalcommits.org/)
 
 完整开发流程、新工具开发清单、PR 模板、安全 / 隐私规则见 **[`CONTRIBUTING.md`](./CONTRIBUTING.md)**（[English](./CONTRIBUTING.en.md)）。

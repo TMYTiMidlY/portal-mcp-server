@@ -11,6 +11,8 @@ import inspect
 
 import pytest
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 
 # ────────────────────────────────────────────────────────────────────────────
 #  LLM-facing safety invariants
@@ -177,8 +179,8 @@ async def test_secrets_control_socket_roundtrip(broker_socket):
 async def test_local_exec_disabled_by_default(monkeypatch):
     from portal_mcp_server import cli
     monkeypatch.delenv("PORTAL_ALLOW_LOCAL_EXEC", raising=False)
-    out = await cli.portal_local_exec("echo hi")
-    assert "disabled" in out.lower()
+    with pytest.raises(ToolError, match="disabled"):
+        await cli.portal_local_exec("echo hi")
 
 
 @pytest.mark.asyncio
@@ -223,12 +225,12 @@ async def test_local_exec_unknown_secret_errors(monkeypatch, tmp_path):
     monkeypatch.setenv("PORTAL_SECRETS_YAML", str(tmp_path / "missing.yaml"))
     ss.reload_registry()
     ss.clear_secret()
-    out = await cli.portal_local_exec("echo hi", secrets=["nope"])
-    assert "not available" in out
+    with pytest.raises(ToolError, match="not available"):
+        await cli.portal_local_exec("echo hi", secrets=["nope"])
 
 
 @pytest.mark.asyncio
 async def test_portal_bash_secrets_and_sudo_mutually_exclusive():
     from portal_mcp_server import cli
-    out = await cli.portal_bash("web01", "echo hi", use_sudo=True, secrets=["x"])
-    assert "cannot be combined" in out
+    with pytest.raises(ToolError, match="cannot be combined"):
+        await cli.portal_bash("web01", "echo hi", use_sudo=True, secrets=["x"])

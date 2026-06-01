@@ -121,8 +121,9 @@ def _load_registry() -> None:
                 if "value" in spec:
                     warnings.append(
                         f"secret '{name}' has a plaintext 'value' field — it is "
-                        "IGNORED (plaintext secrets in config/backups are a leak "
-                        "risk). Use 'command:' (prints the secret to stdout) or "
+                        "IGNORED (plaintext secrets in config files or "
+                        "backups are a leak risk). Use 'command:' (prints "
+                        "the secret to stdout) or "
                         f"the out-of-band `secret-set {name}`."
                     )
                     logger.error("secrets.yaml: %s", warnings[-1])

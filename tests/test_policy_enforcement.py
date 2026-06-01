@@ -17,6 +17,8 @@ import json
 
 import pytest
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 
 @pytest.fixture
 def restrictive_policy(monkeypatch, tmp_path):
@@ -79,11 +81,12 @@ class TestGroupExecGate:
 
         monkeypatch.setattr(cli, "ssh_parallel_exec", fake_parallel)
 
-        result = await cli.portal_multi_exec(mode="parallel",
-                                              group_tag="fleet",
-                                              command="rm -rf /", timeout=5)
-        assert "BLOCKED" in result
-        assert "blocked by policy" in result.lower()
+        with pytest.raises(ToolError) as exc_info:
+            await cli.portal_multi_exec(mode="parallel",
+                                        group_tag="fleet",
+                                        command="rm -rf /", timeout=5)
+        assert "BLOCKED" in str(exc_info.value)
+        assert "blocked by policy" in str(exc_info.value).lower()
         assert called == [], "exec must NOT run when command is blocked"
 
     @pytest.mark.asyncio
@@ -101,11 +104,12 @@ class TestGroupExecGate:
         monkeypatch.setattr(cli, "ssh_parallel_exec", fake_parallel)
 
         # 'danger-01' is in the group but not in host_allowlist — must block.
-        result = await cli.portal_multi_exec(mode="parallel",
-                                              group_tag="fleet",
-                                              command="uptime", timeout=5)
-        assert "BLOCKED" in result
-        assert "danger-01" in result
+        with pytest.raises(ToolError) as exc_info:
+            await cli.portal_multi_exec(mode="parallel",
+                                        group_tag="fleet",
+                                        command="uptime", timeout=5)
+        assert "BLOCKED" in str(exc_info.value)
+        assert "danger-01" in str(exc_info.value)
         assert called == []
 
 
@@ -127,12 +131,12 @@ class TestRollingGate:
 
         monkeypatch.setattr(cli, "ssh_rolling_exec", fake_rolling)
 
-        result = await cli.portal_multi_exec(
-            mode="rolling",
-            hosts_json=json.dumps(["safe-01", "safe-02"]),
-            command="rm -rf /tmp/x", timeout=5
-        )
-        assert "BLOCKED" in result
+        with pytest.raises(ToolError, match="BLOCKED"):
+            await cli.portal_multi_exec(
+                mode="rolling",
+                hosts_json=json.dumps(["safe-01", "safe-02"]),
+                command="rm -rf /tmp/x", timeout=5
+            )
         assert called == []
 
     @pytest.mark.asyncio
@@ -145,13 +149,14 @@ class TestRollingGate:
 
         monkeypatch.setattr(cli, "ssh_rolling_exec", fake_rolling)
 
-        result = await cli.portal_multi_exec(
-            mode="rolling",
-            hosts_json=json.dumps(["safe-01", "danger-01"]),
-            command="uptime", timeout=5
-        )
-        assert "BLOCKED" in result
-        assert "danger-01" in result
+        with pytest.raises(ToolError) as exc_info:
+            await cli.portal_multi_exec(
+                mode="rolling",
+                hosts_json=json.dumps(["safe-01", "danger-01"]),
+                command="uptime", timeout=5
+            )
+        assert "BLOCKED" in str(exc_info.value)
+        assert "danger-01" in str(exc_info.value)
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -170,13 +175,13 @@ class TestBroadcastBatchGate:
 
         monkeypatch.setattr(cli, "ssh_broadcast", fake_broadcast)
 
-        result = await cli.portal_multi_exec(
-            mode="broadcast",
-            hosts_json=json.dumps(["safe-01", "safe-02"]),
-            commands_json=json.dumps(["uptime", "rm -rf /opt"]),
-            timeout=5,
-        )
-        assert "BLOCKED" in result
+        with pytest.raises(ToolError, match="BLOCKED"):
+            await cli.portal_multi_exec(
+                mode="broadcast",
+                hosts_json=json.dumps(["safe-01", "safe-02"]),
+                commands_json=json.dumps(["uptime", "rm -rf /opt"]),
+                timeout=5,
+            )
 
     @pytest.mark.asyncio
     async def test_non_string_command_rejected(self, restrictive_policy,
@@ -189,13 +194,13 @@ class TestBroadcastBatchGate:
 
         monkeypatch.setattr(cli, "ssh_broadcast", fake_broadcast)
 
-        result = await cli.portal_multi_exec(
-            mode="broadcast",
-            hosts_json=json.dumps(["safe-01"]),
-            commands_json=json.dumps(["uptime", 42]),
-            timeout=5,
-        )
-        assert "Invalid commands_json" in result
+        with pytest.raises(ToolError, match="Invalid commands_json"):
+            await cli.portal_multi_exec(
+                mode="broadcast",
+                hosts_json=json.dumps(["safe-01"]),
+                commands_json=json.dumps(["uptime", 42]),
+                timeout=5,
+            )
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -218,9 +223,11 @@ class TestPlaybookGate:
             "name": "evil",
             "steps": ["uptime", "rm -rf /var", "echo done"],
         }
-        result = await cli.portal_playbook(json.dumps(playbook), host="safe-01")
-        assert "BLOCKED" in result
-        assert "rm -rf" in result.lower() or "blocked by policy" in result.lower()
+        with pytest.raises(ToolError) as exc_info:
+            await cli.portal_playbook(json.dumps(playbook), host="safe-01")
+        msg = str(exc_info.value)
+        assert "BLOCKED" in msg
+        assert "rm -rf" in msg.lower() or "blocked by policy" in msg.lower()
 
     @pytest.mark.asyncio
     async def test_group_playbook_blocks_disallowed_host(
@@ -234,9 +241,10 @@ class TestPlaybookGate:
         monkeypatch.setattr(cli, "run_playbook_on_group", fake_run)
 
         playbook = {"name": "ok", "steps": ["uptime"]}
-        result = await cli.portal_playbook(json.dumps(playbook), group_tag="fleet")
-        assert "BLOCKED" in result
-        assert "danger-01" in result
+        with pytest.raises(ToolError) as exc_info:
+            await cli.portal_playbook(json.dumps(playbook), group_tag="fleet")
+        assert "BLOCKED" in str(exc_info.value)
+        assert "danger-01" in str(exc_info.value)
 
 
 # ════════════════════════════════════════════════════════════════════════════

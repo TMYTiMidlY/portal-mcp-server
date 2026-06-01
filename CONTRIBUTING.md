@@ -30,7 +30,7 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 
 - **Python 3.10+**，新代码尽量补全类型注解；公共函数 / MCP 工具的注解必须完整
 - I/O 全部 `async/await`——**不允许**在 server 进程里出现阻塞调用（包括 `time.sleep`、`subprocess.run`、同步 `socket.recv` 等）
-- 不出现硬编码 hostname / username / IP / 路径，一律从 `config/hosts.yaml` 或环境变量读
+- 不出现硬编码 hostname / username / IP / 路径，一律从 `hosts.yaml` 或环境变量读（解析顺序见 README §文件路径）
 - 命令拼接走 `shlex.quote` / `quote_shell`，**永远不要**直接 f-string 拼接用户输入到 shell 命令里——参考 `safety.py` 已有的 validators
 - 安全策略相关改动（`security.py`、`cli.py:_gate*`）必须配套写测试，覆盖 happy path 与 reject path
 
@@ -54,9 +54,9 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 
 ## 安全 & 隐私
 
-- **不 commit secret**——`hosts.yaml`、含真实主机名 / 用户名 / 私钥路径的任何文件都已在 `.gitignore`，永远别绕过
+- **不 commit secret**——真实凭据**只**放 `$XDG_CONFIG_HOME/portal-mcp-server/`（默认 `~/.config/portal-mcp-server/`）
 - 提交 PR 前用 `git diff` 自查一遍，确认没把本地路径、IP、token 写进 docstring 或测试 fixture
-- `config/hosts.example.yaml` 是**唯一** schema 模板；新加配置字段时同步更新它
+- `examples/hosts.yaml` 是**唯一** schema 模板；新加配置字段时同步更新它
 
 ## Commit message
 

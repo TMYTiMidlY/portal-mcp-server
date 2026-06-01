@@ -36,7 +36,8 @@ pip install -e ".[dev]"       # -e/--editable points at this source tree
   (`time.sleep`, `subprocess.run`, sync `socket.recv`, …) are **not
   acceptable**.
 - No hardcoded hostnames, usernames, IPs, or paths — read from
-  `config/hosts.yaml` or environment variables.
+  `hosts.yaml` or environment variables (see README §File paths for
+  resolution order).
 - Use `shlex.quote` / `quote_shell` when building shell commands.
   **Never** f-string user input directly into a command — see the
   validators in `safety.py` for the existing patterns.
@@ -83,12 +84,12 @@ When adding a new `@mcp.tool()`:
 
 ## Security & privacy
 
-- **Never commit secrets.** `hosts.yaml` and any file with real
-  hostnames / usernames / private-key paths are in `.gitignore`. Don't
-  bypass it.
+- **Never commit secrets.** Real credentials belong **only** in
+  `$XDG_CONFIG_HOME/portal-mcp-server/` (default
+  `~/.config/portal-mcp-server/`).
 - `git diff` your branch before pushing to confirm no local paths,
   IPs, or tokens leaked into a docstring or test fixture.
-- `config/hosts.example.yaml` is the **only** schema template; update
+- `examples/hosts.yaml` is the **only** schema template; update
   it whenever you add a config field.
 
 ## Commit messages

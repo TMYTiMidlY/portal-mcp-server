@@ -25,6 +25,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from mcp.server.fastmcp.exceptions import ToolError
+
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
@@ -116,12 +118,16 @@ async def main() -> int:
         security._policy = pol  # rebind module-level singleton
 
         # 3a. blocked command on real host → BLOCKED, no exec
-        out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
-                                           command="rm -rf /tmp/x", timeout=5)
-        if "BLOCKED" not in out:
-            failures.append(f"portal_multi_exec(group) did NOT block 'rm -rf': {out}")
+        try:
+            out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+                                               command="rm -rf /tmp/x", timeout=5)
+        except ToolError as e:
+            if "BLOCKED" not in str(e):
+                failures.append(f"portal_multi_exec(group) raised wrong error: {e}")
+            else:
+                print(f"  ✓ portal_multi_exec(group) blocked rm -rf  →  {str(e)[:80]}")
         else:
-            print(f"  ✓ portal_multi_exec(group) blocked rm -rf  →  {out[:80]}")
+            failures.append(f"portal_multi_exec(group) did NOT block 'rm -rf': {out}")
 
         # 3b. allowed command on real host → runs
         out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
@@ -138,22 +144,32 @@ async def main() -> int:
         # 3c. disallowed host alias → blocked
         mgr.register_host(name="bad-host", host="127.0.0.1",
                           tags=["smoke-fleet"])
-        out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
-                                           command="uptime", timeout=5)
-        if "BLOCKED" not in out or "bad-host" not in out:
-            failures.append(
-                f"portal_multi_exec should block bad-host (not in allowlist): {out}"
-            )
+        try:
+            out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+                                               command="uptime", timeout=5)
+        except ToolError as e:
+            if "BLOCKED" not in str(e) or "bad-host" not in str(e):
+                failures.append(
+                    f"portal_multi_exec should block bad-host (not in allowlist): {e}"
+                )
+            else:
+                print(f"  ✓ portal_multi_exec blocked unallowed bad-host  →  {str(e)[:80]}")
         else:
-            print(f"  ✓ portal_multi_exec blocked unallowed bad-host  →  {out[:80]}")
+            failures.append(
+                f"portal_multi_exec should have raised ToolError for bad-host: {out}"
+            )
         mgr.remove_host("bad-host")
 
         # 3d. portal_bash gates per-command (was the equivalent of session_exec)
-        out = await cli.portal_bash("live-smoke", "rm -rf /tmp/whatever", timeout=2)
-        if "BLOCKED" not in out:
-            failures.append(f"portal_bash did NOT block rm -rf: {out}")
+        try:
+            out = await cli.portal_bash("live-smoke", "rm -rf /tmp/whatever", timeout=2)
+        except ToolError as e:
+            if "BLOCKED" not in str(e):
+                failures.append(f"portal_bash raised wrong error for rm -rf: {e}")
+            else:
+                print(f"  ✓ portal_bash blocked rm -rf  →  {str(e)[:80]}")
         else:
-            print(f"  ✓ portal_bash blocked rm -rf  →  {out[:80]}")
+            failures.append(f"portal_bash did NOT block rm -rf: {out}")
 
         # 3e. portal_bash allowed command runs
         out = await cli.portal_bash("live-smoke", "echo session-ok && pwd", timeout=5)
