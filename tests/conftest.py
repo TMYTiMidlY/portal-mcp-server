@@ -13,6 +13,8 @@ Goals
 from __future__ import annotations
 
 import os
+import threading
+import time
 
 import pytest
 
@@ -40,6 +42,32 @@ def pytest_collection_modifyitems(config, items):
             cls_name = getattr(item.parent, "name", "")
             if cls_name != "TestSecurity":
                 item.add_marker(skip)
+
+
+@pytest.fixture
+def broker_socket(tmp_path, monkeypatch):
+    """Start a test credential broker on a private Unix socket."""
+    from portal_mcp_server import credential_broker
+
+    sock = tmp_path / "broker.sock"
+    monkeypatch.setenv("PORTAL_CREDENTIAL_BROKER_SOCKET", str(sock))
+    thread = threading.Thread(
+        target=credential_broker.serve_forever,
+        kwargs={"socket_path": sock},
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 5
+    while not sock.exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert sock.exists(), "credential broker socket never appeared"
+    return sock
+
+
+@pytest.fixture(autouse=True)
+def _isolate_credential_broker(tmp_path, monkeypatch):
+    """Avoid leaking a developer's real broker into unit tests."""
+    monkeypatch.setenv("PORTAL_CREDENTIAL_BROKER_SOCKET", str(tmp_path / "missing-broker.sock"))
 
 
 @pytest.fixture(autouse=True)

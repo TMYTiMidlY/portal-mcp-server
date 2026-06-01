@@ -890,7 +890,7 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
 
     use_sudo: run the command via `sudo -S`, feeding a password obtained
         out-of-band (NEVER passed by the agent). The password comes from the
-        in-memory cache populated by `portal-mcp-server sudo-login <host>`, or
+        per-user credential broker populated by `portal-mcp-server sudo-login <host>`, or
         from the host's `sudo_password_command` in hosts.yaml. Because sudo
         reads stdin, this runs as a ONE-SHOT command (not the persistent
         session): cwd/env from prior portal_bash calls do not apply.
@@ -1015,9 +1015,35 @@ async def portal_bash_status() -> str:
 # ENTRYPOINT
 # ═══════════════════════════════════════════════════════════════════
 
+def _broker_missing_message(path=None) -> str:
+    first = (
+        f"No portal credential broker socket at {path}."
+        if path is not None
+        else "Portal credential broker socket is not configured."
+    )
+    return (
+        f"{first}\n"
+        "Install/start the per-user broker first:\n"
+        "  portal-mcp-server broker-install --now\n"
+        "Then retry this command."
+    )
+
+
+def _broker_path_or_exit(path_func):
+    try:
+        path = path_func()
+    except RuntimeError as e:
+        print(f"{e}\n\n{_broker_missing_message()}", file=sys.stderr)
+        sys.exit(1)
+    if path.exists():
+        return path
+    print(_broker_missing_message(path), file=sys.stderr)
+    sys.exit(1)
+
+
 def _ssh_login_cli(argv: list[str]) -> None:
     """`portal-mcp-server ssh-login <host>` — push an SSH-login password to a
-    running server, out-of-band (prompted with no echo; never via the LLM)."""
+    per-user broker, out-of-band (prompted with no echo; never via the LLM)."""
     import argparse
     import getpass
     from .ssh_creds import (send_ssh_password, control_socket_path,
@@ -1025,7 +1051,7 @@ def _ssh_login_cli(argv: list[str]) -> None:
 
     p = argparse.ArgumentParser(
         prog="portal-mcp-server ssh-login",
-        description="Provide an SSH-login password to a running portal-mcp-server "
+        description="Provide an SSH-login password to the per-user credential broker "
                     "(cached in memory with a TTL; never written to disk, never "
                     "seen by the agent). Used as a side-channel for `auth: "
                     "password` hosts and as a fallback when key auth is refused.",
@@ -1036,20 +1062,15 @@ def _ssh_login_cli(argv: list[str]) -> None:
                         f"(default {DEFAULT_TTL_SEC})")
     a = p.parse_args(argv)
 
-    path = control_socket_path()
-    if not path.exists():
-        print(f"No running portal-mcp-server ssh control socket at {path}.\n"
-              "Start the MCP server first (your MCP client launches it), then "
-              "retry.", file=sys.stderr)
-        sys.exit(1)
+    _broker_path_or_exit(control_socket_path)
     pw = getpass.getpass(f"SSH password for host '{a.host}': ")
     if not pw:
         print("Empty password, aborted.", file=sys.stderr)
         sys.exit(1)
     try:
         resp = send_ssh_password(a.host, pw, ttl=a.ttl)
-    except OSError as e:
-        print(f"Failed to reach control socket: {e}", file=sys.stderr)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential broker: {e}", file=sys.stderr)
         sys.exit(1)
     if resp.get("status") == "ok":
         print(f"SSH password cached for '{a.host}' (expires in {a.ttl}s).")
@@ -1059,8 +1080,8 @@ def _ssh_login_cli(argv: list[str]) -> None:
 
 
 def _sudo_login_cli(argv: list[str]) -> None:
-    """`portal-mcp-server sudo-login <host>` — push a sudo password to a running
-    server, out-of-band (prompted with no echo; never via the LLM)."""
+    """`portal-mcp-server sudo-login <host>` — push a sudo password to a
+    per-user broker, out-of-band (prompted with no echo; never via the LLM)."""
     import argparse
     import getpass
     from .sudo_creds import (send_sudo_password, control_socket_path,
@@ -1068,7 +1089,7 @@ def _sudo_login_cli(argv: list[str]) -> None:
 
     p = argparse.ArgumentParser(
         prog="portal-mcp-server sudo-login",
-        description="Provide a sudo password to a running portal-mcp-server "
+        description="Provide a sudo password to the per-user credential broker "
                     "(cached in memory with a TTL; never written to disk, never "
                     "seen by the agent).",
     )
@@ -1078,20 +1099,15 @@ def _sudo_login_cli(argv: list[str]) -> None:
                         f"(default {DEFAULT_TTL_SEC})")
     a = p.parse_args(argv)
 
-    path = control_socket_path()
-    if not path.exists():
-        print(f"No running portal-mcp-server control socket at {path}.\n"
-              "Start the MCP server first (your MCP client launches it), then "
-              "retry.", file=sys.stderr)
-        sys.exit(1)
+    _broker_path_or_exit(control_socket_path)
     pw = getpass.getpass(f"sudo password for host '{a.host}': ")
     if not pw:
         print("Empty password, aborted.", file=sys.stderr)
         sys.exit(1)
     try:
         resp = send_sudo_password(a.host, pw, ttl=a.ttl)
-    except OSError as e:
-        print(f"Failed to reach control socket: {e}", file=sys.stderr)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential broker: {e}", file=sys.stderr)
         sys.exit(1)
     if resp.get("status") == "ok":
         print(f"sudo password cached for '{a.host}' (expires in {a.ttl}s).")
@@ -1102,7 +1118,7 @@ def _sudo_login_cli(argv: list[str]) -> None:
 
 def _secret_set_cli(argv: list[str]) -> None:
     """`portal-mcp-server secret-set <name>` — push a named secret (API token)
-    to a running server, out-of-band (prompted with no echo; never via the LLM)."""
+    to a per-user broker, out-of-band (prompted with no echo; never via the LLM)."""
     import argparse
     import getpass
     from .secrets_store import (send_secret, control_secrets_socket_path,
@@ -1110,8 +1126,8 @@ def _secret_set_cli(argv: list[str]) -> None:
 
     p = argparse.ArgumentParser(
         prog="portal-mcp-server secret-set",
-        description="Provide a named secret (e.g. an API token) to a running "
-                    "portal-mcp-server (cached in memory with a TTL; never "
+        description="Provide a named secret (e.g. an API token) to the per-user "
+                    "credential broker (cached in memory with a TTL; never "
                     "written to disk, never seen by the agent). Reference it "
                     "later by name via the tools' `secrets` parameter.",
     )
@@ -1121,20 +1137,15 @@ def _secret_set_cli(argv: list[str]) -> None:
                         f"(default {DEFAULT_TTL_SEC})")
     a = p.parse_args(argv)
 
-    path = control_secrets_socket_path()
-    if not path.exists():
-        print(f"No running portal-mcp-server secrets control socket at {path}.\n"
-              "Start the MCP server first (your MCP client launches it), then "
-              "retry.", file=sys.stderr)
-        sys.exit(1)
+    _broker_path_or_exit(control_secrets_socket_path)
     value = getpass.getpass(f"value for secret '{a.name}': ")
     if not value:
         print("Empty value, aborted.", file=sys.stderr)
         sys.exit(1)
     try:
         resp = send_secret(a.name, value, ttl=a.ttl)
-    except OSError as e:
-        print(f"Failed to reach control socket: {e}", file=sys.stderr)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential broker: {e}", file=sys.stderr)
         sys.exit(1)
     if resp.get("status") == "ok":
         print(f"secret '{a.name}' cached (expires in {a.ttl}s).")
@@ -1143,9 +1154,82 @@ def _secret_set_cli(argv: list[str]) -> None:
         sys.exit(1)
 
 
+def _broker_cli(argv: list[str]) -> None:
+    from .credential_broker import main as broker_main
+    broker_main(argv)
+
+
+def _broker_install_cli(argv: list[str]) -> None:
+    import argparse
+    from pathlib import Path
+    from .credential_broker import install_user_units, SOCKET_UNIT
+
+    p = argparse.ArgumentParser(
+        prog="portal-mcp-server broker-install",
+        description="Install the per-user systemd socket-activated credential broker.",
+    )
+    p.add_argument("--socket", type=Path, default=None,
+                   help="override ListenStream path; default unit uses systemd %%t")
+    p.add_argument("--now", action="store_true",
+                   help=f"run systemctl --user enable --now {SOCKET_UNIT}")
+    a = p.parse_args(argv)
+
+    try:
+        res = install_user_units(socket_path=a.socket, enable_now=a.now)
+    except Exception as e:
+        print(f"Failed to install credential broker units: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    print("Installed portal credential broker user units:")
+    print(f"  socket unit:  {res['socket_unit']}")
+    print(f"  service unit: {res['service_unit']}")
+    print(f"  config:       {res['config_path']}")
+    print(f"  recorded path: {res['socket_path']}")
+    if not a.now:
+        print(f"Enable it with: systemctl --user enable --now {SOCKET_UNIT}")
+
+
+def _broker_uninstall_cli(argv: list[str]) -> None:
+    import argparse
+    from .credential_broker import uninstall_user_units
+
+    p = argparse.ArgumentParser(
+        prog="portal-mcp-server broker-uninstall",
+        description="Stop/disable and remove the per-user credential broker units.",
+    )
+    p.add_argument("--keep-config", action="store_true",
+                   help="keep ~/.config/portal-mcp-server/broker.json")
+    p.add_argument("--no-stop", action="store_true",
+                   help="remove files only; do not call systemctl --user")
+    a = p.parse_args(argv)
+
+    res = uninstall_user_units(
+        stop_now=not a.no_stop,
+        remove_config=not a.keep_config,
+    )
+    print("Uninstalled portal credential broker user units.")
+    if res["removed"]:
+        print("Removed:")
+        for path in res["removed"]:
+            print(f"  {path}")
+    if res["errors"]:
+        print("Warnings:")
+        for err in res["errors"]:
+            print(f"  systemctl --user: {err}")
+
+
 def main() -> None:
     """CLI entrypoint registered as `portal-mcp-server`."""
     import argparse
+    if len(sys.argv) >= 2 and sys.argv[1] == "broker":
+        _broker_cli(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "broker-install":
+        _broker_install_cli(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "broker-uninstall":
+        _broker_uninstall_cli(sys.argv[2:])
+        return
     if len(sys.argv) >= 2 and sys.argv[1] == "ssh-login":
         _ssh_login_cli(sys.argv[2:])
         return
@@ -1187,32 +1271,6 @@ def main() -> None:
     args = parser.parse_args()
 
     logger.info(f"portal-mcp-server starting | transport={args.transport}")
-
-    # Best-effort: start the local control socket so `sudo-login` from a
-    # separate terminal can push sudo passwords into this process's memory.
-    try:
-        from .sudo_creds import start_control_server
-        start_control_server()
-    except Exception as e:  # pragma: no cover - never block startup on this
-        logger.warning("could not start sudo control server: %s", e)
-
-    # Best-effort: start the ssh-login control socket so `ssh-login` from a
-    # separate terminal can push SSH login passwords into this process's
-    # memory (consumed by ConnectionManager for `auth: password` hosts and
-    # as a fallback when key auth is refused).
-    try:
-        from .ssh_creds import start_control_server as start_ssh_control_server
-        start_ssh_control_server()
-    except Exception as e:  # pragma: no cover - never block startup on this
-        logger.warning("could not start ssh control server: %s", e)
-
-    # Best-effort: start the named-secret control socket so `secret-set` from a
-    # separate terminal can push API tokens into this process's memory.
-    try:
-        from .secrets_store import start_secrets_control_server
-        start_secrets_control_server()
-    except Exception as e:  # pragma: no cover - never block startup on this
-        logger.warning("could not start secrets control server: %s", e)
 
     if args.transport == "streamable_http":
         import uvicorn

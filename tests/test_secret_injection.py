@@ -8,7 +8,6 @@ output, never in the audit log.
 from __future__ import annotations
 
 import inspect
-import time
 
 import pytest
 
@@ -154,31 +153,20 @@ def test_registry_warns_on_invalid_name(monkeypatch, tmp_path):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  Live control-socket round trip: secret-set client → running server cache
+#  Live broker round trip: secret-set client → per-user broker cache
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_secrets_control_socket_roundtrip(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_secrets_control_socket_roundtrip(broker_socket):
     from portal_mcp_server import secrets_store as ss
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     ss.clear_secret()
 
-    thread = ss.start_secrets_control_server()
-    assert thread is not None
-
-    sock = ss.control_secrets_socket_path()
-    deadline = time.monotonic() + 5
-    while not sock.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert sock.exists(), "secrets control socket never appeared"
-    assert oct(sock.stat().st_mode & 0o777) == oct(0o600)
+    assert ss.control_secrets_socket_path() == broker_socket
+    assert oct(broker_socket.stat().st_mode & 0o777) == oct(0o600)
 
     resp = ss.send_secret("github_token", "live-token", ttl=60)
     assert resp.get("status") == "ok", resp
-
-    deadline = time.monotonic() + 2
-    while ss._get_cached("github_token") is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert ss._get_cached("github_token") == "live-token"
+    assert await ss.resolve_secret("github_token") == "live-token"
 
 
 # ────────────────────────────────────────────────────────────────────────────

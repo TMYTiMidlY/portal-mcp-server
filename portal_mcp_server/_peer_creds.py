@@ -1,14 +1,12 @@
-"""Same-uid peer-credential check for Unix control sockets.
+"""Same-uid peer-credential check for Unix broker sockets.
 
 This module enforces the assertion documented in SECURITY.md: every inbound
-*and* outbound connection on a portal-mcp-server control socket
-(``control.sock`` / ``control-ssh.sock`` / ``control-secrets.sock``) must run
-under the same uid as the server process. The check is a defence-in-depth
-layer on top of the filesystem permissions on ``$XDG_RUNTIME_DIR`` and the
-socket itself: even if a hostile local user manages to make their own socket
-land at the expected path (e.g. on systems where the fallback ``/tmp``
-directory was pre-created with weaker permissions), this layer refuses the
-exchange before any secret is read or written.
+*and* outbound connection on the portal-mcp-server credential broker socket
+must run under the same uid as the broker process. The check is a defence-in-depth
+layer on top of the permissions enforced by the systemd user socket unit and
+the socket itself: even if a hostile local user manages to make their own socket
+land at the expected path, this layer refuses the exchange before any secret is
+read or written.
 
 On Linux we use ``SO_PEERCRED``, which returns the peer's ``struct ucred``
 ``(pid, uid, gid)``. On platforms that do not expose a comparable API in a

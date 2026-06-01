@@ -10,17 +10,17 @@ Two sources, both keeping the value out of the model:
 
   1. **Live input (A·getpass)** — ``portal-mcp-server ssh-login <host>``
      prompts with :func:`getpass.getpass` (no echo) in a *separate* terminal
-     and pushes the password into the *running* MCP server's memory over a
-     local unix-domain socket (mode 0600, same-user only). Cached with a TTL
-     (default 15 min) keyed by host name.
+     and pushes the password into the per-user systemd credential broker.
+     Cached with a TTL (default 15 min) keyed by host name.
 
   2. **Password manager (A·command)** — ``hosts.yaml`` ``password_command``
      (a shell command that prints the password, e.g. ``pass show ssh/web01``).
      Same execution model as the existing :attr:`HostConfig.password_command`;
      fetched on demand via :meth:`ConnectionManager.password_command_for`.
 
-:func:`resolve_ssh_password` checks the in-memory cache first, then falls
-back to ``password_command``. Nothing is ever written to disk by this module.
+:func:`resolve_ssh_password` checks local cache, then the per-user broker, then
+falls back to ``password_command``. Nothing is ever written to disk by this
+module.
 
 Routing into the connection path
 --------------------------------
@@ -35,17 +35,13 @@ The connection manager calls :func:`resolve_ssh_password` in two situations:
 """
 from __future__ import annotations
 
-import asyncio
-import json
 import logging
-import os
-import socket
 import threading
 import time
-from pathlib import Path
 from typing import Optional
 
-from ._peer_creds import is_same_uid_peer, peer_uid
+from . import credential_broker
+from .paths import credential_broker_socket_path
 
 logger = logging.getLogger("portal_mcp.ssh_creds")
 
@@ -58,8 +54,8 @@ _cache: dict[str, tuple[str, float]] = {}
 
 
 # ─────────────────────────────────────────────────────────────────────
-# In-memory TTL cache (shared between the MCP event-loop thread and the
-# control-socket thread; guarded by a plain threading.Lock).
+# Local in-process TTL cache (mainly used by tests and direct embedding);
+# normal live input is stored in the per-user credential broker.
 # ─────────────────────────────────────────────────────────────────────
 
 def cache_ssh_password(host: str, password: str,
@@ -99,130 +95,19 @@ def get_cached_password(host: str) -> Optional[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Local control socket (the side-channel for `ssh-login`).
+# Per-user broker socket (the side-channel for `ssh-login`).
 # ─────────────────────────────────────────────────────────────────────
 
-def control_socket_path() -> Path:
-    """Per-user path for the SSH-login control socket.
-
-    Deliberately distinct from the sudo control socket (``control.sock``) and
-    the named-secret control socket (``control-secrets.sock``) so the three
-    side-channels stay isolated. Prefers ``$XDG_RUNTIME_DIR`` (tmpfs, cleared
-    on logout); falls back to a uid-scoped /tmp directory.
-    """
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/portal-mcp-{os.getuid()}"
-    return Path(base) / "portal-mcp-server" / "control-ssh.sock"
+def control_socket_path():
+    """Compatibility name for the per-user credential broker socket path."""
+    return credential_broker_socket_path()
 
 
-def _socket_is_live(path: Path) -> bool:
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.5)
-        s.connect(str(path))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
-def start_control_server() -> Optional[threading.Thread]:
-    """Start a daemon thread serving the SSH-login control socket.
-
-    Best-effort: if another live server already owns the socket, or the socket
-    cannot be created, returns ``None`` and the server runs without the live
-    side-channel (the ``password_command`` path still works).
-    """
-    path = control_socket_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
-    except OSError as e:
-        logger.warning("ssh control dir setup failed (%s); live ssh-login disabled", e)
-        return None
-
-    if path.exists():
-        if _socket_is_live(path):
-            logger.info("another portal-mcp-server owns %s; live ssh-login deferred to it", path)
-            return None
-        try:
-            path.unlink()  # stale socket from a crashed instance
-        except OSError:
-            pass
-
-    def _serve() -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        async def handle(reader: asyncio.StreamReader,
-                         writer: asyncio.StreamWriter) -> None:
-            try:
-                sock = writer.get_extra_info("socket")
-                if sock is not None and not is_same_uid_peer(sock):
-                    logger.warning(
-                        "ssh control: rejecting peer uid %r (server uid %d)",
-                        peer_uid(sock), os.getuid(),
-                    )
-                    return
-                data = await asyncio.wait_for(reader.read(65536), timeout=10)
-                msg = json.loads(data.decode("utf-8"))
-                host = msg.get("host")
-                pw = msg.get("password")
-                ttl = float(msg.get("ttl", DEFAULT_TTL_SEC))
-                if host and pw:
-                    cache_ssh_password(host, pw, ttl)
-                    logger.info("ssh password cached for host '%s' (ttl=%ss)", host, int(ttl))
-                    writer.write(b'{"status":"ok"}')
-                else:
-                    writer.write(b'{"status":"error","error":"host and password required"}')
-                await writer.drain()
-            except Exception as e:  # pragma: no cover - defensive
-                try:
-                    writer.write(json.dumps({"status": "error", "error": str(e)}).encode())
-                    await writer.drain()
-                except OSError:
-                    pass
-            finally:
-                try:
-                    writer.close()
-                except OSError:
-                    pass
-
-        async def _main() -> None:
-            server = await asyncio.start_unix_server(handle, path=str(path))
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-            logger.info("ssh control socket listening at %s", path)
-            async with server:
-                await server.serve_forever()
-
-        try:
-            loop.run_until_complete(_main())
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning("ssh control server stopped: %s", e)
-
-    t = threading.Thread(target=_serve, name="portal-ssh-control", daemon=True)
-    t.start()
-    return t
+def fetch_ssh_password_from_broker(host: str) -> Optional[str]:
+    return credential_broker.fetch("ssh", host)
 
 
 def send_ssh_password(host: str, password: str,
                       ttl: float = DEFAULT_TTL_SEC) -> dict:
-    """Client side of ``ssh-login``: push a password to the running server."""
-    path = control_socket_path()
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(10)
-    try:
-        s.connect(str(path))
-        if not is_same_uid_peer(s):
-            raise RuntimeError(
-                f"control socket {path} peer uid {peer_uid(s)!r} "
-                f"does not match our uid {os.getuid()}; refusing to send"
-            )
-        s.sendall(json.dumps({"host": host, "password": password, "ttl": ttl}).encode())
-        s.shutdown(socket.SHUT_WR)
-        resp = s.recv(4096)
-    finally:
-        s.close()
-    return json.loads(resp.decode("utf-8")) if resp else {"status": "error", "error": "no response"}
+    """Client side of ``ssh-login``: push a password to the per-user broker."""
+    return credential_broker.store("ssh", host, password, ttl=ttl)

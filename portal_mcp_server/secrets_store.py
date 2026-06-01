@@ -23,28 +23,24 @@ Two sources, both keeping the value out of the model:
 
   2. **Live input (secret-set)** — ``portal-mcp-server secret-set <name>``
      prompts with :func:`getpass.getpass` (no echo) in a *separate* terminal and
-     pushes the value into the *running* server's memory over a local
-     unix-domain socket (mode 0600, same-user only), cached with a TTL.
+     pushes the value into the per-user systemd credential broker, cached with a
+     TTL.
 
 Nothing in this module is ever written to disk.
 """
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import re
-import socket
 import threading
 import time
-from pathlib import Path
 from typing import Optional
 
 import yaml
 
-from ._peer_creds import is_same_uid_peer, peer_uid
-from .paths import secrets_yaml_path
+from . import credential_broker
+from .paths import credential_broker_socket_path, secrets_yaml_path
 
 logger = logging.getLogger("portal_mcp.secrets")
 
@@ -165,8 +161,8 @@ def registry_warnings() -> dict[str, list[str]]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# In-memory TTL cache (shared between the MCP event-loop thread and the
-# control-socket thread; guarded by a plain threading.Lock).
+# Local in-process TTL cache (mainly used by tests and direct embedding);
+# normal live input is stored in the per-user credential broker.
 # ─────────────────────────────────────────────────────────────────────
 
 def cache_secret(name: str, value: str, ttl: float = DEFAULT_TTL_SEC) -> None:
@@ -197,13 +193,17 @@ def clear_secret(name: Optional[str] = None) -> None:
 async def resolve_secret(name: str) -> Optional[str]:
     """Return the value for ``name`` or ``None`` if no source is configured.
 
-    Order: in-memory cache (set via ``secret-set``) → secrets.yaml ``command``.
+    Order: local in-memory cache → per-user credential broker →
+    secrets.yaml ``command``.
     Returns ``None`` only when *neither* source exists, so the caller can emit a
     friendly hint. If a secrets.yaml command IS configured but fails, the
     underlying :class:`RuntimeError` propagates (its message is value-free) so
     the agent sees a real error instead of a misleading "not configured".
     """
     value = _get_cached(name)
+    if value is not None:
+        return value
+    value = await asyncio.to_thread(credential_broker.fetch, "secret", name)
     if value is not None:
         return value
     command = secret_command_for(name)
@@ -233,128 +233,14 @@ def redact(text: str, values) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Local control socket (the side-channel for `secret-set`).
+# Per-user broker socket (the side-channel for `secret-set`).
 # ─────────────────────────────────────────────────────────────────────
 
-def control_secrets_socket_path() -> Path:
-    """Per-user path for the named-secret control socket.
-
-    Kept distinct from the sudo control socket so the two side-channels stay
-    isolated. Prefers ``$XDG_RUNTIME_DIR`` (tmpfs, cleared on logout); falls
-    back to a uid-scoped /tmp directory.
-    """
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/portal-mcp-{os.getuid()}"
-    return Path(base) / "portal-mcp-server" / "control-secrets.sock"
-
-
-def _socket_is_live(path: Path) -> bool:
-    try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.5)
-        s.connect(str(path))
-        s.close()
-        return True
-    except OSError:
-        return False
-
-
-def start_secrets_control_server() -> Optional[threading.Thread]:
-    """Start a daemon thread serving the named-secret control socket.
-
-    Best-effort: if another live server already owns the socket, or the socket
-    cannot be created, returns ``None`` and the server runs without the live
-    side-channel (the secrets.yaml ``command`` source still works).
-    """
-    path = control_secrets_socket_path()
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
-    except OSError as e:
-        logger.warning("secrets control dir setup failed (%s); live secret-set disabled", e)
-        return None
-
-    if path.exists():
-        if _socket_is_live(path):
-            logger.info("another portal-mcp-server owns %s; live secret-set deferred to it", path)
-            return None
-        try:
-            path.unlink()  # stale socket from a crashed instance
-        except OSError:
-            pass
-
-    def _serve() -> None:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        async def handle(reader: asyncio.StreamReader,
-                         writer: asyncio.StreamWriter) -> None:
-            try:
-                sock = writer.get_extra_info("socket")
-                if sock is not None and not is_same_uid_peer(sock):
-                    logger.warning(
-                        "secrets control: rejecting peer uid %r (server uid %d)",
-                        peer_uid(sock), os.getuid(),
-                    )
-                    return
-                data = await asyncio.wait_for(reader.read(65536), timeout=10)
-                msg = json.loads(data.decode("utf-8"))
-                name = msg.get("name")
-                value = msg.get("value")
-                ttl = float(msg.get("ttl", DEFAULT_TTL_SEC))
-                if name and value:
-                    cache_secret(name, value, ttl)
-                    logger.info("secret cached for name '%s' (ttl=%ss)", name, int(ttl))
-                    writer.write(b'{"status":"ok"}')
-                else:
-                    writer.write(b'{"status":"error","error":"name and value required"}')
-                await writer.drain()
-            except Exception as e:  # pragma: no cover - defensive
-                try:
-                    writer.write(json.dumps({"status": "error", "error": str(e)}).encode())
-                    await writer.drain()
-                except OSError:
-                    pass
-            finally:
-                try:
-                    writer.close()
-                except OSError:
-                    pass
-
-        async def _main() -> None:
-            server = await asyncio.start_unix_server(handle, path=str(path))
-            try:
-                os.chmod(path, 0o600)
-            except OSError:
-                pass
-            logger.info("secrets control socket listening at %s", path)
-            async with server:
-                await server.serve_forever()
-
-        try:
-            loop.run_until_complete(_main())
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning("secrets control server stopped: %s", e)
-
-    t = threading.Thread(target=_serve, name="portal-secrets-control", daemon=True)
-    t.start()
-    return t
+def control_secrets_socket_path():
+    """Compatibility name for the per-user credential broker socket path."""
+    return credential_broker_socket_path()
 
 
 def send_secret(name: str, value: str, ttl: float = DEFAULT_TTL_SEC) -> dict:
-    """Client side of ``secret-set``: push a value to the running server."""
-    path = control_secrets_socket_path()
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(10)
-    try:
-        s.connect(str(path))
-        if not is_same_uid_peer(s):
-            raise RuntimeError(
-                f"control socket {path} peer uid {peer_uid(s)!r} "
-                f"does not match our uid {os.getuid()}; refusing to send"
-            )
-        s.sendall(json.dumps({"name": name, "value": value, "ttl": ttl}).encode())
-        s.shutdown(socket.SHUT_WR)
-        resp = s.recv(4096)
-    finally:
-        s.close()
-    return json.loads(resp.decode("utf-8")) if resp else {"status": "error", "error": "no response"}
+    """Client side of ``secret-set``: push a value to the per-user broker."""
+    return credential_broker.store("secret", name, value, ttl=ttl)

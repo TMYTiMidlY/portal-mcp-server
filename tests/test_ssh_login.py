@@ -10,7 +10,6 @@ unaffected when no such password is configured.
 from __future__ import annotations
 
 import inspect
-import time
 
 import asyncssh
 import pytest
@@ -399,72 +398,39 @@ async def test_auth_password_does_not_double_try_on_failure(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  Live control-socket round trip: ssh-login client → running server cache
+#  Live broker round trip: ssh-login client → per-user broker cache
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_control_socket_roundtrip(tmp_path, monkeypatch):
+def test_control_socket_roundtrip(broker_socket):
     from portal_mcp_server import ssh_creds
 
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     ssh_creds.clear_ssh_password()
 
-    thread = ssh_creds.start_control_server()
-    assert thread is not None
-
-    sock = ssh_creds.control_socket_path()
-    deadline = time.monotonic() + 5
-    while not sock.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert sock.exists(), "control socket never appeared"
-    assert oct(sock.stat().st_mode & 0o777) == oct(0o600)
+    assert ssh_creds.control_socket_path() == broker_socket
+    assert oct(broker_socket.stat().st_mode & 0o777) == oct(0o600)
 
     resp = ssh_creds.send_ssh_password("web01", "live-secret", ttl=60)
     assert resp.get("status") == "ok", resp
-
-    deadline = time.monotonic() + 2
-    while ssh_creds._get_cached("web01") is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert ssh_creds._get_cached("web01") == "live-secret"
+    assert ssh_creds.fetch_ssh_password_from_broker("web01") == "live-secret"
 
 
-def test_second_server_defers_when_socket_live(tmp_path, monkeypatch):
-    from portal_mcp_server import ssh_creds
-
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    first = ssh_creds.start_control_server()
-    assert first is not None
-    sock = ssh_creds.control_socket_path()
-    deadline = time.monotonic() + 5
-    while not sock.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    # A second start must detect the live socket and decline (return None)
-    # instead of clobbering the first server's socket file.
-    second = ssh_creds.start_control_server()
-    assert second is None
-
-
-def test_ssh_control_socket_path_distinct_from_sudo_and_secrets(
-    tmp_path, monkeypatch,
-):
-    """The three side-channels MUST use distinct socket paths so a bug
-    touching one cannot regress the others (and so the per-socket auth
-    surface stays narrow)."""
+def test_live_credentials_share_one_broker_socket(broker_socket):
+    """The three side-channels share the per-user systemd broker socket."""
     from portal_mcp_server import ssh_creds, sudo_creds, secrets_store
 
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     paths = {
         ssh_creds.control_socket_path(),
         sudo_creds.control_socket_path(),
         secrets_store.control_secrets_socket_path(),
     }
-    assert len(paths) == 3, f"expected 3 distinct sockets, got {paths}"
+    assert paths == {broker_socket}
 
 
 # ────────────────────────────────────────────────────────────────────────────
 #  Peer-credential (same-uid) check on the control socket
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_send_refuses_when_peer_uid_does_not_match(tmp_path, monkeypatch):
+def test_send_refuses_when_peer_uid_does_not_match(broker_socket, monkeypatch):
     """Defence-in-depth: even if a hostile local user managed to land a
     listener at our expected socket path (e.g. on a system where the
     /tmp fallback dir was pre-created with weaker permissions), the
@@ -473,26 +439,21 @@ def test_send_refuses_when_peer_uid_does_not_match(tmp_path, monkeypatch):
     while the server (on the loopback path) accepts."""
     from portal_mcp_server import ssh_creds
 
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     ssh_creds.clear_ssh_password()
-    thread = ssh_creds.start_control_server()
-    assert thread is not None
-
-    sock = ssh_creds.control_socket_path()
-    deadline = time.monotonic() + 5
-    while not sock.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert sock.exists()
+    assert broker_socket.exists()
 
     # Simulate the peer-uid check failing on the client side: pretend the
     # socket we just connected to belongs to someone else's uid.
     monkeypatch.setattr(
-        "portal_mcp_server.ssh_creds.is_same_uid_peer",
+        "portal_mcp_server.credential_broker.is_same_uid_peer",
         lambda _sock: False,
     )
 
     with pytest.raises(RuntimeError, match="peer uid"):
         ssh_creds.send_ssh_password("web01", "should-never-be-sent")
 
-    # And the server must NOT have cached anything.
-    assert ssh_creds._get_cached("web01") is None
+    monkeypatch.setattr(
+        "portal_mcp_server.credential_broker.is_same_uid_peer",
+        lambda _sock: True,
+    )
+    assert ssh_creds.fetch_ssh_password_from_broker("web01") is None

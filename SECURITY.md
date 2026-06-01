@@ -207,12 +207,13 @@ choice is deliberate:
   `ssh-login` side-channel *does* cache (see below) because it has
   no on-demand command to re-run.
 
-#### SSH login interactive password — out-of-band, in-memory side-channel
+#### SSH login interactive password — out-of-band broker side-channel
 
 `portal-mcp-server ssh-login <host>` is the no-echo counterpart to
 `password_command`: an out-of-band CLI run in a *separate* terminal (not
 the agent) that prompts with `getpass.getpass` and pushes the password
-into the *running* server over a local unix socket. It exists for two
+into the per-user credential broker over a systemd --user managed local
+unix socket. It exists for two
 reasons:
 
 - **`auth: password` hosts that can't or shouldn't pre-stage a
@@ -221,46 +222,45 @@ reasons:
 - **Key-mode hosts (the default — no `auth:` field in hosts.yaml)
   whose key happens to be rejected** — when asyncssh raises
   `PermissionDenied`, the server retries *once* via the same chain
-  (cache → `password_command`), but only when a source is available.
+  (broker cache → `password_command`), but only when a source is available.
   With nothing seeded and no command configured, the original
   `PermissionDenied` propagates unchanged so a stale config cannot
   mask a real key failure.
 
-Resolution order for any password attempt is uniformly **cache
+Resolution order for any password attempt is uniformly **broker cache
 (`ssh-login`) → `password_command` → error**. Cache wins on purpose:
 an operator who just typed a password into `ssh-login` is signalling
 explicit override.
 
-Bounds on the in-memory cache (identical model to `sudo-login`):
+Bounds on the broker memory cache (identical model to `sudo-login`):
 
 - **TTL expiry** (default 15 min, `--ttl` configurable) — entries are
   dropped automatically; **never written to disk**.
 - **Per-host key** — one entry per host alias; no fan-out across the
   fleet.
-- **Socket hardening** — `$XDG_RUNTIME_DIR/portal-mcp-server/control-ssh.sock`,
-  directory `0700`, socket `0600`. On Linux the server also calls
+- **Socket hardening** — the user `.socket` unit listens on
+  `%t/portal-mcp-server/credentials.sock`; systemd resolves `%t` for the
+  user manager, creates/removes the socket, and enforces directory `0700`
+  plus socket `0600`. The installer records the resolved absolute path in
+  `broker.json`, and clients use that config (or an explicit
+  `PORTAL_CREDENTIAL_BROKER_SOCKET`) instead of guessing a runtime dir. On Linux the broker calls
   `getsockopt(SO_PEERCRED)` on every accepted connection (and the
   client mirrors it after `connect`) and closes the socket on a uid
   mismatch — a hostile local user who somehow landed a listener at
   the expected path still cannot exfiltrate the password, and the
-  server refuses to cache anything from a foreign uid. On non-Linux
+  broker refuses to cache anything from a foreign uid. On non-Linux
   hosts the peer-cred check is unavailable and the channel degrades
-  to filesystem permissions only (still same-uid in practice because
-  `$XDG_RUNTIME_DIR` is `0700`). The server probes for a live socket
-  on startup and **declines** (does not clobber) if another instance
-  owns it.
+  to filesystem permissions only. systemd owns socket creation/removal and
+  activates a single per-user broker service.
 - **No tool surface** — the cache is reachable only via the local
-  socket and the in-process resolver; no MCP tool reads or writes it.
+  socket and the MCP-side resolver; no MCP tool reads or writes it.
 
-The three side-channels — `control.sock` (sudo), `control-ssh.sock`
-(SSH login), `control-secrets.sock` (named secrets) — are deliberately
-kept separate. Different cache-key dimensions (sudo / SSH by host,
-secret by name), different injection points (sudo via stdin
-post-handshake, SSH login into the connect kwargs, secret into the
-subprocess environment), and a regression in one path cannot taint the
-others.
+The three interactive side-channels share one per-user broker socket, but the
+broker keeps separate `sudo`, `ssh`, and `secret` key spaces. Different
+cache-key dimensions (sudo / SSH by host, secret by name) and different
+injection points remain separate in the resolver code.
 
-#### Sudo auth — same boundary, in-memory side-channel
+#### Sudo auth — same boundary, broker side-channel
 
 `portal_bash(..., use_sudo=True)` runs a command under `sudo` on the
 remote. The boundary is identical to SSH password auth: **`use_sudo` is a
@@ -274,33 +274,36 @@ trace. The password is resolved server-side from one of two sources:
   non-zero / empty / non-UTF-8). Fully automatic; preferred.
 - **`portal-mcp-server sudo-login <host>`** — an out-of-band CLI run in a
   *separate* terminal (not the agent) that prompts with
-  `getpass.getpass` (no echo) and pushes the password into the running
-  server over a local unix socket.
+  `getpass.getpass` (no echo) and pushes the password into the per-user
+  credential broker over the systemd --user socket.
 
-**Why an in-memory cache here, when SSH password auth deliberately
+**Why a TTL broker cache here, when SSH password auth deliberately
 avoids one** (see directly above): SSH auth has a natural per-connection
 trigger, so the command can run on demand and never persist. Sudo has no
 such trigger — the agent calls `use_sudo` ad-hoc, and an interactive
 prompt cannot be routed back through the MCP channel. The `sudo-login`
-path therefore caches the password in process memory, and that exposure
+path therefore caches the password in broker memory, and that exposure
 is bounded by:
 
 - **TTL expiry** (default 15 min) — the entry is dropped automatically;
   it is **never written to disk**.
-- **Socket hardening** — `$XDG_RUNTIME_DIR/portal-mcp-server/control.sock`,
-  directory `0700`, socket `0600`. On Linux the server also calls
+- **Socket hardening** — the user `.socket` unit listens on
+  `%t/portal-mcp-server/credentials.sock`; systemd resolves `%t` for the
+  user manager, creates/removes the socket, and enforces directory `0700`
+  plus socket `0600`. The installer records the resolved absolute path in
+  `broker.json`, and clients use that config (or an explicit
+  `PORTAL_CREDENTIAL_BROKER_SOCKET`) instead of guessing a runtime dir. On Linux the broker also calls
   `getsockopt(SO_PEERCRED)` on every accepted connection (and the
   client mirrors it after `connect`) and closes the socket on a uid
   mismatch — so even a hostile local process that races into the
   expected socket path cannot exfiltrate the password, and the server
   refuses to cache anything from a foreign uid. On non-Linux hosts
   the peer-cred check is unavailable and the channel degrades to
-  filesystem permissions only (still same-uid in practice because
-  `$XDG_RUNTIME_DIR` is `0700`). The server probes for a live socket
-  on startup and **declines** (does not clobber) if another instance
-  owns it, so a second process cannot hijack the channel.
+  filesystem permissions only. systemd owns socket creation/removal and
+  activates a single per-user broker service, so a second MCP process cannot
+  hijack the channel.
 - **No tool surface** — the cache is reachable only via the local socket
-  and the in-process resolver; no MCP tool reads or writes it.
+  and the MCP-side resolver; no MCP tool reads or writes it.
 
 The `sudo_password_command` path needs no cache at all — it re-runs per
 sudo invocation, exactly like the SSH variant.

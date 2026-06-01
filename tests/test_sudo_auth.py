@@ -8,7 +8,6 @@ parameter that would land in the model's context.
 from __future__ import annotations
 
 import inspect
-import time
 
 import pytest
 
@@ -116,45 +115,18 @@ async def test_resolve_returns_none_when_no_source(monkeypatch):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  Live control-socket round trip (1b): sudo-login client → running server cache
+#  Live broker round trip (1b): sudo-login client → per-user broker cache
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_control_socket_roundtrip(tmp_path, monkeypatch):
+@pytest.mark.asyncio
+async def test_control_socket_roundtrip(broker_socket):
     from portal_mcp_server import sudo_creds
 
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
     sudo_creds.clear_sudo_password()
 
-    thread = sudo_creds.start_control_server()
-    assert thread is not None
-
-    sock = sudo_creds.control_socket_path()
-    deadline = time.monotonic() + 5
-    while not sock.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert sock.exists(), "control socket never appeared"
-    assert oct(sock.stat().st_mode & 0o777) == oct(0o600)
+    assert sudo_creds.control_socket_path() == broker_socket
+    assert oct(broker_socket.stat().st_mode & 0o777) == oct(0o600)
 
     resp = sudo_creds.send_sudo_password("web01", "live-secret", ttl=60)
     assert resp.get("status") == "ok", resp
-
-    deadline = time.monotonic() + 2
-    while sudo_creds._get_cached("web01") is None and time.monotonic() < deadline:
-        time.sleep(0.02)
-    assert sudo_creds._get_cached("web01") == "live-secret"
-
-
-def test_second_server_defers_when_socket_live(tmp_path, monkeypatch):
-    from portal_mcp_server import sudo_creds
-
-    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
-    first = sudo_creds.start_control_server()
-    assert first is not None
-    sock = sudo_creds.control_socket_path()
-    deadline = time.monotonic() + 5
-    while not sock.exists() and time.monotonic() < deadline:
-        time.sleep(0.02)
-    # A second start must detect the live socket and decline (return None)
-    # instead of clobbering the first server's socket file.
-    second = sudo_creds.start_control_server()
-    assert second is None
+    assert await sudo_creds.resolve_sudo_password("web01") == "live-secret"

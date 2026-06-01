@@ -110,7 +110,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 |---|---|
 | `portal_read` / `portal_patch` | 读远端文件并拿 SHA-256；patch 用 `file_hash` + per-range hash 防并发覆盖，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验 |
 | `portal_grep` / `portal_glob` | 远端 `rg --json` / `find` 结构化输出，首次连接探测一次缓存 |
-| `portal_bash` / `portal_bash_close` / `portal_bash_status` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；`use_sudo=True` 走一次性 `sudo -S`（密码从内存缓存 / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--sudo-login)） |
+| `portal_bash` / `portal_bash_close` / `portal_bash_status` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；`use_sudo=True` 走一次性 `sudo -S`（密码从 per-user broker / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--sudo-login)） |
 | `portal_cleanup_tmps` | 清理 patch 中断后留下的孤儿 `*.mcp_tmp.*` |
 
 ### 10 个高层工具（mode 切换）
@@ -149,7 +149,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server
 - **默认沙箱 `/tmp/`**——写操作默认落在远端 `/tmp/` 下；改 `$HOME` 或项目源码前必须先确认
 - **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
 - **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
-- **sudo 三选一**——需要 sudo 时：① 优先让 host 配 `sudo_password_command`（密码管理器拉，全自动）；② 或用户在另一终端 `portal-mcp-server sudo-login <host>` 预先塞密码进缓存，再 `portal_bash(..., use_sudo=True)`；③ 真正需要交互式 prompt（改密码、首次 TTY 校验）的，让用户 `ssh -t host sudo ...`。`use_sudo` 走一次性 exec，**不继承** 之前 `portal_bash` 的 cwd / env
+- **sudo 三选一**——需要 sudo 时：① 优先让 host 配 `sudo_password_command`（密码管理器拉，全自动）；② 或用户在另一终端 `portal-mcp-server sudo-login <host>` 预先塞密码进 per-user broker，再 `portal_bash(..., use_sudo=True)`；③ 真正需要交互式 prompt（改密码、首次 TTY 校验）的，让用户 `ssh -t host sudo ...`。`use_sudo` 走一次性 exec，**不继承** 之前 `portal_bash` 的 cwd / env
 
 <details>
 <summary>📋 完整签名与源码位置</summary>
@@ -306,6 +306,8 @@ pip install -e .
 `uv tool install portal-mcp-server`（或上面的 `uv tool install --force .`）之后，PATH 里同时出现两个等价的 entry point：
 
 ```bash
+portal broker-install --now          # 安装并启动 systemd --user 凭据 broker
+portal broker-uninstall              # 停用并移除 broker 用户级 unit/config
 portal-mcp-server sudo-login web01   # 全名
 portal sudo-login web01              # 短名（推荐手敲场景）
 portal ssh-login web01
@@ -321,6 +323,24 @@ portal secret-set GITHUB_TOKEN
 > ```
 >
 > 撞了就用全名 `portal-mcp-server`，或调整 PATH 顺序。`uv tool install` 不会静默覆盖别人的二进制——文件已存在时会报错让你确认。
+
+### systemd --user 凭据 broker
+
+`ssh-login` / `sudo-login` / `secret-set` 的无回显交互值不再塞进某个 MCP server 进程自己的内存，而是进入一个 per-user、systemd socket-activated 的 broker。使用这些交互凭据命令前，先显式安装并启动用户级 socket：
+
+```bash
+portal broker-install --now
+```
+
+这会写入 `~/.config/systemd/user/portal-mcp-credential-broker.{socket,service}`。`.socket` unit 监听 systemd user manager 的 `%t/portal-mcp-server/credentials.sock`，由 systemd 创建和移除；安装命令同时把解析后的绝对 socket 路径写进 `~/.config/portal-mcp-server/broker.json`。后续 MCP client 只读这份配置（或显式的 `PORTAL_CREDENTIAL_BROKER_SOCKET`），不再自己推导运行时目录。
+
+> **使用顺序**：如果要用 `secret-set` / `sudo-login` / `ssh-login` 这种无回显输入能力，先运行 `portal broker-install --now`，再启动 agent / IDE 里的 portal MCP server。若 agent 已经在运行，安装 broker 后请重载 MCP/plugin 或重启 agent 后再试（例如 Claude Code 里 reload MCP/plugin，Copilot CLI 里 `/restart`，或直接重启对应 IDE/agent）。
+
+常驻的是 systemd 的 socket unit，本身只是一条本用户可访问的本地监听端点；broker service 会在第一次连接时被 socket 激活，用内存保存 TTL 凭据。停止 service 会清掉内存凭据，socket 仍可继续按需拉起它。完全卸载：
+
+```bash
+portal broker-uninstall
+```
 
 ## 接入方式
 
@@ -555,21 +575,21 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 
 ### 凭据流总览
 
-口令/密钥类凭据一共四条流，各自的"密码管理器派（命令源）"和"无回显交互派（getpass + 本地 socket）"如下（**按当前实现**）：
+口令/密钥类凭据一共四条流，各自的"密码管理器派（命令源）"和"无回显交互派（getpass + systemd --user 凭据 broker）"如下（**按当前实现**）：
 
 | 凭据流 | 命令源（密码管理器派） | 无回显交互入口（getpass 派） | 缓存 key | 缓存语义 | 触发点 |
 |---|---|---|---|---|---|
-| **A. 远程 SSH 登录密码** | `password_command`（hosts.yaml） | ✅ `ssh-login <host>` | host | 内存 TTL（默认 900s，仅交互入口；命令源每次现取） | `auth: password` 连接时 / 密钥失败时自动 fallback |
-| **B. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `sudo-login <host>` | host | 内存 TTL（默认 900s） | `portal_bash(use_sudo=True)` |
-| **C. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `secret-set <name>` | name | 内存 TTL（默认 900s，`--ttl` 可调） | `portal_bash(secrets=[…])` |
+| **A. 远程 SSH 登录密码** | `password_command`（hosts.yaml） | ✅ `ssh-login <host>` | host | broker 内存 TTL（默认 900s，仅交互入口；命令源每次现取） | `auth: password` 连接时 / 密钥失败时自动 fallback |
+| **B. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `sudo-login <host>` | host | broker 内存 TTL（默认 900s） | `portal_bash(use_sudo=True)` |
+| **C. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `secret-set <name>` | name | broker 内存 TTL（默认 900s，`--ttl` 可调） | `portal_bash(secrets=[…])` |
 | **D. secret 注入·本地** | 同 C（共用 `secrets.yaml`） | 同 C（共用 `secret-set`） | 同 C | 同 C | `portal_local_exec(secrets=[…])` |
 
 几点要知道：
 
-- **C 和 D 是同一套凭据管道**——共用 `secrets.yaml` + `secret-set` + 同一个 socket + 同一个按 name 的 TTL 缓存，区别只在消费它的工具不同（远程走 SSH stdin 注入 / 本地走 subprocess env）。
-- **A 和 B 故意不合并**：A 的密码进 `asyncssh.connect()` 的密码字段做 SSH 握手，B 的密码在握手后喂 `sudo -S` 的 stdin，时机和注入点完全不同；socket 也分开（`control-ssh.sock` vs `control.sock` vs `control-secrets.sock`），免得动一个把另两个搞回归。
+- **C 和 D 是同一套凭据管道**——共用 `secrets.yaml` + `secret-set` + 同一个 per-user broker + 同一个按 name 的 TTL 缓存，区别只在消费它的工具不同（远程走 SSH stdin 注入 / 本地走 subprocess env）。
+- **A、B、C 的交互入口共用一个 per-user broker socket**，但 broker 内部按 `ssh` / `sudo` / `secret` kind 分开 key 空间：A 的密码进 `asyncssh.connect()` 做 SSH 握手，B 的密码在握手后喂 `sudo -S`，C/D 作为环境变量注入命令。
 - **A 的回落顺序**：`auth: password` 主动登录走 `cache（ssh-login）→ password_command → 错误`；纯密钥 host 在 asyncssh 抛 `PermissionDenied` 时自动 retry 一次密码路径（同一条 chain），有 cache 或 `password_command` 才 retry，否则原异常透传——免得"配置缺失"的报错盖掉"密钥真不对"的真因。
-- **交互入口（getpass 派）= 内存 TTL 缓存**：默认 900 秒、TTL 内可复用、到期自动清、server 重启即丢、从不落盘。**命令源（密码管理器派）= 每次现取**，无 TTL。
+- **交互入口（getpass 派）= per-user broker 内存 TTL 缓存**：默认 900 秒、TTL 内可复用、到期自动清、broker 重启即丢、从不落盘。**命令源（密码管理器派）= 每次现取**，无 TTL。
 
 ### SSH key（首选）
 
@@ -625,11 +645,11 @@ headless / CI 跑不动 ssh-agent 时，可在 `hosts.yaml` 写 `passphrase_comm
    portal-mcp-server ssh-login legacy-host --ttl 1800   # 自定义 TTL（秒），默认 900（15 分钟）
    ```
 
-   密码经本地 unix socket（`$XDG_RUNTIME_DIR/portal-mcp-server/control-ssh.sock`，目录 0700 / socket 0600，且服务端会用 `SO_PEERCRED` 校验对端 uid，仅本用户可达）推进**正在运行的** server 内存缓存，**从不落盘、从不进 LLM**，TTL 到期自动清除。即使 host 没在 `hosts.yaml` 里写 `password_command`、甚至根本是默认的密钥模式（hosts.yaml 不写 `auth:` 字段），`ssh-login` 推一条进去就能用。
+   密码经 systemd --user 管理的本地 unix socket 推进 per-user broker 内存缓存：`.socket` unit 监听 `%t/portal-mcp-server/credentials.sock`，安装器在 `broker.json` 记录解析后的绝对路径，目录 0700 / socket 0600，broker 用 `SO_PEERCRED` 校验对端 uid。密码**从不落盘、从不进 LLM**，TTL 到期自动清除。即使 host 没在 `hosts.yaml` 里写 `password_command`、甚至根本是默认的密钥模式（hosts.yaml 不写 `auth:` 字段），`ssh-login` 推一条进去就能用。
 
 #### 自动 fallback：密钥失败 → 密码
 
-密钥模式的 host（即默认；hosts.yaml 不写 `auth:` 字段）在 asyncssh 抛 `PermissionDenied` 时，会自动 retry 一次密码路径（cache → `password_command`），有源才 retry。**没源**（既没 ssh-login 缓存也没 `password_command`）时原 `PermissionDenied` 直接透传——避免"我以为是密钥坏，实际是配置漏了"。所以**密钥首选**仍然成立，密码是 opt-in 的兜底。
+密钥模式的 host（即默认；hosts.yaml 不写 `auth:` 字段）在 asyncssh 抛 `PermissionDenied` 时，会自动 retry 一次密码路径（broker cache → `password_command`），有源才 retry。**没源**（既没 ssh-login 缓存也没 `password_command`）时原 `PermissionDenied` 直接透传——避免"我以为是密钥坏，实际是配置漏了"。所以**密钥首选**仍然成立，密码是 opt-in 的兜底。
 
 运行时行为：`password_command` 10 秒超时，结尾换行剥掉一个，stderr 永不进日志（防泄密），非 0 退出 / 空输出 / 非 UTF-8 输出全部硬失败。设计细节（为什么 `shell=True`、为什么强制 `client_keys=[]`、为什么 stderr 不进日志…）见 **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**。
 
@@ -669,9 +689,9 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
    portal-mcp-server sudo-login prod-box --ttl 1800   # 自定义 TTL（秒），默认 900（15 分钟）
    ```
 
-   密码经本地 unix socket（`$XDG_RUNTIME_DIR/portal-mcp-server/control.sock`，目录 0700 / socket 0600，仅本用户可达）推进**正在运行的** server 内存缓存，**从不落盘、从不进 LLM**，TTL 到期自动清除。
+   密码经 systemd --user 管理的本地 unix socket 推进 per-user broker 内存缓存：`.socket` unit 监听 `%t/portal-mcp-server/credentials.sock`，安装器在 `broker.json` 记录解析后的绝对路径，目录 0700 / socket 0600，仅本用户可达。密码**从不落盘、从不进 LLM**，TTL 到期自动清除。
 
-取密码顺序：**内存缓存（1b）→ `sudo_password_command`（1a）→ 报错**（提示去 `sudo-login` 或配 `sudo_password_command`）。
+取密码顺序：**broker 内存缓存（1b）→ `sudo_password_command`（1a）→ 报错**（提示去 `sudo-login` 或配 `sudo_password_command`）。
 
 实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `bash -i` 会话（`sudo -S` 读 stdin 会和 sentinel 协议打架）。因此 sudo 命令**不继承** 之前 `portal_bash` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_bash` 处理不了，让用户 `ssh -t host sudo ...`。
 
@@ -679,12 +699,12 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 需要给命令一个 API token（GitHub token、部署密钥等）、又**不想让它进 session 历史、不想发给第三方 LLM 后端**时用这个。和 sudo 密码同一套威胁模型：agent 只传 secret 的**名字**，server 端解析出值、作为**环境变量**注入一次性命令，值经进程环境 / SSH stdin 传递（不进 argv，所以 `ps` 和审计都看不到），命令输出里任何对该值的回显都会在返回给 agent 前替换成 `***`。
 
-> **为什么不直接 `export`？** 痛点在于：临时 `export TOKEN=…` 注入不进 agent 的执行上下文——它只对你手里那个新开的终端生效，agent 跑命令用的是 MCP server 进程的环境，根本看不到。要让 agent 用上，过去只能 `vim` 一个 `.env` / secrets 文件让它去 source，于是 secret 又落了盘、又容易忘删。这个设计把"临时给一次密钥"做成了**原生的无回显 CLI 输入**（`secret-set` 走 `getpass`，和你平时输密码一样），值只进**正在运行的** server 内存、带 TTL 自动过期，既不落盘也不进 LLM。
+> **为什么不直接 `export`？** 痛点在于：临时 `export TOKEN=…` 注入不进 agent 的执行上下文——它只对你手里那个新开的终端生效，agent 跑命令用的是 MCP server 进程的环境，根本看不到。要让 agent 用上，过去只能 `vim` 一个 `.env` / secrets 文件让它去 source，于是 secret 又落了盘、又容易忘删。这个设计把"临时给一次密钥"做成了**原生的无回显 CLI 输入**（`secret-set` 走 `getpass`，和你平时输密码一样），值只进 per-user broker 内存、带 TTL 自动过期，既不落盘也不进 LLM。
 
 - 远程：`portal_bash(host, cmd, secrets=["github_token"])`，命令里写 `$GITHUB_TOKEN`（secret 名大写）。
 - 本地：`portal_local_exec(cmd, secrets=["github_token"])`，在 **MCP server 本机**跑命令（不走 SSH）。本地执行威胁面更大，**默认禁用**，须给 server 进程设 `PORTAL_ALLOW_LOCAL_EXEC=1` 才开。
 
-两条来源（顺序：内存缓存 → `secrets.yaml`）：
+两条来源（顺序：broker 内存缓存 → `secrets.yaml`）：
 
 1. **secret 管理器（secrets.yaml）**——和 `password_command` 对称，写一条打印 secret 到 stdout 的命令：
 
@@ -701,7 +721,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
    portal-mcp-server secret-set github_token --ttl 1800 # 自定义 TTL（秒），默认 900
    ```
 
-   值经本地 unix socket（`$XDG_RUNTIME_DIR/portal-mcp-server/control-secrets.sock`，目录 0700 / socket 0600，仅本用户可达）推进**正在运行的** server 内存缓存，**从不落盘、从不进 LLM**，TTL 到期自动清除。
+   值经 systemd --user 管理的本地 unix socket 推进 per-user broker 内存缓存：`.socket` unit 监听 `%t/portal-mcp-server/credentials.sock`，安装器在 `broker.json` 记录解析后的绝对路径，目录 0700 / socket 0600，仅本用户可达。值**从不落盘、从不进 LLM**，TTL 到期自动清除。
 
 完整配置见 [`config/secrets.example.yaml`](./config/secrets.example.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_bash` 调用里互斥。
 
