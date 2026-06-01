@@ -4,7 +4,10 @@ on:
   workflow_dispatch:
   push:
     tags:
-      - 'v*.*.*'
+      # Match every PEP 440-flavored release tag, including pre/dev/post
+      # variants like v2.1.0a0 / v2.1.0rc1 / v2.1.0.dev5 / v2.1.0.post1.
+      # The plain `v*.*.*` glob would skip 4-segment forms (devN / postN).
+      - 'v*'
 
 permissions:
   contents: write
@@ -48,6 +51,22 @@ jobs:
         id: get_version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      - name: Classify release (stable vs prerelease)
+        id: prerelease
+        # Tag without PEP 440 pre / dev suffix (plain `vMAJOR.MINOR.PATCH`) →
+        # stable; anything else (aN / bN / rcN / .devN / .postN ...) → mark
+        # the GitHub Release as a prerelease so it doesn't grab the
+        # "Latest" badge from a stable on the repo's Releases page.
+        # Note: .postN is technically a post-stable cleanup release per
+        # PEP 440, but it's so rarely useful that treating it as
+        # prerelease here is a fine simplification.
+        run: |
+          if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Extract latest changelog
         id: changelog
         run: |
@@ -86,7 +105,7 @@ jobs:
             dist/*.tar.gz
             dist/*.whl
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           generate_release_notes: true
 
   pypi-publish:
