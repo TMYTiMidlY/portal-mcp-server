@@ -1,3 +1,9 @@
+## v2.0.2 (2026-06-01)
+
+### Fix
+
+- **cli**: drop unused f-string prefix flagged by ruff F541
+
 ## v2.0.1 (2026-06-01)
 
 ### Refactor
