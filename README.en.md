@@ -112,7 +112,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 |---|---|
 | `portal_read` / `portal_patch` | Read remote file with SHA-256 of file + range; patch checks `file_hash` + per-range hash to prevent concurrent overwrite; writes via tmp + `posix_rename` (atomic) and re-hash after write |
 | `portal_grep` / `portal_glob` | Remote `rg --json` / `find` with structured output; first-call probe is cached |
-| `portal_bash` / `_close` / `_status` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user broker / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--sudo-login)) |
+| `portal_bash` / `_close` / `_status` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user credential agent / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--portal-sudo-set)) |
 | `portal_cleanup_tmps` | Garbage-collects orphan `*.mcp_tmp.*` files left by interrupted patches |
 
 ### 10 high-level tools (mode-switched)
@@ -151,7 +151,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 - **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
 - **Don't mix tools within one task** — pick `portal_*` (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
 - **Use the multi-host tools** — `portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`, not a bash loop of `ssh host1; ssh host2; …`.
-- **Sudo, three ways** — when sudo is needed: ① prefer a host-level `sudo_password_command` (pulled from a password manager, fully automatic); ② or have the user pre-seed the password with `portal-mcp-server sudo-login <host>` in the per-user broker from another terminal, then `portal_bash(..., use_sudo=True)`; ③ for genuinely interactive prompts (password change, first-time TTY check), have the user run `ssh -t host sudo …`. `use_sudo` runs a one-shot exec and does **not** inherit `cwd` / env from prior `portal_bash` calls.
+- **Sudo, three ways** — when sudo is needed: ① prefer a host-level `sudo_password_command` (pulled from a password manager, fully automatic); ② or have the user pre-seed the password with `portal sudo set <host>` into the per-user credential agent from another terminal, then `portal_bash(..., use_sudo=True)`; ③ for genuinely interactive prompts (password change, first-time TTY check), have the user run `ssh -t host sudo …`. `use_sudo` runs a one-shot exec and does **not** inherit `cwd` / env from prior `portal_bash` calls.
 
 <details>
 <summary>📋 Full signatures & source map</summary>
@@ -335,12 +335,12 @@ pip install -e .
 After `uv tool install portal-mcp-server` (or the `uv tool install --force .` above), two equivalent entry points are on your `PATH`:
 
 ```bash
-portal broker-install --now          # install/start the systemd --user broker
-portal broker-uninstall              # disable/remove broker user units/config
-portal-mcp-server sudo-login web01   # full name
-portal sudo-login web01              # short name (recommended for typing)
-portal ssh-login web01
-portal secret-set GITHUB_TOKEN
+portal agent install --now           # install/start the systemd --user credential agent
+portal agent uninstall               # disable/remove agent user units/config
+portal-mcp-server sudo set web01     # full name
+portal sudo set web01                # short name (recommended for typing)
+portal ssh set web01
+portal secret set GITHUB_TOKEN
 ```
 
 The `uvx portal-mcp-server xxx` form still requires the full name (`uvx` does not accept aliases). The short name only applies to persistent commands after `uv tool install` / `pip install`.
@@ -353,23 +353,42 @@ The `uvx portal-mcp-server xxx` form still requires the full name (`uvx` does no
 >
 > If it collides, fall back to the full `portal-mcp-server`, or reorder your PATH. `uv tool install` will *not* silently overwrite another tool's binary — it errors out and lets you decide.
 
-### systemd --user credential broker
+### systemd --user credential agent
 
-No-echo interactive values from `ssh-login` / `sudo-login` / `secret-set` no longer live in one MCP server process. They go into a per-user, systemd socket-activated broker. Before using those interactive credential commands, explicitly install and start the user socket:
+> **⚠️ Platform support: Linux only.** `portal agent install` ships a pair of **systemd user units** — `.socket` + `.service` — into `~/.config/systemd/user/`, supervised by the **systemd user instance** (`systemd --user`, aka the systemd user manager) and lazily started via **socket activation**. That whole stack is Linux-specific: macOS launchd and Windows Service have no shipped equivalent, so `portal agent install` / `portal agent uninstall` and the three no-echo interactive CLIs that depend on the credential agent (`portal ssh set` / `portal sudo set` / `portal secret set`) currently **only work on Linux**.
+>
+> macOS / Windows workaround: use the `password_command` / `sudo_password_command` fields in `hosts.yaml`, or the `command:` field in `secrets.yaml`, to pull credentials on demand from the system password manager (Keychain, `pass`, `secret-tool`, `gopass`, 1Password CLI, etc.) — see [Authentication](#authentication) below. The MCP server itself (`portal_bash` and every remote tool) runs fine on Windows / macOS / Linux; only this **local interactive no-echo password-staging** agent path is Linux-only.
 
-```bash
-portal broker-install --now
-```
-
-This writes `~/.config/systemd/user/portal-mcp-credential-broker.{socket,service}`. The `.socket` unit listens on the systemd user manager path `%t/portal-mcp-server/credentials.sock`, with creation/removal owned by systemd. The installer also records the resolved absolute socket path in `~/.config/portal-mcp-server/broker.json`, so later MCP clients read that config (or an explicit `PORTAL_CREDENTIAL_BROKER_SOCKET`) instead of deriving the runtime directory themselves.
-
-> **Order of operations**: if you plan to use no-echo input via `secret-set`, `sudo-login`, or `ssh-login`, run `portal broker-install --now` before starting the agent / IDE portal MCP server. If the agent is already running, reload the MCP/plugin integration or restart the agent after installing the broker (for example, reload MCP/plugin in Claude Code, run `/restart` in Copilot CLI, or restart the relevant IDE/agent).
-
-What stays enabled is the systemd socket unit: a same-user local listening endpoint. The broker service is socket-activated on first connection and holds TTL credentials in memory. Stopping the service clears the in-memory credentials while the socket can still activate it again. To remove the units and config:
+No-echo interactive values from `portal ssh set` / `portal sudo set` / `portal secret set` no longer live in one MCP server process. They go into a per-user, systemd socket-activated **credential agent**. Before using those interactive credential commands, explicitly install and start the user socket:
 
 ```bash
-portal broker-uninstall
+portal agent install --now
 ```
+
+This writes `~/.config/systemd/user/portal-credential-agent.{socket,service}`. The `.socket` and `.service` units are paired by default: when the socket unit receives its first connection, systemd starts the same-named service and hands it the listening fd via `LISTEN_PID` / `LISTEN_FDS` (socket activation). The `.socket` listens on the systemd user manager path `%t/portal-mcp-server/credentials.sock`, with creation/removal owned by systemd. The installer also records the systemd-specifier-expanded absolute socket path in `~/.config/portal-mcp-server/agent.json`, so MCP clients can read it directly (or honour an explicit `PORTAL_CREDENTIAL_AGENT_SOCKET`) instead of guessing the runtime directory — a `XDG_RUNTIME_DIR` derived from a GUI app's child process isn't always correct, so this cache is necessary.
+
+> **Order of operations**: if you plan to use no-echo input via `portal secret set`, `portal sudo set`, or `portal ssh set`, run `portal agent install --now` before starting the agent / IDE portal MCP server. If the MCP host is already running, reload the MCP/plugin integration or restart it after installing the credential agent (for example, reload MCP/plugin in Claude Code, run `/restart` in Copilot CLI, or restart the relevant IDE/agent).
+
+What stays enabled is the systemd socket unit: a same-user local listening endpoint. The credential agent service is socket-activated on first connection and holds TTL credentials in memory. Stopping the service clears the in-memory credentials while the socket can still activate it again. To remove the units and config:
+
+```bash
+portal agent uninstall
+```
+
+Day-to-day inspection / maintenance:
+
+```bash
+portal agent status                  # socket path + running state + cache counts per kind
+portal agent clear                   # flush every cached entry across all kinds (service keeps running)
+portal ssh    list                   # one row per cached host: sha256 fingerprint + remaining TTL
+portal ssh    show web01             # single host: fingerprint + TTL (NO plaintext)
+portal ssh    confirm web01          # prompt twice, cache only if both entries match (no-echo)
+portal ssh    clear web01            # drop a single entry
+```
+
+The `sudo` / `secret` subcommand trees mirror this shape (key noun is `host` / `name` respectively).
+
+> **Design principle — plaintext never leaves the agent's memory.** The CLI intentionally has **no `show plaintext` / `dump` verb** on any of `portal ssh` / `portal sudo` / `portal secret`. `show` returns sha256[:16] + TTL only, `list` shows the same per cached key, `confirm` re-prompts and accepts only if the two no-echo entries match. The plaintext is fed only to same-uid consumers: asyncssh (SSH handshake), `sudo -S` (stdin), `$env` injection (subprocess env). Terminal scrollback, screenshots, OBS overlays, asciinema, remote view-session software and stdout pipes are all leak surfaces — printing the plaintext to a TTY would zero out everything the no-echo prompt was protecting. Same posture as ssh-agent (`-L` prints fingerprints, never private keys), gpg-agent (no passphrase export verb), vault agent (writes secrets to a template target file, not the TTY), polkit-agent (GUI-only). To export a stored value, drive a `password_command` / `secrets.yaml` `command:` from your password manager rather than asking the credential agent to print it.
 
 ## Client integration
 
@@ -550,7 +569,7 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 
 **`~/.config/portal-mcp-server/hosts.yaml` contains real credentials — never commit it.**
 
-> **v1.5.0 breaking changes**:
+> **v2.0.0 breaking changes**:
 > - Removed the `./config/hosts.yaml` / `./config/policies.yaml` / `./logs/` cwd-relative fallbacks — resolution is now env > XDG only.
 > - Renamed the repo's `config/` directory to `examples/`; files dropped the `.example.` infix (the directory name now carries the "template" semantics).
 
@@ -609,21 +628,22 @@ Pick the path for your setup — SSH keys preferred, encrypted keys via ssh-agen
 
 ### Credential-flow overview
 
-There are four credential flows, each with a "password-manager style" (command source) and/or a "no-echo interactive style" (getpass + systemd --user credential broker). **As currently implemented:**
+There are four credential flows, each with a "password-manager style" (command source) and/or a "no-echo interactive style" (getpass + systemd --user credential agent). **As currently implemented:**
 
 | Credential flow | Command source (password-manager style) | No-echo interactive entry (getpass style) | Cache key | Cache semantics | Trigger |
 |---|---|---|---|---|---|
-| **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `ssh-login <host>` | host | broker in-memory TTL (default 900s, interactive entry only; command source fetched per connection) | on connect for `auth: password` / auto fallback when key auth refused |
-| **B. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `sudo-login <host>` | host | broker in-memory TTL (default 900s) | `portal_bash(use_sudo=True)` |
-| **C. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `secret-set <name>` | name | broker in-memory TTL (default 900s, `--ttl` configurable) | `portal_bash(secrets=[…])` |
-| **D. Secret injection · local** | same as C (shares `secrets.yaml`) | same as C (shares `secret-set`) | same as C | same as C | `portal_local_exec(secrets=[…])` |
+| **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `portal ssh set <host>` | host | agent in-memory TTL (default 900s, interactive entry only; command source fetched per connection) | on connect for `auth: password` / auto fallback when key auth refused |
+| **B. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent in-memory TTL (default 900s) | `portal_bash(use_sudo=True)` |
+| **C. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `portal secret set <name>` | name | agent in-memory TTL (default 900s, `--ttl` configurable) | `portal_bash(secrets=[…])` |
+| **D. Secret injection · local** | same as C (shares `secrets.yaml`) | same as C (shares `portal secret set`) | same as C | same as C | `portal_local_exec(secrets=[…])` |
 
 Things to know:
 
-- **C and D are one and the same credential pipeline** — they share `secrets.yaml` + `secret-set` + the same per-user broker + the same name-keyed TTL cache; only the consuming tool differs (remote injects via SSH stdin, local via subprocess env).
-- **A, B, and C share one per-user broker socket**, but the broker keeps separate `ssh` / `sudo` / `secret` key spaces. A's password goes into `asyncssh.connect()` during the SSH handshake; B's password is fed to `sudo -S` after the handshake; C/D are injected as environment variables.
-- **A's resolution chain**: explicit `auth: password` login goes `cache (ssh-login) → password_command → error`. Pure key hosts retry that same chain *once* when asyncssh raises `PermissionDenied`, but **only when a source is available**; with no cache and no `password_command` the original `PermissionDenied` propagates — so a stale config never masks the real "your key is rejected" failure.
-- **Interactive entries (getpass style) = per-user broker in-memory TTL cache**: default 900s, reusable within the TTL, auto-cleared on expiry, gone on broker restart, never written to disk. **Command sources (password-manager style) = fetched each time**, no TTL.
+- **C and D are one and the same credential pipeline** — they share `secrets.yaml` + `portal secret set` + the same per-user credential agent + the same name-keyed TTL cache; only the consuming tool differs (remote injects via SSH stdin, local via subprocess env).
+- **A, B, and C share one per-user agent socket**, but the agent keeps separate `ssh` / `sudo` / `secret` key spaces. A's password goes into `asyncssh.connect()` during the SSH handshake; B's password is fed to `sudo -S` after the handshake; C/D are injected as environment variables.
+- **A's resolution chain**: explicit `auth: password` login goes `cache (portal ssh set) → password_command → error`. Pure key hosts retry that same chain *once* when asyncssh raises `PermissionDenied`, but **only when a source is available**; with no cache and no `password_command` the original `PermissionDenied` propagates — so a stale config never masks the real "your key is rejected" failure.
+- **Interactive entries (getpass style) = per-user agent in-memory TTL cache**: default 900s, reusable within the TTL, auto-cleared on expiry, gone on agent restart, never written to disk. **Command sources (password-manager style) = fetched each time**, no TTL.
+- **Plaintext never leaves the credential agent's memory**: there is intentionally no `show plaintext` verb. `portal {ssh,sudo,secret} show <key>` returns a sha256[:16] fingerprint + remaining TTL, `list` summarises every cached entry, and `confirm` re-prompts and compares two no-echo entries. The plaintext is fed only to same-uid consumers (asyncssh, `sudo -S`, `$env` injection). Full rationale in the [systemd --user credential agent](#systemd---user-credential-agent) section above.
 
 ### SSH keys (preferred)
 
@@ -647,14 +667,14 @@ ssh-add ~/.ssh/id_ed25519        # passphrase prompted once
 
 For headless / CI environments where ssh-agent is impractical, configure `passphrase_command:` in `hosts.yaml` (see below).
 
-### Password auth: `password_command` or `ssh-login`
+### Password auth: `password_command` or `portal ssh set`
 
 Provided for legacy hosts that cannot be re-keyed. Two non-negotiable rules:
 
 1. **Never** write `password: <plaintext>` in `hosts.yaml` — startup logs an ERROR and drops the field.
 2. **Never** flow a password through an MCP tool — `portal_host` has no password parameter, so credentials cannot land in LLM tool-call traces.
 
-Two sources (order: broker cache → `password_command` → error), same shape as sudo / secret:
+Two sources (order: agent cache → `password_command` → error), same shape as sudo / secret:
 
 1. **Password manager (1a, fully automatic)** — in `hosts.yaml` set `auth: password` plus a shell command that prints the password to stdout, same pattern as Borg's `BORG_PASSCOMMAND`, restic's `RESTIC_PASSWORD_COMMAND`, and msmtp's `passwordeval`:
 
@@ -672,18 +692,22 @@ Two sources (order: broker cache → `password_command` → error), same shape a
        # password_command: op read "op://Private/legacy-host/password"
    ```
 
-2. **Seed it once (1b, `ssh-login`, interactive)** — in a **separate terminal** (not the agent chat):
+2. **Seed it once (1b, `portal ssh set`, interactive)** — in a **separate terminal** (not the agent chat):
 
    ```bash
-   portal-mcp-server ssh-login legacy-host        # getpass, no echo
-   portal-mcp-server ssh-login legacy-host --ttl 1800   # custom TTL (seconds); default 900 (15 min)
+   portal ssh set legacy-host                  # getpass, no echo
+   portal ssh set legacy-host --ttl 1800       # custom TTL (seconds); default 900 (15 min)
+   portal ssh confirm legacy-host              # prompt twice, cache only on match
+   portal ssh show legacy-host                 # sha256 fingerprint + remaining TTL (no plaintext)
+   portal ssh list                             # every cached host: fingerprint + TTL
+   portal ssh clear legacy-host                # drop a single entry
    ```
 
-   The password travels over the systemd --user managed local unix socket into the per-user broker memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `broker.json`, the directory is `0700`, the socket is `0600`, and the broker performs an `SO_PEERCRED` same-uid check. It is **never written to disk, never sent to the LLM**, and is dropped automatically when the TTL expires. Works even when the host has no `password_command` in `hosts.yaml`, or is a key-mode host (the default — no `auth:` field in hosts.yaml).
+   The password travels over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is `0700`, the socket is `0600`, and the agent performs an `SO_PEERCRED` same-uid check. It is **never written to disk, never sent to the LLM**, and is dropped automatically when the TTL expires. Works even when the host has no `password_command` in `hosts.yaml`, or is a key-mode host (the default — no `auth:` field in hosts.yaml).
 
 #### Auto-fallback: key failure → password
 
-When asyncssh raises `PermissionDenied` for a key-mode host (the default — no `auth:` field in hosts.yaml), the server retries *once* via the password chain (broker cache → `password_command`), but **only when a source is available**. With no cache and no `password_command` the original `PermissionDenied` propagates — so a missing config never masks the real "your key is rejected" failure. Keys remain the preferred path; password is an opt-in safety net.
+When asyncssh raises `PermissionDenied` for a key-mode host (the default — no `auth:` field in hosts.yaml), the server retries *once* via the password chain (agent cache → `password_command`), but **only when a source is available**. With no cache and no `password_command` the original `PermissionDenied` propagates — so a missing config never masks the real "your key is rejected" failure. Keys remain the preferred path; password is an opt-in safety net.
 
 Runtime behaviour: `password_command` runs with a 10-second timeout, exactly one trailing newline stripped, stderr never logged (leak defence), and non-zero exit / empty output / non-UTF-8 output all hard-failing. Design rationale (why `shell=True`, why `client_keys=[]` is forced, why stderr never reaches the logs, …) lives in **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**.
 
@@ -702,7 +726,7 @@ hosts:
 
 Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphrase_command:` only in headless / CI environments.
 
-### Non-interactive sudo: `use_sudo` + `sudo-login`
+### Non-interactive sudo: `use_sudo` + `portal sudo set`
 
 `portal_bash(host, cmd, use_sudo=True)` lets the agent run root commands, but **the sudo password never reaches the LLM** — `portal_bash` has no password parameter; the password is resolved server-side. Two sources (same philosophy as the SSH password):
 
@@ -719,26 +743,29 @@ Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphra
 2. **Seed it once (interactive)** — in a **separate terminal** (not the agent chat):
 
    ```bash
-   portal-mcp-server sudo-login prod-box        # getpass, no echo
-   portal-mcp-server sudo-login prod-box --ttl 1800   # custom TTL (seconds); default 900 (15 min)
+   portal sudo set prod-box                  # getpass, no echo
+   portal sudo set prod-box --ttl 1800       # custom TTL (seconds); default 900 (15 min)
+   portal sudo confirm prod-box              # prompt twice, cache only on match
+   portal sudo show prod-box                 # sha256 fingerprint + TTL (no plaintext)
+   portal sudo list                          # every cached host
    ```
 
-   The password travels over the systemd --user managed local unix socket into the per-user broker memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `broker.json`, the directory is `0700`, and the socket is `0600` / same-user only. It is **never written to disk, never sent to the LLM**, and is dropped automatically when the TTL expires.
+   The password travels over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is `0700`, and the socket is `0600` / same-user only. It is **never written to disk, never sent to the LLM**, and is dropped automatically when the TTL expires.
 
-Resolution order: **broker memory cache (2) → `sudo_password_command` (1) → error** (telling you to `sudo-login` or configure `sudo_password_command`).
+Resolution order: **agent memory cache (2) → `sudo_password_command` (1) → error** (telling you to run `portal sudo set` or configure `sudo_password_command`).
 
 Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` executing `sudo -S -k -p '' -- bash -c <cmd>`; it does **not** reuse the persistent `bash -i` session (`sudo -S` reads stdin, which collides with the sentinel protocol). Consequently a sudo command does **not** inherit `cd` / `export` state from prior `portal_bash` calls — bake any `cd … && …` into the same command. `-k` forces fresh auth each time; `-p ''` suppresses the prompt. Genuinely interactive sudo (needs a TTY, or a password change) still can't go through `portal_bash` — have the user run `ssh -t host sudo …`.
 
-### Named-secret injection: `secrets=[…]` + `secret-set`
+### Named-secret injection: `secrets=[…]` + `portal secret set`
 
 Use this to hand a command an API token (a GitHub token, a deploy key, …) **without it entering the session history or being sent to the third-party LLM backend**. Same threat model as the sudo password: the agent passes only the secret's **name**, the server resolves the value and injects it as an **environment variable** into a one-shot command. The value travels via the process environment / SSH stdin (never on argv, so `ps` and the audit log can't see it), and any echo of it in the command output is redacted to `***` before the result reaches the agent.
 
-> **Why not just `export`?** The pain point: a throwaway `export TOKEN=…` never reaches the agent's execution context — it only affects the new terminal *you* opened, while the agent runs commands in the MCP server process's environment, which can't see it. The only way to make the agent use it was to `vim` a `.env` / secrets file for it to source — which puts the secret back on disk and is easy to forget to delete. This design turns "hand over a key once" into a **native no-echo CLI prompt** (`secret-set` uses `getpass`, just like typing a password), with the value living only in per-user broker memory and auto-expiring on a TTL — never on disk, never to the LLM.
+> **Why not just `export`?** The pain point: a throwaway `export TOKEN=…` never reaches the agent's execution context — it only affects the new terminal *you* opened, while the agent runs commands in the MCP server process's environment, which can't see it. The only way to make the agent use it was to `vim` a `.env` / secrets file for it to source — which puts the secret back on disk and is easy to forget to delete. This design turns "hand over a key once" into a **native no-echo CLI prompt** (`portal secret set` uses `getpass`, just like typing a password), with the value living only in per-user credential agent memory and auto-expiring on a TTL — never on disk, never to the LLM.
 
 - Remote: `portal_bash(host, cmd, secrets=["github_token"])`, referencing `$GITHUB_TOKEN` (the uppercased name) in `cmd`.
 - Local: `portal_local_exec(cmd, secrets=["github_token"])` runs on the **MCP server host** (not over SSH). Local execution is a larger threat surface, so it is **disabled** unless the server process has `PORTAL_ALLOW_LOCAL_EXEC=1`.
 
-Two sources (order: broker memory cache → `secrets.yaml`):
+Two sources (order: agent memory cache → `secrets.yaml`):
 
 1. **Secret manager (secrets.yaml)** — symmetric to `password_command`; a command that prints the secret to stdout:
 
@@ -748,14 +775,17 @@ Two sources (order: broker memory cache → `secrets.yaml`):
        command: pass show api/github      # or op read / printf "$ENV"
    ```
 
-2. **Live input (`secret-set`, interactive once)** — in a *separate* terminal:
+2. **Live input (`portal secret set`, interactive once)** — in a *separate* terminal:
 
    ```bash
-   portal-mcp-server secret-set github_token            # getpass, no echo
-   portal-mcp-server secret-set github_token --ttl 1800 # custom TTL (s), default 900
+   portal secret set github_token              # getpass, no echo
+   portal secret set github_token --ttl 1800   # custom TTL (s), default 900
+   portal secret confirm github_token          # prompt twice, cache only on match
+   portal secret show github_token             # sha256 fingerprint + TTL
+   portal secret list                          # every cached secret name
    ```
 
-   The value is pushed over the systemd --user managed local unix socket into the per-user broker memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `broker.json`, the directory is 0700, and the socket is 0600 / same-user only. It is never written to disk, never seen by the LLM, and is cleared on TTL expiry.
+   The value is pushed over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is 0700, and the socket is 0600 / same-user only. It is never written to disk, never seen by the LLM, and is cleared on TTL expiry.
 
 See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_bash` call.
 
@@ -764,7 +794,7 @@ See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` and `use_sudo`
 No-echo input inherently means "wait for the human to type it," but **that wait is never put on the agent's critical path** — the MCP server is usually headless with no access to the user's tty, so it can neither pop a `getpass` prompt nor block the tool call until it times out. The contract is therefore:
 
 1. **Fail-fast**: when the secret (or sudo password) isn't ready, the tool **returns an error immediately and does not run the command**; the error never contains the value.
-2. **Bounce it back to the user**: the error explicitly nudges the agent to use an interactive input/choice tool (e.g. `ask_user`) to ask the user to run `secret-set <name>` / `sudo-login <host>` in a *separate* terminal and reply "ok" when done; the agent then retries the call.
+2. **Bounce it back to the user**: the error explicitly nudges the agent to use an interactive input/choice tool (e.g. `ask_user`) to ask the user to run `portal secret set <name>` / `portal sudo set <host>` in a *separate* terminal and reply "ok" when done; the agent then retries the call.
 3. **No such tool → end the turn**: if the agent has no `ask_user`-style tool, it should **tell the user what to run and end its turn**, waiting for the user's next prompt to retry — rather than busy-waiting or polling.
 
 So "waiting" surfaces only as a normal conversational turn handoff: the `getpass` block lives in the user's own terminal, while the agent side is always "check cache → run on hit / fail-fast with instructions on miss." **Never ask the user to paste the value into the conversation** — that would feed it straight to the third-party LLM and defeat the entire design.
@@ -774,7 +804,7 @@ So "waiting" surfaces only as a normal conversational turn handoff: the `getpass
 - **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).
 - **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate limit; every state-changing tool runs through `_gate` with no side doors (`portal_host(register)` gates against the target IP, not the alias; `portal_tunnel_close` is gated; multi-host gates are two-phase).
 - **Authentication**: SSH keys are the default and recommended path; password auth is supported but only via `password_command` in `hosts.yaml`, never exposed through any MCP tool — config in [Authentication](#authentication), security design in [`SECURITY.md` § Authentication](./SECURITY.md#authentication).
-- **Audit**: every state-changing operation is appended to `logs/audit.jsonl`; fail-closed by default (`PORTAL_AUDIT_FAIL_OPEN=1` switches to fail-open).
+- **Audit**: every state-changing operation is appended to `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`); fail-closed by default (`PORTAL_AUDIT_FAIL_OPEN=1` switches to fail-open).
 - **Hash-protected edits**: `portal_read` + `portal_patch` use SHA-256 + per-range hashes + atomic `posix_rename` + post-write rehash to refuse concurrent overwrites.
 
 The full threat model, layer-by-layer defences, operator hygiene, known limitations, and algorithmic provenance live in **[`SECURITY.md`](./SECURITY.md)**.

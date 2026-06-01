@@ -10,7 +10,7 @@ Every tool that targets a host accepts a `host` parameter. The host can be:
 - a name registered via `portal_host(action="register", ...)`, **or**
 - a `Host` alias from `~/.ssh/config` (auto-resolved on first use; explicit registration is only needed for tag-based grouping).
 
-All state-changing tools write to `logs/audit.jsonl`. Read-only tools are intentionally not audited (see the Security section of [`README.md`](../README.md#security)).
+All state-changing tools write to `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`). Read-only tools are intentionally not audited (see the Security section of [`README.md`](../README.md#security)).
 
 ---
 
@@ -45,9 +45,9 @@ These are the tools an agent should reach for first. They share one SSH connecti
 
 > Prompt-layer convention (not enforced in code): write operations should target remote `/tmp/` unless the user has explicitly approved another path. `portal_bash` itself does **not** scope paths — see the README's *Agent-side conventions* section for the recommended ruleset.
 
-> **Sudo (`use_sudo=True`)** — the password is **never** supplied by the agent. It comes from the per-user credential broker populated out-of-band by `portal-mcp-server sudo-login <host>` (prompted with no echo in a separate terminal), or from the host's `sudo_password_command` in `hosts.yaml`. If neither is available the call returns an error telling you to run `sudo-login`. The command runs via `sudo -S -k` with the password fed on stdin (never on the command line) and is audited as `remote_sudo`.
+> **Sudo (`use_sudo=True`)** — the password is **never** supplied by the agent. It comes from the per-user credential agent populated out-of-band by `portal sudo set <host>` (prompted with no echo in a separate terminal), or from the host's `sudo_password_command` in `hosts.yaml`. If neither is available the call returns an error telling you to run `portal sudo set`. The command runs via `sudo -S -k` with the password fed on stdin (never on the command line) and is audited as `remote_sudo`.
 
-> **SSH login password (auth)** — never an agent-supplied parameter either. Sources are resolved in the order **per-user credential broker (populated by `portal-mcp-server ssh-login <host>`, no echo, separate terminal) → host `password_command` in `hosts.yaml` → error**. For key-mode hosts (the default — no `auth:` field in hosts.yaml) the chain is only consulted as a *fallback* when asyncssh raises `PermissionDenied` and a source is actually configured, so a missing config never masks a real key-rejection failure. Live cache is per-host with TTL (default 900s, `--ttl` configurable).
+> **SSH login password (auth)** — never an agent-supplied parameter either. Sources are resolved in the order **per-user credential agent (populated by `portal ssh set <host>`, no echo, separate terminal) → host `password_command` in `hosts.yaml` → error**. For key-mode hosts (the default — no `auth:` field in hosts.yaml) the chain is only consulted as a *fallback* when asyncssh raises `PermissionDenied` and a source is actually configured, so a missing config never masks a real key-rejection failure. Live cache is per-host with TTL (default 900s, `--ttl` configurable).
 
 ### Local execution
 
@@ -55,9 +55,13 @@ These are the tools an agent should reach for first. They share one SSH connecti
 |---|---|---|
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` | Run a **one-shot command on the MCP server host** (not over SSH), optionally with named secrets injected as env vars. **Disabled unless** the operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` — local execution is a larger threat surface than the remote tools. Audited as `local_exec`. |
 
-> **Secrets (`secrets=[…]`)** — for both `portal_bash` and `portal_local_exec`, the agent passes secret **names**, never values. Each name resolves (via the per-user credential broker populated by `portal-mcp-server secret-set <name>`, or a `command:` in `secrets.yaml`) to a value that is exported as the uppercased env var (`github_token` → `$GITHUB_TOKEN`). The value travels via the process environment / SSH stdin (never on argv, so it stays out of `ps` and the audit log) and any echo of it in the output is redacted to `***` before the result reaches the agent. See [`examples/secrets.yaml`](../examples/secrets.yaml).
+> **Secrets (`secrets=[…]`)** — for both `portal_bash` and `portal_local_exec`, the agent passes secret **names**, never values. Each name resolves (via the per-user credential agent populated by `portal secret set <name>`, or a `command:` in `secrets.yaml`) to a value that is exported as the uppercased env var (`github_token` → `$GITHUB_TOKEN`). The value travels via the process environment / SSH stdin (never on argv, so it stays out of `ps` and the audit log) and any echo of it in the output is redacted to `***` before the result reaches the agent. See [`examples/secrets.yaml`](../examples/secrets.yaml).
 
-The interactive credential CLIs (`secret-set`, `sudo-login`, `ssh-login`) require the per-user systemd broker to be installed first. Operators should run `portal-mcp-server broker-install --now` before starting the agent / IDE portal MCP server. If the agent is already running, reload the MCP/plugin integration or restart the agent after installing the broker (for example Claude Code MCP/plugin reload, Copilot CLI `/restart`, or restarting the IDE/agent). `portal-mcp-server broker-uninstall` removes the user units/config.
+The interactive credential CLIs (`portal secret set`, `portal sudo set`, `portal ssh set`) require the per-user systemd credential agent to be installed first. Operators should run `portal agent install --now` before starting the agent / IDE portal MCP server. If the agent is already running, reload the MCP/plugin integration or restart the agent after installing the credential agent (for example Claude Code MCP/plugin reload, Copilot CLI `/restart`, or restarting the IDE/agent). `portal agent uninstall` removes the user units/config. `portal agent status` shows whether the agent is running and how many entries are cached, and `portal agent clear` flushes every cached entry across all kinds.
+
+> **⚠️ Platform: Linux only.** The credential agent is implemented as a pair of **systemd user units** (`.socket` + `.service` under `~/.config/systemd/user/`), supervised by the **systemd user instance** (`systemd --user`) and lazily started via **socket activation**. There is no shipped launchd / Windows Service equivalent, so `portal agent install` and the three CLIs that depend on it (`portal secret set` / `portal sudo set` / `portal ssh set`) are only supported on Linux. On macOS / Windows hosts, drive sudo and SSH passwords from `hosts.yaml`'s `password_command` / `sudo_password_command`, and named secrets from `secrets.yaml`'s `command:` field, instead — the rest of the MCP server (every `portal_*` remote tool) is platform-agnostic.
+
+> **Design principle — plaintext never leaves the agent's memory.** There is no `show plaintext` / `dump` verb on any of `portal ssh` / `portal sudo` / `portal secret`. `show <key>` prints a sha256[:16] fingerprint + remaining TTL; `list` lists every key with its fingerprint and TTL; `confirm <key>` re-prompts for the value and accepts only if the two entries match. The plaintext is only ever handed to a same-uid consumer (the SSH connect loop, sudo stdin, `$env` injection). Same posture as ssh-agent / gpg-agent / vault agent / polkit-agent: any echo to a TTY is one screenshot / scrollback / asciinema / OBS overlay away from a leak, so the credential agent simply refuses to do it. To export a stored value outside the agent, drive a `password_command` / `secrets.yaml` `command:` from your password manager rather than asking the credential agent to print it.
 
 ---
 
@@ -127,8 +131,8 @@ Every tool is registered in `portal_mcp_server/cli.py` with the `@mcp.tool()` de
 | `remote_search.py` | `portal_grep`, `portal_glob` |
 | `remote_bash.py` | `portal_bash`, `portal_bash_close`, `portal_bash_status` |
 | `local_exec.py` | `portal_local_exec` (local one-shot execution) |
-| `credential_broker.py` | per-user systemd socket-activated TTL cache for `ssh-login`, `sudo-login`, and `secret-set` |
-| `secrets_store.py` | named-secret resolution / broker + `secrets.yaml` lookup / output redaction |
+| `credential_agent.py` | per-user systemd socket-activated TTL cache for `portal ssh set`, `portal sudo set`, and `portal secret set` |
+| `secrets_store.py` | named-secret resolution / agent + `secrets.yaml` lookup / output redaction |
 | `file_ops.py` | `portal_transfer` |
 | `network_tools.py` | `portal_tunnel_*` |
 | `orchestrator.py` | `portal_multi_exec`, `portal_playbook` |

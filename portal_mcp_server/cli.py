@@ -1,7 +1,8 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 18 portal_* tools covering: read/patch/grep/glob/bash core +
-host/transfer/tunnel/multi_exec/playbook/ping/audit/check.
+Exposes 19 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+bash(+close,status) core + local_exec + host/transfer/tunnel(open,close,
+list)/multi_exec/playbook/ping/audit/check.
 """
 import asyncio
 import json

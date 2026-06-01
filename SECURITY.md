@@ -51,8 +51,8 @@ The defences below are layered:
 | Per-tool gate         | `cli.py:_gate*`                | Every state-changing tool runs the policy on every call                      |
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
 | Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
-| Audit log             | `logs/audit.jsonl`             | Every state-changing op recorded; fail-closed by default                     |
-| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` or out-of-band `ssh-login` — plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `sudo-login`); no MCP tool accepts a password parameter (SSH or sudo) |
+| Audit log             | `audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`; override the directory via `PORTAL_LOG_DIR`) | Every state-changing op recorded; fail-closed by default                     |
+| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` or out-of-band `portal ssh set` — plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `portal sudo set`); no MCP tool accepts a password parameter (SSH or sudo) |
 | Strict host-key check | `connection_manager.py`        | Defaults to OpenSSH-equivalent `StrictHostKeyChecking`                       |
 
 ### Default constraint: sandbox `/tmp/`
@@ -184,7 +184,7 @@ choice is deliberate:
 | Timeout (10 s) | `RuntimeError` naming `host`, **command string not included** | Same leak surface — the command may name a sensitive secret-store entry. |
 | Empty stdout (exit 0, no output) | `RuntimeError` naming `host` with `"empty output"` | An empty password to `asyncssh.connect` has poorly-defined behaviour (server-dependent). Empty output almost always means a misconfiguration: entry not found, GPG agent locked but not error-coded, command typo. Hard-failing surfaces that, instead of producing a confusing downstream auth failure. |
 | Non-UTF-8 stdout | `RuntimeError` naming `host` with `"non-UTF-8 output"`, **bytes not surfaced** | Defends against accidentally piping a binary file (private key, .gpg blob) into the password slot — the offending bytes might *be* the secret. |
-| `auth: password` set but no source (no `password_command` AND no `ssh-login` cache) | `RuntimeError` at connect time + ERROR log at registry load when no `password_command` is configured | Without explicit failure, asyncssh would silently fall back to key auth; a key that happens to work would mask the misconfiguration permanently. The startup ERROR also points the operator at `ssh-login` so they know either source counts. |
+| `auth: password` set but no source (no `password_command` AND no `portal ssh set` cache) | `RuntimeError` at connect time + ERROR log at registry load when no `password_command` is configured | Without explicit failure, asyncssh would silently fall back to key auth; a key that happens to work would mask the misconfiguration permanently. The startup ERROR also points the operator at `portal ssh set` so they know either source counts. |
 
 ##### Other invariants worth noting
 
@@ -204,17 +204,26 @@ choice is deliberate:
   reconnect; caching its output in process memory would create another
   exposure surface (heap dumps, Python `__dict__` walks) for marginal
   CPU savings on a code path that already runs rarely. The
-  `ssh-login` side-channel *does* cache (see below) because it has
+  `portal ssh set` side-channel *does* cache (see below) because it has
   no on-demand command to re-run.
 
-#### SSH login interactive password — out-of-band broker side-channel
+#### SSH login interactive password — out-of-band credential agent side-channel
 
-`portal-mcp-server ssh-login <host>` is the no-echo counterpart to
+`portal ssh set <host>` is the no-echo counterpart to
 `password_command`: an out-of-band CLI run in a *separate* terminal (not
 the agent) that prompts with `getpass.getpass` and pushes the password
-into the per-user credential broker over a systemd --user managed local
+into the per-user credential agent over a systemd --user managed local
 unix socket. It exists for two
 reasons:
+
+> **Platform**: the shipped install path is **Linux only** — `portal agent
+> install` writes systemd user units (`.socket` + `.service` under
+> `~/.config/systemd/user/`) and supervises them via the systemd user
+> instance (`systemd --user`) with socket activation. macOS / Windows have
+> no shipped equivalent and therefore no supported no-echo CLI path; on
+> those hosts use `password_command` / `sudo_password_command` (and
+> `secrets.yaml`'s `command:`) to pull credentials from the system password
+> manager instead.
 
 - **`auth: password` hosts that can't or shouldn't pre-stage a
   `password_command`** (no password manager available; rotating
@@ -222,17 +231,17 @@ reasons:
 - **Key-mode hosts (the default — no `auth:` field in hosts.yaml)
   whose key happens to be rejected** — when asyncssh raises
   `PermissionDenied`, the server retries *once* via the same chain
-  (broker cache → `password_command`), but only when a source is available.
+  (agent cache → `password_command`), but only when a source is available.
   With nothing seeded and no command configured, the original
   `PermissionDenied` propagates unchanged so a stale config cannot
   mask a real key failure.
 
-Resolution order for any password attempt is uniformly **broker cache
-(`ssh-login`) → `password_command` → error**. Cache wins on purpose:
-an operator who just typed a password into `ssh-login` is signalling
+Resolution order for any password attempt is uniformly **agent cache
+(`portal ssh set`) → `password_command` → error**. Cache wins on purpose:
+an operator who just typed a password into `portal ssh set` is signalling
 explicit override.
 
-Bounds on the broker memory cache (identical model to `sudo-login`):
+Bounds on the agent memory cache (identical model to `portal sudo set`):
 
 - **TTL expiry** (default 15 min, `--ttl` configurable) — entries are
   dropped automatically; **never written to disk**.
@@ -242,25 +251,40 @@ Bounds on the broker memory cache (identical model to `sudo-login`):
   `%t/portal-mcp-server/credentials.sock`; systemd resolves `%t` for the
   user manager, creates/removes the socket, and enforces directory `0700`
   plus socket `0600`. The installer records the resolved absolute path in
-  `broker.json`, and clients use that config (or an explicit
-  `PORTAL_CREDENTIAL_BROKER_SOCKET`) instead of guessing a runtime dir. On Linux the broker calls
+  `agent.json`, and clients use that config (or an explicit
+  `PORTAL_CREDENTIAL_AGENT_SOCKET`) instead of guessing a runtime dir. On Linux the agent calls
   `getsockopt(SO_PEERCRED)` on every accepted connection (and the
   client mirrors it after `connect`) and closes the socket on a uid
   mismatch — a hostile local user who somehow landed a listener at
   the expected path still cannot exfiltrate the password, and the
-  broker refuses to cache anything from a foreign uid. On non-Linux
-  hosts the peer-cred check is unavailable and the channel degrades
-  to filesystem permissions only. systemd owns socket creation/removal and
-  activates a single per-user broker service.
+  agent refuses to cache anything from a foreign uid. The shipped
+  install path (`portal agent install` writing systemd user units and
+  enabling them via `systemctl --user`) is Linux-only; on other OSes
+  there is no supported agent path, so the `SO_PEERCRED` discussion
+  only applies to Linux. systemd owns socket creation/removal and
+  activates a single per-user credential agent service.
 - **No tool surface** — the cache is reachable only via the local
   socket and the MCP-side resolver; no MCP tool reads or writes it.
+- **Plaintext never leaves the agent's memory** — there is no `show
+  plaintext` / `dump` verb on `portal ssh` / `portal sudo` / `portal
+  secret`. `portal ssh show HOST` returns a sha256[:16] fingerprint +
+  remaining TTL only; `portal ssh list` returns the same per cached
+  key; `portal ssh confirm HOST` re-prompts and accepts only if the
+  two no-echo entries match. The plaintext is only ever fed to a
+  same-uid consumer (asyncssh, `sudo -S` stdin, `$env` injection).
+  Same posture as ssh-agent / gpg-agent / vault agent / polkit-agent:
+  echoing to a TTY is one screenshot / scrollback / asciinema / OBS
+  overlay away from a leak, so the agent refuses to do it. To export
+  a value back out, drive a `password_command` / `secrets.yaml`
+  `command:` from your password manager rather than asking the agent
+  to print.
 
-The three interactive side-channels share one per-user broker socket, but the
-broker keeps separate `sudo`, `ssh`, and `secret` key spaces. Different
+The three interactive side-channels share one per-user agent socket, but the
+agent keeps separate `sudo`, `ssh`, and `secret` key spaces. Different
 cache-key dimensions (sudo / SSH by host, secret by name) and different
 injection points remain separate in the resolver code.
 
-#### Sudo auth — same boundary, broker side-channel
+#### Sudo auth — same boundary, credential agent side-channel
 
 `portal_bash(..., use_sudo=True)` runs a command under `sudo` on the
 remote. The boundary is identical to SSH password auth: **`use_sudo` is a
@@ -272,18 +296,18 @@ trace. The password is resolved server-side from one of two sources:
   machinery and guarantees as `password_command` above (10 s timeout,
   one trailing newline stripped, stderr never logged, hard-fail on
   non-zero / empty / non-UTF-8). Fully automatic; preferred.
-- **`portal-mcp-server sudo-login <host>`** — an out-of-band CLI run in a
+- **`portal sudo set <host>`** — an out-of-band CLI run in a
   *separate* terminal (not the agent) that prompts with
   `getpass.getpass` (no echo) and pushes the password into the per-user
-  credential broker over the systemd --user socket.
+  credential agent over the systemd --user socket.
 
-**Why a TTL broker cache here, when SSH password auth deliberately
+**Why a TTL agent cache here, when SSH password auth deliberately
 avoids one** (see directly above): SSH auth has a natural per-connection
 trigger, so the command can run on demand and never persist. Sudo has no
 such trigger — the agent calls `use_sudo` ad-hoc, and an interactive
-prompt cannot be routed back through the MCP channel. The `sudo-login`
-path therefore caches the password in broker memory, and that exposure
-is bounded by:
+prompt cannot be routed back through the MCP channel. The `portal sudo
+set` path therefore caches the password in agent memory, and that
+exposure is bounded by:
 
 - **TTL expiry** (default 15 min) — the entry is dropped automatically;
   it is **never written to disk**.
@@ -291,19 +315,25 @@ is bounded by:
   `%t/portal-mcp-server/credentials.sock`; systemd resolves `%t` for the
   user manager, creates/removes the socket, and enforces directory `0700`
   plus socket `0600`. The installer records the resolved absolute path in
-  `broker.json`, and clients use that config (or an explicit
-  `PORTAL_CREDENTIAL_BROKER_SOCKET`) instead of guessing a runtime dir. On Linux the broker also calls
+  `agent.json`, and clients use that config (or an explicit
+  `PORTAL_CREDENTIAL_AGENT_SOCKET`) instead of guessing a runtime dir. On Linux the agent also calls
   `getsockopt(SO_PEERCRED)` on every accepted connection (and the
   client mirrors it after `connect`) and closes the socket on a uid
   mismatch — so even a hostile local process that races into the
   expected socket path cannot exfiltrate the password, and the server
-  refuses to cache anything from a foreign uid. On non-Linux hosts
-  the peer-cred check is unavailable and the channel degrades to
-  filesystem permissions only. systemd owns socket creation/removal and
-  activates a single per-user broker service, so a second MCP process cannot
-  hijack the channel.
+  refuses to cache anything from a foreign uid. The shipped install
+  path (`portal agent install` writing systemd user units and enabling them
+  via `systemctl --user`) is Linux-only; on other OSes there is no
+  supported agent path at all, so the `SO_PEERCRED` discussion only
+  applies to Linux. systemd owns socket creation/removal and
+  activates a single per-user credential agent service, so a second MCP
+  process cannot hijack the channel.
 - **No tool surface** — the cache is reachable only via the local socket
   and the MCP-side resolver; no MCP tool reads or writes it.
+- **No plaintext echo** — same rule as `portal ssh`: `portal sudo
+  show` / `list` return fingerprint + TTL only, `portal sudo confirm`
+  re-prompts and compares. The plaintext is only fed to `sudo -S` on
+  stdin.
 
 The `sudo_password_command` path needs no cache at all — it re-runs per
 sudo invocation, exactly like the SSH variant.
@@ -317,7 +347,7 @@ fresh authentication each time; `-p ''` suppresses the prompt text.
 
 ### Audit log
 
-All state-changing tools write `logs/audit.jsonl`:
+All state-changing tools write `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`):
 
 - `exec` / `file write` / `patch` / `register` / `tunnel` / `playbook`
   / multi-host orchestration
@@ -393,7 +423,7 @@ every exit path).
   using `root` or personal accounts.
 - Review `policies.yaml` allowlists and blocklists periodically — the
   default policy is **permissive** (empty allowlists = all allowed).
-- Keep `logs/audit.jsonl` rotated and shipped off-host; the file is
+- Keep `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`) rotated and shipped off-host; the file is
   the only forensic record of what the agent did.
 
 ## Known limitations
