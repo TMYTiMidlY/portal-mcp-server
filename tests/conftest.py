@@ -45,14 +45,23 @@ def pytest_collection_modifyitems(config, items):
 
 
 @pytest.fixture
-def broker_socket(tmp_path, monkeypatch):
-    """Start a test credential broker on a private Unix socket."""
-    from portal_mcp_server import credential_broker
+def agent_socket(_isolate_credential_agent, tmp_path, monkeypatch):
+    """Start a test credential agent on a private Unix socket.
 
-    sock = tmp_path / "broker.sock"
-    monkeypatch.setenv("PORTAL_CREDENTIAL_BROKER_SOCKET", str(sock))
+    Declares `_isolate_credential_agent` as an explicit dependency so the
+    later `setenv` below deterministically wins regardless of whether
+    `_isolate_credential_agent` keeps its autouse/function scope. Without
+    this dependency the override order relies on pytest's implicit rule
+    "autouse runs before requested fixtures of the same scope", which is
+    invisible to readers and silently inverts if the isolation fixture is
+    ever refactored.
+    """
+    from portal_mcp_server import credential_agent
+
+    sock = tmp_path / "agent.sock"
+    monkeypatch.setenv("PORTAL_CREDENTIAL_AGENT_SOCKET", str(sock))
     thread = threading.Thread(
-        target=credential_broker.serve_forever,
+        target=credential_agent.serve_forever,
         kwargs={"socket_path": sock},
         daemon=True,
     )
@@ -60,14 +69,14 @@ def broker_socket(tmp_path, monkeypatch):
     deadline = time.monotonic() + 5
     while not sock.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
-    assert sock.exists(), "credential broker socket never appeared"
+    assert sock.exists(), "credential agent socket never appeared"
     return sock
 
 
 @pytest.fixture(autouse=True)
-def _isolate_credential_broker(tmp_path, monkeypatch):
-    """Avoid leaking a developer's real broker into unit tests."""
-    monkeypatch.setenv("PORTAL_CREDENTIAL_BROKER_SOCKET", str(tmp_path / "missing-broker.sock"))
+def _isolate_credential_agent(tmp_path, monkeypatch):
+    """Avoid leaking a developer's real agent into unit tests."""
+    monkeypatch.setenv("PORTAL_CREDENTIAL_AGENT_SOCKET", str(tmp_path / "missing-agent.sock"))
 
 
 @pytest.fixture(autouse=True)
@@ -83,7 +92,7 @@ def _reset_singletons():
         rb._HOST_LOCKS.clear()
     except Exception:
         pass
-    # Clear the three credential caches (sudo / ssh-login / named-secret).
+    # Clear the three credential caches (sudo / ssh / named-secret).
     # Each is consulted on the SSH connect path or by command execution, so a
     # leaked entry from one test can silently override another test's
     # `password_command` / value resolution. Clearing here is cheap and makes

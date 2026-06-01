@@ -1,7 +1,7 @@
 """sudo password provisioning — out-of-band sources, never via the LLM.
 
 Mirrors the philosophy of test_password_auth.py: a sudo password must reach
-``sudo -S`` only through the in-memory cache (populated by the ``sudo-login``
+``sudo -S`` only through the in-memory cache (populated by the ``portal sudo set``
 side-channel) or a host's ``sudo_password_command`` — never as an MCP tool
 parameter that would land in the model's context.
 """
@@ -115,17 +115,17 @@ async def test_resolve_returns_none_when_no_source(monkeypatch):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  Live broker round trip (1b): sudo-login client → per-user broker cache
+#  Live agent round trip (1b): `portal sudo set` client → per-user agent cache
 # ────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_control_socket_roundtrip(broker_socket):
+async def test_control_socket_roundtrip(agent_socket):
     from portal_mcp_server import sudo_creds
 
     sudo_creds.clear_sudo_password()
 
-    assert sudo_creds.control_socket_path() == broker_socket
-    assert oct(broker_socket.stat().st_mode & 0o777) == oct(0o600)
+    assert sudo_creds.control_socket_path() == agent_socket
+    assert oct(agent_socket.stat().st_mode & 0o777) == oct(0o600)
 
     resp = sudo_creds.send_sudo_password("web01", "live-secret", ttl=60)
     assert resp.get("status") == "ok", resp

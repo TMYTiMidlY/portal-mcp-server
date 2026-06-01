@@ -1,9 +1,9 @@
 """named-secret injection — API tokens reach the command, never the LLM.
 
 Mirrors test_sudo_auth.py: a secret value must reach the executed command only
-through the in-memory cache (populated by the ``secret-set`` side-channel) or a
-secrets.yaml ``command`` — never as an MCP tool parameter, never in the returned
-output, never in the audit log.
+through the in-memory cache (populated by the ``portal secret set`` side-channel)
+or a secrets.yaml ``command`` — never as an MCP tool parameter, never in the
+returned output, never in the audit log.
 """
 from __future__ import annotations
 
@@ -155,16 +155,16 @@ def test_registry_warns_on_invalid_name(monkeypatch, tmp_path):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  Live broker round trip: secret-set client → per-user broker cache
+#  Live agent round trip: `portal secret set` client → per-user agent cache
 # ────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_secrets_control_socket_roundtrip(broker_socket):
+async def test_secrets_control_socket_roundtrip(agent_socket):
     from portal_mcp_server import secrets_store as ss
     ss.clear_secret()
 
-    assert ss.control_secrets_socket_path() == broker_socket
-    assert oct(broker_socket.stat().st_mode & 0o777) == oct(0o600)
+    assert ss.control_secrets_socket_path() == agent_socket
+    assert oct(agent_socket.stat().st_mode & 0o777) == oct(0o600)
 
     resp = ss.send_secret("github_token", "live-token", ttl=60)
     assert resp.get("status") == "ok", resp

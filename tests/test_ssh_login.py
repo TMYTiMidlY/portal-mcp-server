@@ -4,7 +4,7 @@ Mirrors :mod:`tests.test_sudo_auth` for the SSH-login password (the value
 asyncssh feeds during connection setup), and covers the new key→password
 fallback path in ``ConnectionManager.get_connection``: a key-auth-only host
 that hits ``asyncssh.PermissionDenied`` retries once with a side-channel
-password (cache from ``ssh-login`` or a ``password_command``), and is
+password (cache from ``portal ssh set`` or a ``password_command``), and is
 unaffected when no such password is configured.
 """
 from __future__ import annotations
@@ -37,18 +37,20 @@ def test_no_module_function_returns_or_logs_passwords():
     )
 
 
-def test_cli_ssh_login_exists_and_has_no_password_arg():
-    """The CLI subcommand entrypoint takes ``host`` (and an optional TTL),
-    never an inline password — the password is read via getpass on stdin so
-    it cannot land in process argv / shell history."""
+def test_cli_set_verb_uses_getpass_and_has_no_password_arg():
+    """`portal ssh set <host>` (and the matching sudo/secret verbs) must
+    read the value via ``getpass.getpass`` on stdin — never as a positional
+    or option, since process argv lands in shell history and ``ps``. The
+    shared verb implementation is :func:`cli._kind_set_cli`; pin both
+    invariants on its source."""
     from portal_mcp_server import cli
-    assert hasattr(cli, "_ssh_login_cli")
-    src = inspect.getsource(cli._ssh_login_cli)
-    # The argparse parser must NOT register a `password` argument.
-    assert "add_argument(\"password\"" not in src
-    assert "add_argument('password'" not in src
-    # And the value must come from getpass (no echo), not sys.argv.
+    assert hasattr(cli, "_kind_set_cli")
+    src = inspect.getsource(cli._kind_set_cli)
     assert "getpass.getpass" in src
+    # The shared verb factory must not register an inline password argument.
+    factory_src = inspect.getsource(cli._build_kind_subparser)
+    assert 'add_argument("password"' not in factory_src
+    assert "add_argument('password'" not in factory_src
 
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -83,10 +85,11 @@ def test_clear_all():
 
 
 def test_caches_are_independent_of_sudo_and_secrets():
-    """The three side-channels (ssh-login, sudo-login, secret-set) must keep
-    independent caches so clearing one cannot accidentally drop another, and
-    so a value pushed under the same key on one channel is not visible on
-    another. Pin that the three modules each hold their own dict."""
+    """The three side-channels (`portal ssh set`, `portal sudo set`,
+    `portal secret set`) must keep independent caches so clearing one
+    cannot accidentally drop another, and so a value pushed under the
+    same key on one channel is not visible on another. Pin that the three
+    modules each hold their own dict."""
     from portal_mcp_server import ssh_creds, sudo_creds, secrets_store
     ssh_creds.clear_ssh_password()
     sudo_creds.clear_sudo_password()
@@ -116,9 +119,9 @@ def test_caches_are_independent_of_sudo_and_secrets():
 
 @pytest.mark.asyncio
 async def test_resolve_prefers_cache_over_command(tmp_path):
-    """When both the ssh-login cache and a `password_command` are available
-    the cache value wins — explicit out-of-band push is the operator's
-    override of whatever the password manager has stored."""
+    """When both the `portal ssh set` cache and a `password_command` are
+    available the cache value wins — explicit out-of-band push is the
+    operator's override of whatever the password manager has stored."""
     from portal_mcp_server import ssh_creds
     from portal_mcp_server.connection_manager import ConnectionManager, HostConfig
 
@@ -192,10 +195,10 @@ class _FakeConn:
 
 
 @pytest.mark.asyncio
-async def test_key_auth_falls_back_to_ssh_login_cache(tmp_path, monkeypatch):
+async def test_key_auth_falls_back_to_ssh_set_cache(tmp_path, monkeypatch):
     """Key-mode host: asyncssh raises PermissionDenied (key refused).
     The manager retries once with a side-channel password from the
-    ssh-login cache; that retry succeeds and the connection is pooled.
+    `portal ssh set` cache; that retry succeeds and the connection is pooled.
     The second connect call must omit client_keys and carry the cached
     password."""
     from portal_mcp_server import ssh_creds
@@ -278,7 +281,7 @@ async def test_key_auth_falls_back_to_password_command(tmp_path, monkeypatch):
 async def test_key_auth_without_password_source_propagates_error(
     tmp_path, monkeypatch,
 ):
-    """Pure key host with no ssh-login cache entry and no password_command:
+    """Pure key host with no `portal ssh set` cache entry and no password_command:
     the manager must NOT retry — the original PermissionDenied propagates
     so the operator gets the real reason (wrong key, agent not running,
     etc.) instead of a misleading "no password configured" rewrite."""
@@ -398,24 +401,24 @@ async def test_auth_password_does_not_double_try_on_failure(
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  Live broker round trip: ssh-login client → per-user broker cache
+#  Live agent round trip: `portal ssh set` client → per-user agent cache
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_control_socket_roundtrip(broker_socket):
+def test_control_socket_roundtrip(agent_socket):
     from portal_mcp_server import ssh_creds
 
     ssh_creds.clear_ssh_password()
 
-    assert ssh_creds.control_socket_path() == broker_socket
-    assert oct(broker_socket.stat().st_mode & 0o777) == oct(0o600)
+    assert ssh_creds.control_socket_path() == agent_socket
+    assert oct(agent_socket.stat().st_mode & 0o777) == oct(0o600)
 
     resp = ssh_creds.send_ssh_password("web01", "live-secret", ttl=60)
     assert resp.get("status") == "ok", resp
-    assert ssh_creds.fetch_ssh_password_from_broker("web01") == "live-secret"
+    assert ssh_creds.fetch_ssh_password_from_agent("web01") == "live-secret"
 
 
-def test_live_credentials_share_one_broker_socket(broker_socket):
-    """The three side-channels share the per-user systemd broker socket."""
+def test_live_credentials_share_one_agent_socket(agent_socket):
+    """The three side-channels share the per-user systemd agent socket."""
     from portal_mcp_server import ssh_creds, sudo_creds, secrets_store
 
     paths = {
@@ -423,29 +426,29 @@ def test_live_credentials_share_one_broker_socket(broker_socket):
         sudo_creds.control_socket_path(),
         secrets_store.control_secrets_socket_path(),
     }
-    assert paths == {broker_socket}
+    assert paths == {agent_socket}
 
 
 # ────────────────────────────────────────────────────────────────────────────
 #  Peer-credential (same-uid) check on the control socket
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_send_refuses_when_peer_uid_does_not_match(broker_socket, monkeypatch):
+def test_send_refuses_when_peer_uid_does_not_match(agent_socket, monkeypatch):
     """Defence-in-depth: even if a hostile local user managed to land a
     listener at our expected socket path (e.g. on a system where the
     /tmp fallback dir was pre-created with weaker permissions), the
-    client side of ssh-login must NOT hand them the password. Verified
-    by stubbing :func:`is_same_uid_peer` to ``False`` on the client side
-    while the server (on the loopback path) accepts."""
+    client side of `portal ssh set` must NOT hand them the password.
+    Verified by stubbing :func:`is_same_uid_peer` to ``False`` on the
+    client side while the server (on the loopback path) accepts."""
     from portal_mcp_server import ssh_creds
 
     ssh_creds.clear_ssh_password()
-    assert broker_socket.exists()
+    assert agent_socket.exists()
 
     # Simulate the peer-uid check failing on the client side: pretend the
     # socket we just connected to belongs to someone else's uid.
     monkeypatch.setattr(
-        "portal_mcp_server.credential_broker.is_same_uid_peer",
+        "portal_mcp_server.credential_agent.is_same_uid_peer",
         lambda _sock: False,
     )
 
@@ -453,7 +456,7 @@ def test_send_refuses_when_peer_uid_does_not_match(broker_socket, monkeypatch):
         ssh_creds.send_ssh_password("web01", "should-never-be-sent")
 
     monkeypatch.setattr(
-        "portal_mcp_server.credential_broker.is_same_uid_peer",
+        "portal_mcp_server.credential_agent.is_same_uid_peer",
         lambda _sock: True,
     )
-    assert ssh_creds.fetch_ssh_password_from_broker("web01") is None
+    assert ssh_creds.fetch_ssh_password_from_agent("web01") is None
