@@ -1,3 +1,31 @@
+## v2.0.0 (2026-06-01)
+
+### BREAKING CHANGE
+
+- - ./config/hosts.yaml / ./config/policies.yaml / ./logs/ are no longer
+  auto-loaded. Set PORTAL_HOSTS_YAML / PORTAL_POLICIES_YAML /
+  PORTAL_SECRETS_YAML / PORTAL_LOG_DIR explicitly, or place files at
+  the XDG defaults (~/.config/portal-mcp-server/ and
+  ~/.local/state/portal-mcp-server/logs/).
+- Template files moved: config/{hosts,secrets}.example.yaml and
+  config/policies.yaml are now examples/{hosts,secrets,policies}.yaml.
+- Tools that previously returned an error string (BLOCKED, Invalid,
+  Error: …) now raise an MCP error response with isError=true. Clients
+  must handle these as tool failures rather than successful results
+  whose text happens to start with "Error". Tests doing
+  `assert "BLOCKED" in result` need to switch to
+  `with pytest.raises(ToolError, match="BLOCKED"):` (see updated
+  tests/test_policy_enforcement.py, test_gate_coverage_fixes.py,
+  test_transfer_lists.py, test_secret_injection.py for the pattern).
+
+### Feat
+
+- add systemd credential broker
+
+### Refactor
+
+- env+XDG-only paths, examples/ template dir, ToolError errors
+
 ## v1.4.0 (2026-05-31)
 
 ### Feat
