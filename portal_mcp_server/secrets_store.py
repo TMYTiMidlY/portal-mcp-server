@@ -21,10 +21,9 @@ Two sources, both keeping the value out of the model:
      "pass show api/github"}}``. Symmetric to ``password_command``; executed via
      :func:`connection_manager._exec_secret_command`.
 
-  2. **Live input (secret-set)** — ``portal-mcp-server secret-set <name>``
-     prompts with :func:`getpass.getpass` (no echo) in a *separate* terminal and
-     pushes the value into the per-user systemd credential broker, cached with a
-     TTL.
+  2. **Live input (portal secret set)** — ``portal secret set <name>`` prompts
+     with :func:`getpass.getpass` (no echo) in a *separate* terminal and pushes
+     the value into the per-user systemd credential agent, cached with a TTL.
 
 Nothing in this module is ever written to disk.
 """
@@ -39,8 +38,8 @@ from typing import Optional
 
 import yaml
 
-from . import credential_broker
-from .paths import credential_broker_socket_path, secrets_yaml_path
+from . import credential_agent
+from .paths import credential_agent_socket_path, secrets_yaml_path
 
 logger = logging.getLogger("portal_mcp.secrets")
 
@@ -124,7 +123,7 @@ def _load_registry() -> None:
                         "IGNORED (plaintext secrets in config files or "
                         "backups are a leak risk). Use 'command:' (prints "
                         "the secret to stdout) or "
-                        f"the out-of-band `secret-set {name}`."
+                        f"the out-of-band `portal secret set {name}`."
                     )
                     logger.error("secrets.yaml: %s", warnings[-1])
             else:
@@ -132,8 +131,8 @@ def _load_registry() -> None:
             if not command:
                 warnings.append(
                     f"secret '{name}' has no 'command' — it is loaded but cannot "
-                    "be resolved from secrets.yaml (the secret-set cache may still "
-                    "provide it)."
+                    "be resolved from secrets.yaml (the agent cache populated by "
+                    "`portal secret set` may still provide it)."
                 )
                 logger.error("secrets.yaml: %s", warnings[-1])
             else:
@@ -163,7 +162,7 @@ def registry_warnings() -> dict[str, list[str]]:
 
 # ─────────────────────────────────────────────────────────────────────
 # Local in-process TTL cache (mainly used by tests and direct embedding);
-# normal live input is stored in the per-user credential broker.
+# normal live input is stored in the per-user credential agent.
 # ─────────────────────────────────────────────────────────────────────
 
 def cache_secret(name: str, value: str, ttl: float = DEFAULT_TTL_SEC) -> None:
@@ -194,7 +193,7 @@ def clear_secret(name: Optional[str] = None) -> None:
 async def resolve_secret(name: str) -> Optional[str]:
     """Return the value for ``name`` or ``None`` if no source is configured.
 
-    Order: local in-memory cache → per-user credential broker →
+    Order: local in-memory cache → per-user credential agent →
     secrets.yaml ``command``.
     Returns ``None`` only when *neither* source exists, so the caller can emit a
     friendly hint. If a secrets.yaml command IS configured but fails, the
@@ -204,7 +203,7 @@ async def resolve_secret(name: str) -> Optional[str]:
     value = _get_cached(name)
     if value is not None:
         return value
-    value = await asyncio.to_thread(credential_broker.fetch, "secret", name)
+    value = await asyncio.to_thread(credential_agent.fetch, "secret", name)
     if value is not None:
         return value
     command = secret_command_for(name)
@@ -234,14 +233,14 @@ def redact(text: str, values) -> str:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Per-user broker socket (the side-channel for `secret-set`).
+# Per-user agent socket (the side-channel for `portal secret set`).
 # ─────────────────────────────────────────────────────────────────────
 
 def control_secrets_socket_path():
-    """Compatibility name for the per-user credential broker socket path."""
-    return credential_broker_socket_path()
+    """Compatibility name for the per-user credential agent socket path."""
+    return credential_agent_socket_path()
 
 
 def send_secret(name: str, value: str, ttl: float = DEFAULT_TTL_SEC) -> dict:
-    """Client side of ``secret-set``: push a value to the per-user broker."""
-    return credential_broker.store("secret", name, value, ttl=ttl)
+    """Client side of ``portal secret set``: push a value to the per-user agent."""
+    return credential_agent.store("secret", name, value, ttl=ttl)

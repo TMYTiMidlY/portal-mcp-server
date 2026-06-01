@@ -17,20 +17,37 @@ own ``.git/``, ``gh``, ``docker``, ``kubectl``, ``rclone``, ``borg``,
 """
 from __future__ import annotations
 
+import logging
 import os
 import json
+from functools import lru_cache
 from pathlib import Path
 
 _APP = "portal-mcp-server"
 
+logger = logging.getLogger(__name__)
 
-class CredentialBrokerNotConfigured(RuntimeError):
+
+class CredentialAgentNotConfigured(RuntimeError):
     pass
 
 
+@lru_cache(maxsize=None)
+def _warn_relative_xdg(env_var: str, raw: str) -> None:
+    logger.warning(
+        "Ignoring non-absolute %s=%r per XDG Base Directory spec; "
+        "falling back to user-home default.", env_var, raw,
+    )
+
+
 def _xdg_dir(env_var: str, fallback: str) -> Path:
-    base = os.environ.get(env_var)
-    return (Path(base).expanduser() if base else Path.home() / fallback) / _APP
+    raw = os.environ.get(env_var)
+    if raw:
+        candidate = Path(raw).expanduser()
+        if candidate.is_absolute():
+            return candidate / _APP
+        _warn_relative_xdg(env_var, raw)
+    return Path.home() / fallback / _APP
 
 
 def xdg_config_home() -> Path:
@@ -69,18 +86,18 @@ def systemd_user_runtime_dir() -> Path:
     base = os.environ.get("XDG_RUNTIME_DIR")
     if base:
         return Path(base).expanduser()
-    raise CredentialBrokerNotConfigured(
-        "XDG_RUNTIME_DIR is not set. Run broker-install from a systemd user "
-        "session, or pass --socket explicitly."
+    raise CredentialAgentNotConfigured(
+        "XDG_RUNTIME_DIR is not set. Run `portal agent install` from a "
+        "systemd user session, or pass --socket explicitly."
     )
 
 
-def credential_broker_config_path() -> Path:
-    return xdg_config_home() / "broker.json"
+def credential_agent_config_path() -> Path:
+    return xdg_config_home() / "agent.json"
 
 
-def _configured_broker_socket_path() -> Path | None:
-    path = credential_broker_config_path()
+def _configured_agent_socket_path() -> Path | None:
+    path = credential_agent_config_path()
     if not path.exists():
         return None
     try:
@@ -91,20 +108,20 @@ def _configured_broker_socket_path() -> Path | None:
     return Path(value).expanduser() if isinstance(value, str) and value else None
 
 
-def credential_broker_socket_path() -> Path:
-    override = os.environ.get("PORTAL_CREDENTIAL_BROKER_SOCKET")
+def credential_agent_socket_path() -> Path:
+    override = os.environ.get("PORTAL_CREDENTIAL_AGENT_SOCKET")
     if override:
         return Path(override).expanduser()
-    configured = _configured_broker_socket_path()
+    configured = _configured_agent_socket_path()
     if configured is not None:
         return configured
-    raise CredentialBrokerNotConfigured(
-        "Portal credential broker socket is not configured. Run "
-        "`portal-mcp-server broker-install --now` first."
+    raise CredentialAgentNotConfigured(
+        "Portal credential agent socket is not configured. Run "
+        "`portal agent install --now` first."
     )
 
 
-def default_systemd_credential_broker_socket_path() -> Path:
+def default_systemd_credential_agent_socket_path() -> Path:
     return systemd_user_runtime_dir() / _APP / "credentials.sock"
 
 

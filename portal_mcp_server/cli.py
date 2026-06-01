@@ -68,7 +68,7 @@ async def _resolve_secrets(names: "list[str]"):
     redaction). Returns ``(env, values, error)``: on the first unresolved name,
     ``env``/``values`` are partial and ``error`` is a friendly JSON-able string
     naming the missing secret (never the value). The agent only ever passes
-    NAMES; values are fetched from secrets.yaml or the secret-set cache.
+    NAMES; values are fetched from secrets.yaml or the `portal secret set` cache.
     """
     from . import secrets_store
 
@@ -84,7 +84,7 @@ async def _resolve_secrets(names: "list[str]"):
                 f"secret '{name}' is not available and the command was NOT run. "
                 f"Ask the user to provide it out-of-band: prefer an interactive "
                 f"input/choice tool (e.g. ask_user) to request that they run "
-                f"`portal-mcp-server secret-set {name}` in a separate terminal and "
+                f"`portal secret set {name}` in a separate terminal and "
                 f"confirm when done, then retry this call. If you have no such tool, "
                 f"tell the user what to run and end your turn to wait for their next "
                 f"message. (Alternatively an operator can add a "
@@ -894,7 +894,7 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
 
     use_sudo: run the command via `sudo -S`, feeding a password obtained
         out-of-band (NEVER passed by the agent). The password comes from the
-        per-user credential broker populated by `portal-mcp-server sudo-login <host>`, or
+        per-user credential agent populated by `portal sudo set <host>`, or
         from the host's `sudo_password_command` in hosts.yaml. Because sudo
         reads stdin, this runs as a ONE-SHOT command (not the persistent
         session): cwd/env from prior portal_bash calls do not apply.
@@ -902,7 +902,7 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
     secrets: a list of named secrets (e.g. ["github_token"]) to inject as
         environment variables for THIS command only. You pass the NAME, never
         the value: the server resolves each from secrets.yaml or the
-        `secret-set` cache and exports it as the uppercased env var (github_token
+        `portal secret set` cache and exports it as the uppercased env var (github_token
         → $GITHUB_TOKEN). Reference it in `command` as `$GITHUB_TOKEN`. The value
         is fed over SSH stdin (never on argv/audit) and is redacted to *** in the
         returned output. Like use_sudo this is a ONE-SHOT command (cwd/env from
@@ -932,7 +932,7 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
                 "was NOT run. Ask the user to provide it out-of-band: "
                 "prefer an interactive input/choice tool (e.g. ask_user) "
                 "to request that they run "
-                f"`portal-mcp-server sudo-login {host}` in a separate "
+                f"`portal sudo set {host}` in a separate "
                 "terminal and confirm when done, then retry this call. If "
                 "you have no such tool, tell the user what to run and end "
                 "your turn to wait for their next message. (Alternatively "
@@ -961,7 +961,7 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
 
     secrets: a list of named secrets (e.g. ["github_token"]). You pass the NAME,
         never the value: the server resolves each from secrets.yaml or the
-        `secret-set` cache and exports it as the uppercased env var (github_token
+        `portal secret set` cache and exports it as the uppercased env var (github_token
         → $GITHUB_TOKEN) into the child process environment (never on argv/audit).
         Reference it in `command` as `$GITHUB_TOKEN`. Any echo of the value in the
         output is redacted to ***.
@@ -1011,200 +1011,125 @@ async def portal_bash_status() -> str:
 # ═══════════════════════════════════════════════════════════════════
 # ENTRYPOINT
 # ═══════════════════════════════════════════════════════════════════
+#
+# Credential agent CLI design — single source of truth
+# ----------------------------------------------------
+# The CLI exposes four namespaces for credential management. The conceptual
+# name (in docs, code, systemd units) is "credential agent"; the CLI uses a
+# shorter top-level form for daily ergonomics.
+#
+#   portal agent install [--now]          install systemd --user units
+#   portal agent uninstall                tear them down
+#   portal agent run [--socket PATH]      daemon entry (used by systemd
+#                                         ExecStart); not for humans
+#   portal agent status                   ping the agent + count entries
+#   portal agent clear                    clear the entire cache
+#
+#   portal ssh    set HOST     [--ttl N]  prompt (no echo) and cache SSH login pw
+#   portal ssh    confirm HOST [--ttl N]  prompt twice, compare, then cache
+#   portal ssh    show HOST               fingerprint + TTL (NO plaintext)
+#   portal ssh    clear HOST              drop one entry
+#   portal ssh    list                    list keys + fingerprint + TTL
+#
+#   portal sudo   {set,confirm,show,clear,list}   same shape, sudo password
+#   portal secret {set,confirm,show,clear,list}   same shape, named secret
+#
+# Design principle — *plaintext never leaves the agent's memory*. There is no
+# `show plaintext` command, no `dump` command. Every human-facing verb
+# returns either a fingerprint (sha256[:16]) + TTL or the plaintext is fed
+# directly to a same-uid client process (the SSH connect loop, sudo stdin,
+# $env injection). Same posture as ssh-agent / gpg-agent / vault agent /
+# polkit-agent: any echo to a TTY is one screenshot / scrollback / asciinema
+# / OBS overlay away from a leak, so the agent simply refuses to do it.
+# Sanity-check a stored credential with `confirm` (re-type and compare) or
+# `show` (compare fingerprints); export with a `password_command` from your
+# password manager instead of asking the agent to echo.
 
-def _broker_missing_message(path=None) -> str:
+_CREDENTIAL_SUBCOMMANDS = ("agent", "ssh", "sudo", "secret")
+_CREDENTIAL_KINDS = ("ssh", "sudo", "secret")
+
+
+def _agent_missing_message(path=None) -> str:
     first = (
-        f"No portal credential broker socket at {path}."
+        f"No portal credential agent socket at {path}."
         if path is not None
-        else "Portal credential broker socket is not configured."
+        else "Portal credential agent socket is not configured."
     )
     return (
         f"{first}\n"
-        "Install/start the per-user broker first:\n"
-        "  portal-mcp-server broker-install --now\n"
+        "Install/start the per-user agent first:\n"
+        "  portal agent install --now\n"
         "Then retry this command."
     )
 
 
-def _broker_path_or_exit(path_func):
+def _agent_path_or_exit(path_func):
     try:
         path = path_func()
     except RuntimeError as e:
-        print(f"{e}\n\n{_broker_missing_message()}", file=sys.stderr)
+        print(f"{e}\n\n{_agent_missing_message()}", file=sys.stderr)
         sys.exit(1)
     if path.exists():
         return path
-    print(_broker_missing_message(path), file=sys.stderr)
+    print(_agent_missing_message(path), file=sys.stderr)
     sys.exit(1)
 
 
-def _ssh_login_cli(argv: list[str]) -> None:
-    """`portal-mcp-server ssh-login <host>` — push an SSH-login password to a
-    per-user broker, out-of-band (prompted with no echo; never via the LLM)."""
-    import argparse
-    import getpass
-    from .ssh_creds import (send_ssh_password, control_socket_path,
-                            DEFAULT_TTL_SEC)
+def _kind_key_noun(kind: str) -> str:
+    """User-facing label for the credential kind's key argument."""
+    return {"ssh": "host", "sudo": "host", "secret": "name"}[kind]
 
-    p = argparse.ArgumentParser(
-        prog="portal-mcp-server ssh-login",
-        description="Provide an SSH-login password to the per-user credential broker "
-                    "(cached in memory with a TTL; never written to disk, never "
-                    "seen by the agent). Used as a side-channel for `auth: "
-                    "password` hosts and as a fallback when key auth is refused.",
-    )
-    p.add_argument("host", help="host alias the password is for")
-    p.add_argument("--ttl", type=int, default=DEFAULT_TTL_SEC,
-                   help=f"seconds before the cached password expires "
-                        f"(default {DEFAULT_TTL_SEC})")
-    a = p.parse_args(argv)
 
-    _broker_path_or_exit(control_socket_path)
-    pw = getpass.getpass(f"SSH password for host '{a.host}': ")
-    if not pw:
-        print("Empty password, aborted.", file=sys.stderr)
-        sys.exit(1)
+def _kind_prompt(kind: str, key: str) -> str:
+    """getpass prompt for a kind/key."""
+    return {
+        "ssh": f"SSH password for host '{key}': ",
+        "sudo": f"sudo password for host '{key}': ",
+        "secret": f"value for secret '{key}': ",
+    }[kind]
+
+
+def _kind_label(kind: str) -> str:
+    """Human label for the credential kind (singular)."""
+    return {"ssh": "SSH password",
+            "sudo": "sudo password",
+            "secret": "secret"}[kind]
+
+
+def _format_ttl(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m{seconds % 60}s"
+    return f"{seconds // 3600}h{(seconds % 3600) // 60}m"
+
+
+# ── portal agent ─────────────────────────────────────────────────────
+
+def _agent_install_cli(args) -> int:
+    from .credential_agent import install_user_units, SOCKET_UNIT
     try:
-        resp = send_ssh_password(a.host, pw, ttl=a.ttl)
-    except (OSError, RuntimeError) as e:
-        print(f"Failed to reach credential broker: {e}", file=sys.stderr)
-        sys.exit(1)
-    if resp.get("status") == "ok":
-        print(f"SSH password cached for '{a.host}' (expires in {a.ttl}s).")
-    else:
-        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _sudo_login_cli(argv: list[str]) -> None:
-    """`portal-mcp-server sudo-login <host>` — push a sudo password to a
-    per-user broker, out-of-band (prompted with no echo; never via the LLM)."""
-    import argparse
-    import getpass
-    from .sudo_creds import (send_sudo_password, control_socket_path,
-                             DEFAULT_TTL_SEC)
-
-    p = argparse.ArgumentParser(
-        prog="portal-mcp-server sudo-login",
-        description="Provide a sudo password to the per-user credential broker "
-                    "(cached in memory with a TTL; never written to disk, never "
-                    "seen by the agent).",
-    )
-    p.add_argument("host", help="host alias the password is for")
-    p.add_argument("--ttl", type=int, default=DEFAULT_TTL_SEC,
-                   help=f"seconds before the cached password expires "
-                        f"(default {DEFAULT_TTL_SEC})")
-    a = p.parse_args(argv)
-
-    _broker_path_or_exit(control_socket_path)
-    pw = getpass.getpass(f"sudo password for host '{a.host}': ")
-    if not pw:
-        print("Empty password, aborted.", file=sys.stderr)
-        sys.exit(1)
-    try:
-        resp = send_sudo_password(a.host, pw, ttl=a.ttl)
-    except (OSError, RuntimeError) as e:
-        print(f"Failed to reach credential broker: {e}", file=sys.stderr)
-        sys.exit(1)
-    if resp.get("status") == "ok":
-        print(f"sudo password cached for '{a.host}' (expires in {a.ttl}s).")
-    else:
-        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _secret_set_cli(argv: list[str]) -> None:
-    """`portal-mcp-server secret-set <name>` — push a named secret (API token)
-    to a per-user broker, out-of-band (prompted with no echo; never via the LLM)."""
-    import argparse
-    import getpass
-    from .secrets_store import (send_secret, control_secrets_socket_path,
-                                DEFAULT_TTL_SEC)
-
-    p = argparse.ArgumentParser(
-        prog="portal-mcp-server secret-set",
-        description="Provide a named secret (e.g. an API token) to the per-user "
-                    "credential broker (cached in memory with a TTL; never "
-                    "written to disk, never seen by the agent). Reference it "
-                    "later by name via the tools' `secrets` parameter.",
-    )
-    p.add_argument("name", help="secret name (e.g. github_token)")
-    p.add_argument("--ttl", type=int, default=DEFAULT_TTL_SEC,
-                   help=f"seconds before the cached secret expires "
-                        f"(default {DEFAULT_TTL_SEC})")
-    a = p.parse_args(argv)
-
-    _broker_path_or_exit(control_secrets_socket_path)
-    value = getpass.getpass(f"value for secret '{a.name}': ")
-    if not value:
-        print("Empty value, aborted.", file=sys.stderr)
-        sys.exit(1)
-    try:
-        resp = send_secret(a.name, value, ttl=a.ttl)
-    except (OSError, RuntimeError) as e:
-        print(f"Failed to reach credential broker: {e}", file=sys.stderr)
-        sys.exit(1)
-    if resp.get("status") == "ok":
-        print(f"secret '{a.name}' cached (expires in {a.ttl}s).")
-    else:
-        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
-        sys.exit(1)
-
-
-def _broker_cli(argv: list[str]) -> None:
-    from .credential_broker import main as broker_main
-    broker_main(argv)
-
-
-def _broker_install_cli(argv: list[str]) -> None:
-    import argparse
-    from pathlib import Path
-    from .credential_broker import install_user_units, SOCKET_UNIT
-
-    p = argparse.ArgumentParser(
-        prog="portal-mcp-server broker-install",
-        description="Install the per-user systemd socket-activated credential broker.",
-    )
-    p.add_argument("--socket", type=Path, default=None,
-                   help="override ListenStream path; default unit uses systemd %%t")
-    p.add_argument("--now", action="store_true",
-                   help=f"run systemctl --user enable --now {SOCKET_UNIT}")
-    a = p.parse_args(argv)
-
-    try:
-        res = install_user_units(socket_path=a.socket, enable_now=a.now)
+        res = install_user_units(socket_path=args.socket, enable_now=args.now)
     except Exception as e:
-        print(f"Failed to install credential broker units: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    print("Installed portal credential broker user units:")
-    print(f"  socket unit:  {res['socket_unit']}")
-    print(f"  service unit: {res['service_unit']}")
-    print(f"  config:       {res['config_path']}")
+        print(f"Failed to install credential agent units: {e}", file=sys.stderr)
+        return 1
+    print("Installed portal credential agent user units:")
+    print(f"  socket unit:   {res['socket_unit']}")
+    print(f"  service unit:  {res['service_unit']}")
+    print(f"  config:        {res['config_path']}")
     print(f"  recorded path: {res['socket_path']}")
-    if not a.now:
+    if not args.now:
         print(f"Enable it with: systemctl --user enable --now {SOCKET_UNIT}")
+    return 0
 
 
-def _broker_uninstall_cli(argv: list[str]) -> None:
-    import argparse
-    from .credential_broker import uninstall_user_units
-
-    p = argparse.ArgumentParser(
-        prog="portal-mcp-server broker-uninstall",
-        description="Stop/disable and remove the per-user credential broker units.",
-    )
-    p.add_argument("--keep-config", action="store_true",
-                   help="keep ~/.config/portal-mcp-server/broker.json")
-    p.add_argument("--no-stop", action="store_true",
-                   help="remove files only; do not call systemctl --user")
-    a = p.parse_args(argv)
-
+def _agent_uninstall_cli(args) -> int:
+    from .credential_agent import uninstall_user_units
     res = uninstall_user_units(
-        stop_now=not a.no_stop,
-        remove_config=not a.keep_config,
+        stop_now=not args.no_stop,
+        remove_config=not args.keep_config,
     )
-    print("Uninstalled portal credential broker user units.")
+    print("Uninstalled portal credential agent user units.")
     if res["removed"]:
         print("Removed:")
         for path in res["removed"]:
@@ -1213,29 +1138,352 @@ def _broker_uninstall_cli(argv: list[str]) -> None:
         print("Warnings:")
         for err in res["errors"]:
             print(f"  systemctl --user: {err}")
+    return 0
+
+
+def _agent_run_cli(args) -> int:
+    from .credential_agent import serve_forever
+    serve_forever(args.socket)
+    return 0
+
+
+def _agent_status_cli(_args) -> int:
+    from . import credential_agent
+    from .paths import credential_agent_socket_path
+    try:
+        path = credential_agent_socket_path()
+    except RuntimeError as e:
+        print(f"{e}", file=sys.stderr)
+        return 1
+    if not path.exists():
+        print(f"agent socket: {path} (does not exist)")
+        print("agent: not running (run `portal agent install --now`).")
+        return 1
+    try:
+        resp = credential_agent.status()
+    except (OSError, RuntimeError) as e:
+        print(f"agent socket: {path}")
+        print(f"agent: unreachable — {e}", file=sys.stderr)
+        return 1
+    if resp.get("status") != "ok":
+        print(f"agent socket: {path}")
+        print(f"agent: error — {resp.get('error', 'unknown')}", file=sys.stderr)
+        return 1
+    counts = resp.get("counts", {})
+    print(f"agent socket: {path}")
+    print("agent: running")
+    total = sum(counts.values())
+    print(f"cached entries: {total} total")
+    for kind in _CREDENTIAL_KINDS:
+        print(f"  {kind:<7s} {counts.get(kind, 0)}")
+    return 0
+
+
+def _agent_clear_cli(_args) -> int:
+    from . import credential_agent
+    errors: list[str] = []
+    for kind in _CREDENTIAL_KINDS:
+        try:
+            resp = credential_agent.clear(kind)
+        except (OSError, RuntimeError) as e:
+            errors.append(f"{kind}: {e}")
+            continue
+        if resp.get("status") != "ok":
+            errors.append(f"{kind}: {resp.get('error', 'unknown')}")
+    if errors:
+        print("Some kinds could not be cleared:")
+        for err in errors:
+            print(f"  {err}", file=sys.stderr)
+        return 1
+    print("Cleared all cached credentials (ssh / sudo / secret).")
+    return 0
+
+
+def _build_agent_subparser(sub):
+    import argparse
+    from pathlib import Path
+    from .credential_agent import SOCKET_UNIT
+
+    p = sub.add_parser(
+        "agent",
+        help="Manage the per-user credential agent (systemd --user only).",
+        description="Install/run/inspect the per-user credential agent. The "
+                    "agent is a long-lived process that holds TTL-cached "
+                    "ssh/sudo/secret values in memory and is reached over a "
+                    "Unix socket owned by your uid. Install via systemd "
+                    "--user; the agent is socket-activated on first request.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    asub = p.add_subparsers(dest="verb", required=True, metavar="<verb>")
+
+    p_install = asub.add_parser(
+        "install", help="Install systemd --user .socket + .service units.")
+    p_install.add_argument(
+        "--socket", type=Path, default=None,
+        help="override ListenStream path; default unit uses systemd %%t")
+    p_install.add_argument(
+        "--now", action="store_true",
+        help=f"run systemctl --user enable --now {SOCKET_UNIT}")
+    p_install.set_defaults(func=_agent_install_cli)
+
+    p_uninstall = asub.add_parser(
+        "uninstall", help="Stop/disable and remove the agent's user units.")
+    p_uninstall.add_argument(
+        "--keep-config", action="store_true",
+        help="keep ~/.config/portal-mcp-server/agent.json")
+    p_uninstall.add_argument(
+        "--no-stop", action="store_true",
+        help="remove files only; do not call systemctl --user")
+    p_uninstall.set_defaults(func=_agent_uninstall_cli)
+
+    p_run = asub.add_parser(
+        "run",
+        help="Daemon entry — used by the systemd service ExecStart; not "
+             "for interactive use.")
+    p_run.add_argument(
+        "--socket", type=Path, default=None,
+        help="manual socket path for non-systemd debugging/tests")
+    p_run.set_defaults(func=_agent_run_cli)
+
+    p_status = asub.add_parser(
+        "status",
+        help="Ping the agent and print cached-entry counts per kind.")
+    p_status.set_defaults(func=_agent_status_cli)
+
+    p_clear = asub.add_parser(
+        "clear",
+        help="Clear ALL cached credentials (ssh, sudo, secret).")
+    p_clear.set_defaults(func=_agent_clear_cli)
+
+
+# ── portal {ssh,sudo,secret} ─────────────────────────────────────────
+
+def _kind_set_cli(args) -> int:
+    import getpass
+    from . import credential_agent
+    from .paths import credential_agent_socket_path
+    _agent_path_or_exit(credential_agent_socket_path)
+    prompt = _kind_prompt(args.kind, args.key)
+    value = getpass.getpass(prompt)
+    if not value:
+        print("Empty value, aborted.", file=sys.stderr)
+        return 1
+    try:
+        resp = credential_agent.store(args.kind, args.key, value, ttl=args.ttl)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential agent: {e}", file=sys.stderr)
+        return 1
+    if resp.get("status") != "ok":
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        return 1
+    print(f"{_kind_label(args.kind)} cached for "
+          f"'{args.key}' (expires in {_format_ttl(args.ttl)}).")
+    return 0
+
+
+def _kind_confirm_cli(args) -> int:
+    import getpass
+    from . import credential_agent
+    from .paths import credential_agent_socket_path
+    _agent_path_or_exit(credential_agent_socket_path)
+    prompt = _kind_prompt(args.kind, args.key)
+    first = getpass.getpass(prompt)
+    if not first:
+        print("Empty value, aborted.", file=sys.stderr)
+        return 1
+    again = getpass.getpass(f"confirm: {prompt}")
+    if first != again:
+        print("Values differ; nothing cached.", file=sys.stderr)
+        return 1
+    try:
+        resp = credential_agent.store(args.kind, args.key, first, ttl=args.ttl)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential agent: {e}", file=sys.stderr)
+        return 1
+    if resp.get("status") != "ok":
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        return 1
+    print(f"{_kind_label(args.kind)} cached for "
+          f"'{args.key}' (entries matched, expires in {_format_ttl(args.ttl)}).")
+    return 0
+
+
+def _kind_show_cli(args) -> int:
+    from . import credential_agent
+    from .paths import credential_agent_socket_path
+    _agent_path_or_exit(credential_agent_socket_path)
+    try:
+        resp = credential_agent.fingerprint(args.kind, args.key)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential agent: {e}", file=sys.stderr)
+        return 1
+    status = resp.get("status")
+    if status == "missing":
+        print(f"No cached {_kind_label(args.kind)} for '{args.key}'.")
+        return 1
+    if status != "ok":
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        return 1
+    fp = resp.get("fingerprint", "?")
+    ttl = int(resp.get("ttl_remaining", 0))
+    noun = _kind_key_noun(args.kind)
+    print(f"{_kind_label(args.kind)} for {noun} '{args.key}':")
+    print(f"  fingerprint: sha256:{fp}  (plaintext is NOT shown by design)")
+    print(f"  expires in:  {_format_ttl(ttl)}")
+    return 0
+
+
+def _kind_clear_cli(args) -> int:
+    from . import credential_agent
+    from .paths import credential_agent_socket_path
+    _agent_path_or_exit(credential_agent_socket_path)
+    try:
+        resp = credential_agent.clear(args.kind, args.key)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential agent: {e}", file=sys.stderr)
+        return 1
+    if resp.get("status") != "ok":
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        return 1
+    noun = _kind_key_noun(args.kind)
+    print(f"Cleared {_kind_label(args.kind)} for {noun} '{args.key}'.")
+    return 0
+
+
+def _kind_list_cli(args) -> int:
+    from . import credential_agent
+    from .paths import credential_agent_socket_path
+    _agent_path_or_exit(credential_agent_socket_path)
+    try:
+        resp = credential_agent.list_entries(args.kind)
+    except (OSError, RuntimeError) as e:
+        print(f"Failed to reach credential agent: {e}", file=sys.stderr)
+        return 1
+    if resp.get("status") != "ok":
+        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+        return 1
+    entries = resp.get("entries", [])
+    if not entries:
+        print(f"No cached {_kind_label(args.kind)} entries.")
+        return 0
+    noun = _kind_key_noun(args.kind)
+    width = max(len(noun), max(len(e["key"]) for e in entries))
+    print(f"{noun:<{width}s}  fingerprint        expires in")
+    for e in entries:
+        fp = e.get("fingerprint", "?")
+        ttl = int(e.get("ttl_remaining", 0))
+        print(f"{e['key']:<{width}s}  sha256:{fp}  {_format_ttl(ttl)}")
+    return 0
+
+
+def _build_kind_subparser(sub, kind: str):
+    import argparse
+    from .credential_agent import DEFAULT_TTL_SEC
+
+    noun = _kind_key_noun(kind)
+    descriptions = {
+        "ssh": "Manage cached SSH login passwords (side-channel for "
+               "`auth: password` hosts and the key-auth fallback). "
+               "Cached in the per-user credential agent's memory only.",
+        "sudo": "Manage cached sudo passwords. Fed to `sudo -S` on stdin "
+                "when an MCP call sets use_sudo=True. Cached in the "
+                "per-user credential agent's memory only.",
+        "secret": "Manage cached named secrets (API tokens). Injected as "
+                  "$NAME env vars when an MCP call lists the secret in "
+                  "its `secrets` parameter. Cached in the per-user "
+                  "credential agent's memory only.",
+    }
+    p = sub.add_parser(
+        kind,
+        help=descriptions[kind].split(".")[0] + ".",
+        description=descriptions[kind] + "\n\n"
+                    "Design principle: there is no `show plaintext` verb. "
+                    "Use `confirm` to sanity-check (re-type and compare), "
+                    "`show` to view sha256 fingerprint + TTL, or `list` "
+                    "for an overview. The plaintext is only ever handed to "
+                    "the same-uid SSH/sudo/$env consumer.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ksub = p.add_subparsers(dest="verb", required=True, metavar="<verb>")
+
+    p_set = ksub.add_parser(
+        "set",
+        help=f"Prompt (no echo) for a {_kind_label(kind)} for the given "
+             f"{noun} and cache it.")
+    p_set.add_argument(noun, help=f"{noun} the value is for")
+    p_set.add_argument(
+        "--ttl", type=int, default=DEFAULT_TTL_SEC,
+        help=f"seconds before the cached value expires (default {DEFAULT_TTL_SEC})")
+    p_set.set_defaults(kind=kind, key=None, func=_kind_set_cli)
+
+    p_confirm = ksub.add_parser(
+        "confirm",
+        help=f"Prompt twice (no echo) and cache only if the two entries match.")
+    p_confirm.add_argument(noun, help=f"{noun} the value is for")
+    p_confirm.add_argument(
+        "--ttl", type=int, default=DEFAULT_TTL_SEC,
+        help=f"seconds before the cached value expires (default {DEFAULT_TTL_SEC})")
+    p_confirm.set_defaults(kind=kind, key=None, func=_kind_confirm_cli)
+
+    p_show = ksub.add_parser(
+        "show",
+        help="Print sha256 fingerprint + remaining TTL (NO plaintext).")
+    p_show.add_argument(noun, help=f"{noun} to look up")
+    p_show.set_defaults(kind=kind, key=None, func=_kind_show_cli)
+
+    p_clear = ksub.add_parser(
+        "clear", help=f"Drop the cached {_kind_label(kind)} for one {noun}.")
+    p_clear.add_argument(noun, help=f"{noun} to clear")
+    p_clear.set_defaults(kind=kind, key=None, func=_kind_clear_cli)
+
+    p_list = ksub.add_parser(
+        "list",
+        help=f"List every cached {_kind_label(kind)} ({noun}, fingerprint, TTL).")
+    p_list.set_defaults(kind=kind, key=None, func=_kind_list_cli)
+
+
+def _credential_main(argv: list[str]) -> int:
+    """Subcommand dispatcher for `portal agent / ssh / sudo / secret`.
+
+    argv[0] is the subcommand name (one of _CREDENTIAL_SUBCOMMANDS).
+    """
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="portal",
+        description="Portal credential agent CLI — manage cached SSH / sudo / "
+                    "secret values held by the per-user agent process.",
+    )
+    sub = parser.add_subparsers(dest="subcmd", required=True, metavar="<subcmd>")
+    _build_agent_subparser(sub)
+    for kind in _CREDENTIAL_KINDS:
+        _build_kind_subparser(sub, kind)
+
+    # Argparse copies dest values from sub-sub-parsers onto the Namespace,
+    # so args.kind / args.key are populated by the per-verb set_defaults.
+    # `key` defaults to None and is overwritten by the positional argument
+    # via dest aliasing below.
+    args = parser.parse_args(argv)
+    # For kind subparsers, the positional was named after the noun
+    # ("host" / "name"); copy it onto the conventional `key` field so the
+    # verb handlers don't have to special-case.
+    if args.subcmd in _CREDENTIAL_KINDS:
+        noun = _kind_key_noun(args.subcmd)
+        args.key = getattr(args, noun, None)
+    return args.func(args)
 
 
 def main() -> None:
-    """CLI entrypoint registered as `portal-mcp-server`."""
+    """CLI entrypoint registered as `portal-mcp-server` / `portal`.
+
+    Dispatch:
+      * `portal <cred-subcmd> ...` — credential agent CLI
+        (cred-subcmd ∈ {agent, ssh, sudo, secret})
+      * everything else — start the MCP server (default stdio transport).
+    """
     import argparse
-    if len(sys.argv) >= 2 and sys.argv[1] == "broker":
-        _broker_cli(sys.argv[2:])
-        return
-    if len(sys.argv) >= 2 and sys.argv[1] == "broker-install":
-        _broker_install_cli(sys.argv[2:])
-        return
-    if len(sys.argv) >= 2 and sys.argv[1] == "broker-uninstall":
-        _broker_uninstall_cli(sys.argv[2:])
-        return
-    if len(sys.argv) >= 2 and sys.argv[1] == "ssh-login":
-        _ssh_login_cli(sys.argv[2:])
-        return
-    if len(sys.argv) >= 2 and sys.argv[1] == "sudo-login":
-        _sudo_login_cli(sys.argv[2:])
-        return
-    if len(sys.argv) >= 2 and sys.argv[1] == "secret-set":
-        _secret_set_cli(sys.argv[2:])
-        return
+    if len(sys.argv) >= 2 and sys.argv[1] in _CREDENTIAL_SUBCOMMANDS:
+        sys.exit(_credential_main(sys.argv[1:]) or 0)
+
     from starlette.middleware.base import BaseHTTPMiddleware
     from starlette.requests import Request
     from starlette.responses import Response
@@ -1253,7 +1501,14 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="portal-mcp-server",
-        description="portal-mcp-server — Agent-feels-local SSH orchestration MCP server",
+        description="portal-mcp-server — Agent-feels-local SSH orchestration MCP server.\n\n"
+                    "Without any subcommand this starts the MCP server. The credential\n"
+                    "agent CLI lives under these subcommands (use `<subcmd> --help`):\n"
+                    "  portal agent  install / uninstall / run / status / clear\n"
+                    "  portal ssh    set / confirm / show / clear / list  <host>\n"
+                    "  portal sudo   set / confirm / show / clear / list  <host>\n"
+                    "  portal secret set / confirm / show / clear / list  <name>",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     from importlib.metadata import version as _pkg_version, PackageNotFoundError
     try:

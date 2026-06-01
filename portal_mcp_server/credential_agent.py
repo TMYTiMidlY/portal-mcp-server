@@ -1,13 +1,33 @@
-"""Per-user credential broker for live portal credentials.
+"""Per-user credential agent for live portal credentials.
 
-The broker is intended to be started by a systemd --user socket unit. systemd
+The agent is intended to be started by a systemd --user socket unit. systemd
 owns the filesystem socket and activation lifecycle; this process only keeps a
 TTL memory cache and serves same-uid JSON requests over the activated socket.
+
+The wire protocol is line-oriented JSON over a Unix stream socket. Every
+request has a ``kind`` ∈ ``{"secret", "sudo", "ssh"}`` and an ``op``:
+
+  set        store ``value`` (or ``password``) for ``key``; resets TTL.
+  get        return plaintext value for ``key`` or ``{status: missing}``.
+  clear      drop one ``key`` (or all of ``kind`` when ``key`` is absent).
+  fingerprint   return sha256[:16] of stored value + remaining TTL seconds
+                (intentionally NO plaintext — see "design principle" below).
+  list       return [{key, fingerprint, ttl_remaining}, ...] for ``kind``.
+  status     return ``{counts: {kind: cached_entry_count}}`` (server health).
+
+**Design principle — plaintext never leaves the agent.** The agent will hand
+the plaintext value back to a same-uid peer ONLY via ``get`` — the path used by
+the SSH connect loop and the ``$SECRET`` env injection. Human-facing CLI verbs
+(``portal ssh show`` / ``list`` / ``confirm``) use ``fingerprint`` / ``list``
+and never carry plaintext back to a TTY, so terminal scrollback, screenshots
+and recordings cannot leak a stored credential. Same rule as ssh-agent,
+gpg-agent, vault agent, polkit-agent.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -21,16 +41,16 @@ from typing import Any, Optional
 
 from ._peer_creds import is_same_uid_peer, peer_uid
 from .paths import (
-    CredentialBrokerNotConfigured,
-    credential_broker_config_path,
-    credential_broker_socket_path,
-    default_systemd_credential_broker_socket_path,
+    CredentialAgentNotConfigured,
+    credential_agent_config_path,
+    credential_agent_socket_path,
+    default_systemd_credential_agent_socket_path,
     systemd_user_unit_dir,
 )
 
-logger = logging.getLogger("portal_mcp.credential_broker")
+logger = logging.getLogger("portal_mcp.credential_agent")
 
-UNIT_BASENAME = "portal-mcp-credential-broker"
+UNIT_BASENAME = "portal-credential-agent"
 SOCKET_UNIT = f"{UNIT_BASENAME}.socket"
 SERVICE_UNIT = f"{UNIT_BASENAME}.service"
 
@@ -39,7 +59,16 @@ _LISTEN_FDS_START = 3
 _VALID_KINDS = {"secret", "sudo", "ssh"}
 
 
-class CredentialBroker:
+def _fingerprint(value: str) -> str:
+    """Stable, short fingerprint for human sanity-checking that doesn't leak
+    plaintext. sha256 truncated to 16 hex chars (64 bits) — plenty to
+    distinguish 'is this the password I just set' from 'is this last
+    Tuesday's leftover'.
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+class CredentialAgent:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
         self._cache: dict[tuple[str, str], tuple[str, float]] = {}
@@ -50,7 +79,7 @@ class CredentialBroker:
             sock = writer.get_extra_info("socket")
             if sock is not None and not is_same_uid_peer(sock):
                 logger.warning(
-                    "credential broker: rejecting peer uid %r (broker uid %d)",
+                    "credential agent: rejecting peer uid %r (agent uid %d)",
                     peer_uid(sock), os.getuid(),
                 )
                 return
@@ -73,8 +102,10 @@ class CredentialBroker:
                 pass
 
     async def dispatch(self, msg: dict[str, Any]) -> dict[str, Any]:
-        kind = msg.get("kind")
         op = msg.get("op")
+        if op == "status":
+            return await self._status()
+        kind = msg.get("kind")
         if kind not in _VALID_KINDS:
             return {"status": "error", "error": "invalid credential kind"}
         if op == "set":
@@ -83,12 +114,19 @@ class CredentialBroker:
             return await self._get(kind, msg)
         if op == "clear":
             return await self._clear(kind, msg)
+        if op == "fingerprint":
+            return await self._fingerprint(kind, msg)
+        if op == "list":
+            return await self._list(kind)
         return {"status": "error", "error": "invalid credential operation"}
 
     def _key_from_msg(self, kind: str, msg: dict[str, Any]) -> Optional[str]:
         field = "name" if kind == "secret" else "host"
         value = msg.get(field)
         return value if isinstance(value, str) and value else None
+
+    def _ttl_remaining(self, expiry: float) -> int:
+        return max(0, int(expiry - time.monotonic()))
 
     async def _set(self, kind: str, msg: dict[str, Any]) -> dict[str, Any]:
         key = self._key_from_msg(kind, msg)
@@ -128,6 +166,60 @@ class CredentialBroker:
                         self._cache.pop(cache_key, None)
         return {"status": "ok"}
 
+    async def _fingerprint(self, kind: str, msg: dict[str, Any]) -> dict[str, Any]:
+        key = self._key_from_msg(kind, msg)
+        if not key:
+            return {"status": "error", "error": f"{kind} key required"}
+        async with self._lock:
+            item = self._cache.get((kind, key))
+            if item is None:
+                return {"status": "missing"}
+            value, expiry = item
+            if time.monotonic() >= expiry:
+                self._cache.pop((kind, key), None)
+                return {"status": "missing"}
+            ttl_remaining = self._ttl_remaining(expiry)
+        return {
+            "status": "ok",
+            "fingerprint": _fingerprint(value),
+            "ttl_remaining": ttl_remaining,
+        }
+
+    async def _list(self, kind: str) -> dict[str, Any]:
+        entries: list[dict[str, Any]] = []
+        now = time.monotonic()
+        expired: list[tuple[str, str]] = []
+        async with self._lock:
+            for (k, key), (value, expiry) in self._cache.items():
+                if k != kind:
+                    continue
+                if now >= expiry:
+                    expired.append((k, key))
+                    continue
+                entries.append({
+                    "key": key,
+                    "fingerprint": _fingerprint(value),
+                    "ttl_remaining": max(0, int(expiry - now)),
+                })
+            for cache_key in expired:
+                self._cache.pop(cache_key, None)
+        entries.sort(key=lambda e: e["key"])
+        return {"status": "ok", "entries": entries}
+
+    async def _status(self) -> dict[str, Any]:
+        counts = {kind: 0 for kind in _VALID_KINDS}
+        now = time.monotonic()
+        expired: list[tuple[str, str]] = []
+        async with self._lock:
+            for (kind, key), (_value, expiry) in self._cache.items():
+                if now >= expiry:
+                    expired.append((kind, key))
+                    continue
+                counts[kind] = counts.get(kind, 0) + 1
+            for cache_key in expired:
+                self._cache.pop(cache_key, None)
+        return {"status": "ok", "counts": counts}
+
 
 def _systemd_activated_sockets() -> list[socket.socket]:
     try:
@@ -153,14 +245,20 @@ def _systemd_activated_sockets() -> list[socket.socket]:
 
 
 def _bind_socket(path: Path) -> socket.socket:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(path.parent, 0o700)
+    parent = path.parent
+    parent_existed = parent.exists()
+    parent.mkdir(parents=True, exist_ok=True)
+    if not parent_existed:
+        try:
+            os.chmod(parent, 0o700)
+        except OSError:
+            pass
     if path.exists():
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         probe.settimeout(0.5)
         try:
             probe.connect(str(path))
-            raise RuntimeError(f"credential broker socket already live at {path}")
+            raise RuntimeError(f"credential agent socket already live at {path}")
         except OSError:
             pass
         finally:
@@ -175,8 +273,8 @@ def _bind_socket(path: Path) -> socket.socket:
 
 
 async def serve_async(sock: socket.socket) -> None:
-    broker = CredentialBroker()
-    server = await asyncio.start_unix_server(broker.handle, sock=sock)
+    agent = CredentialAgent()
+    server = await asyncio.start_unix_server(agent.handle, sock=sock)
     async with server:
         await server.serve_forever()
 
@@ -185,19 +283,19 @@ def serve_forever(socket_path: Path | None = None) -> None:
     sockets = _systemd_activated_sockets()
     if len(sockets) > 1:
         logger.warning("received %d activated sockets; using the first", len(sockets))
-    sock = sockets[0] if sockets else _bind_socket(socket_path or credential_broker_socket_path())
+    sock = sockets[0] if sockets else _bind_socket(socket_path or credential_agent_socket_path())
     asyncio.run(serve_async(sock))
 
 
 def request(msg: dict[str, Any], *, timeout: float = 10.0) -> dict[str, Any]:
-    path = credential_broker_socket_path()
+    path = credential_agent_socket_path()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
         s.connect(str(path))
         if not is_same_uid_peer(s):
             raise RuntimeError(
-                f"credential broker socket {path} peer uid {peer_uid(s)!r} "
+                f"credential agent socket {path} peer uid {peer_uid(s)!r} "
                 f"does not match our uid {os.getuid()}; refusing to send"
             )
         s.sendall(json.dumps(msg).encode("utf-8"))
@@ -213,7 +311,7 @@ def fetch(kind: str, key: str) -> Optional[str]:
     value_field = "value" if kind == "secret" else "password"
     try:
         resp = request({"kind": kind, "op": "get", key_field: key})
-    except (CredentialBrokerNotConfigured, OSError):
+    except (CredentialAgentNotConfigured, OSError):
         return None
     if resp.get("status") != "ok":
         return None
@@ -233,10 +331,31 @@ def store(kind: str, key: str, value: str, ttl: float = DEFAULT_TTL_SEC) -> dict
     })
 
 
+def clear(kind: str, key: Optional[str] = None) -> dict[str, Any]:
+    msg: dict[str, Any] = {"kind": kind, "op": "clear"}
+    if key is not None:
+        key_field = "name" if kind == "secret" else "host"
+        msg[key_field] = key
+    return request(msg)
+
+
+def fingerprint(kind: str, key: str) -> dict[str, Any]:
+    key_field = "name" if kind == "secret" else "host"
+    return request({"kind": kind, "op": "fingerprint", key_field: key})
+
+
+def list_entries(kind: str) -> dict[str, Any]:
+    return request({"kind": kind, "op": "list"})
+
+
+def status() -> dict[str, Any]:
+    return request({"op": "status"})
+
+
 def _unit_texts(listen_stream: str, exec_argv: list[str]) -> tuple[str, str]:
     exec_start = " ".join(shlex.quote(part) for part in exec_argv)
     socket_unit = f"""[Unit]
-Description=portal-mcp-server credential broker socket
+Description=portal-mcp-server credential agent socket
 
 [Socket]
 ListenStream={listen_stream}
@@ -248,7 +367,7 @@ RemoveOnStop=yes
 WantedBy=sockets.target
 """
     service_unit = f"""[Unit]
-Description=portal-mcp-server credential broker
+Description=portal-mcp-server credential agent
 Documentation=https://github.com/TMYTiMidlY/portal-mcp-server
 
 [Service]
@@ -262,12 +381,12 @@ NoNewPrivileges=yes
 def install_user_units(*, socket_path: Path | None = None,
                        enable_now: bool = False) -> dict[str, str]:
     if socket_path is None:
-        resolved_socket_path = default_systemd_credential_broker_socket_path()
+        resolved_socket_path = default_systemd_credential_agent_socket_path()
         listen_stream = "%t/portal-mcp-server/credentials.sock"
     else:
         resolved_socket_path = socket_path
         listen_stream = str(socket_path)
-    exec_argv = [sys.executable, "-m", "portal_mcp_server", "broker"]
+    exec_argv = [sys.executable, "-m", "portal_mcp_server", "agent", "run"]
     socket_text, service_text = _unit_texts(listen_stream, exec_argv)
 
     unit_dir = systemd_user_unit_dir()
@@ -277,7 +396,7 @@ def install_user_units(*, socket_path: Path | None = None,
     socket_unit_path.write_text(socket_text)
     service_unit_path.write_text(service_text)
 
-    config_path = credential_broker_config_path()
+    config_path = credential_agent_config_path()
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(json.dumps({
         "socket_path": str(resolved_socket_path),
@@ -305,7 +424,7 @@ def _run_systemctl(args: list[str]) -> str | None:
 
 def uninstall_user_units(*, stop_now: bool = True,
                          remove_config: bool = True) -> dict[str, Any]:
-    """Remove the per-user broker systemd units and optional client config.
+    """Remove the per-user agent systemd units and optional client config.
 
     This is intentionally idempotent: missing units/files are not an error.
     """
@@ -325,7 +444,7 @@ def uninstall_user_units(*, stop_now: bool = True,
         unit_dir / SERVICE_UNIT,
     ]
     if remove_config:
-        paths.append(credential_broker_config_path())
+        paths.append(credential_agent_config_path())
 
     removed: list[str] = []
     for path in paths:
@@ -348,7 +467,13 @@ def uninstall_user_units(*, stop_now: bool = True,
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="portal-mcp-server broker")
+    """Direct daemon entry — equivalent to ``portal agent run``.
+
+    Kept as a top-level :func:`main` so the module can be invoked via
+    ``python -m portal_mcp_server.credential_agent`` for tests and
+    debugging that bypass the CLI dispatcher.
+    """
+    p = argparse.ArgumentParser(prog="portal-mcp-server agent run")
     p.add_argument("--socket", type=Path, default=None,
                    help="manual socket path for non-systemd debugging/tests")
     args = p.parse_args(argv)

@@ -8,17 +8,17 @@ side channel and is never an MCP tool parameter.
 
 Two sources, both keeping the value out of the model:
 
-  1. **Live input (A·getpass)** — ``portal-mcp-server ssh-login <host>``
-     prompts with :func:`getpass.getpass` (no echo) in a *separate* terminal
-     and pushes the password into the per-user systemd credential broker.
-     Cached with a TTL (default 15 min) keyed by host name.
+  1. **Live input (A·getpass)** — ``portal ssh set <host>`` prompts with
+     :func:`getpass.getpass` (no echo) in a *separate* terminal and pushes
+     the password into the per-user systemd credential agent. Cached with a
+     TTL (default 15 min) keyed by host name.
 
   2. **Password manager (A·command)** — ``hosts.yaml`` ``password_command``
      (a shell command that prints the password, e.g. ``pass show ssh/web01``).
      Same execution model as the existing :attr:`HostConfig.password_command`;
      fetched on demand via :meth:`ConnectionManager.password_command_for`.
 
-:func:`resolve_ssh_password` checks local cache, then the per-user broker, then
+:func:`resolve_ssh_password` checks local cache, then the per-user agent, then
 falls back to ``password_command``. Nothing is ever written to disk by this
 module.
 
@@ -40,8 +40,8 @@ import threading
 import time
 from typing import Optional
 
-from . import credential_broker
-from .paths import credential_broker_socket_path
+from . import credential_agent
+from .paths import credential_agent_socket_path
 
 logger = logging.getLogger("portal_mcp.ssh_creds")
 
@@ -55,7 +55,7 @@ _cache: dict[str, tuple[str, float]] = {}
 
 # ─────────────────────────────────────────────────────────────────────
 # Local in-process TTL cache (mainly used by tests and direct embedding);
-# normal live input is stored in the per-user credential broker.
+# normal live input is stored in the per-user credential agent.
 # ─────────────────────────────────────────────────────────────────────
 
 def cache_ssh_password(host: str, password: str,
@@ -95,19 +95,19 @@ def get_cached_password(host: str) -> Optional[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# Per-user broker socket (the side-channel for `ssh-login`).
+# Per-user agent socket (the side-channel for `portal ssh set`).
 # ─────────────────────────────────────────────────────────────────────
 
 def control_socket_path():
-    """Compatibility name for the per-user credential broker socket path."""
-    return credential_broker_socket_path()
+    """Compatibility name for the per-user credential agent socket path."""
+    return credential_agent_socket_path()
 
 
-def fetch_ssh_password_from_broker(host: str) -> Optional[str]:
-    return credential_broker.fetch("ssh", host)
+def fetch_ssh_password_from_agent(host: str) -> Optional[str]:
+    return credential_agent.fetch("ssh", host)
 
 
 def send_ssh_password(host: str, password: str,
                       ttl: float = DEFAULT_TTL_SEC) -> dict:
-    """Client side of ``ssh-login``: push a password to the per-user broker."""
-    return credential_broker.store("ssh", host, password, ttl=ttl)
+    """Client side of ``portal ssh set``: push a password to the per-user agent."""
+    return credential_agent.store("ssh", host, password, ttl=ttl)

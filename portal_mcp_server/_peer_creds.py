@@ -1,8 +1,8 @@
-"""Same-uid peer-credential check for Unix broker sockets.
+"""Same-uid peer-credential check for Unix credential agent sockets.
 
 This module enforces the assertion documented in SECURITY.md: every inbound
-*and* outbound connection on the portal-mcp-server credential broker socket
-must run under the same uid as the broker process. The check is a defence-in-depth
+*and* outbound connection on the portal-mcp-server credential agent socket
+must run under the same uid as the agent process. The check is a defence-in-depth
 layer on top of the permissions enforced by the systemd user socket unit and
 the socket itself: even if a hostile local user manages to make their own socket
 land at the expected path, this layer refuses the exchange before any secret is

@@ -134,8 +134,8 @@ class HostConfig:
     # execution model as ``password_command`` (run on demand, never persisted,
     # never logged, never exposed via any MCP tool parameter). Used by
     # ``portal_bash(use_sudo=True)`` to feed ``sudo -S`` on stdin. The
-    # alternative source is the per-user credential broker populated
-    # out-of-band by ``portal-mcp-server sudo-login`` (see sudo_creds.py).
+    # alternative source is the per-user credential agent populated
+    # out-of-band by ``portal sudo set`` (see sudo_creds.py).
     sudo_password_command: Optional[str] = None
 
 
@@ -226,8 +226,8 @@ class ConnectionManager:
                 msg = (
                     "declares 'auth: password' but has no 'password_command' "
                     "— the host is loaded but every connection will require "
-                    f"`portal-mcp-server ssh-login {name}` to push a password "
-                    "into the per-user credential broker first. For unattended use, add "
+                    f"`portal ssh set {name}` to push a password "
+                    "into the per-user credential agent first. For unattended use, add "
                     "a 'password_command:' that prints the password to stdout "
                     f"(e.g. 'pass show ssh/{name}' or 'printf %s \"${name.upper()}_PASSWORD\"')."
                 )
@@ -386,7 +386,7 @@ class ConnectionManager:
 
         Returns ``None`` when the host is unknown or has no
         ``sudo_password_command`` configured (so callers can fall back to the
-        credential broker populated by ``sudo-login``). Raises only if the
+        credential agent populated by ``portal sudo set``). Raises only if the
         command itself fails, matching ``_run_secret_command`` semantics.
         """
         cfg = self._registry.get(host_name)
@@ -397,7 +397,7 @@ class ConnectionManager:
         )
 
     async def _resolve_ssh_password(self, cfg: HostConfig) -> Optional[str]:
-        """SSH-login password chain: local cache → credential broker → host's
+        """SSH-login password chain: local cache → credential agent → host's
         ``password_command``. Returns ``None`` only when neither source is
         available; a configured ``password_command`` that fails raises
         ``RuntimeError`` (host-named, exit-code only; never the secret).
@@ -406,11 +406,11 @@ class ConnectionManager:
         fresh, un-registered ``HostConfig`` — including the unit tests — keep
         working without going through the module-level singleton.
         """
-        from .ssh_creds import get_cached_password, fetch_ssh_password_from_broker
+        from .ssh_creds import get_cached_password, fetch_ssh_password_from_agent
         pw = get_cached_password(cfg.name)
         if pw is not None:
             return pw
-        pw = await asyncio.to_thread(fetch_ssh_password_from_broker, cfg.name)
+        pw = await asyncio.to_thread(fetch_ssh_password_from_agent, cfg.name)
         if pw is not None:
             return pw
         if cfg.password_command:
@@ -435,8 +435,8 @@ class ConnectionManager:
         )
 
         # ── Password auth (opt-in via `auth: password`) ────────────────
-        # The side-channel password chain: credential broker (populated by
-        # `portal-mcp-server ssh-login <host>` in a separate terminal) →
+        # The side-channel password chain: credential agent (populated by
+        # `portal ssh set <host>` in a separate terminal) →
         # hosts.yaml `password_command`. Either alone is enough; if both are
         # absent, refuse rather than silently falling back to key auth.
         if cfg.auth == "password":
@@ -446,8 +446,8 @@ class ConnectionManager:
                     f"Host '{cfg.name}' has 'auth: password' but no password "
                     "source is available. Either configure 'password_command:' "
                     "in hosts.yaml (a shell command that prints the password) "
-                    f"or run `portal-mcp-server ssh-login {cfg.name}` in a "
-                    "separate terminal to push one into the per-user credential broker."
+                    f"or run `portal ssh set {cfg.name}` in a "
+                    "separate terminal to push one into the per-user credential agent."
                 )
             kwargs["password"] = pw
             # Disable client_keys so asyncssh does not silently fall back to
@@ -581,9 +581,9 @@ class ConnectionManager:
             except asyncssh.PermissionDenied:
                 # Key auth refused. If this is a key-mode host (or a
                 # ~/.ssh/config alias) AND we have a side-channel password
-                # (ssh-login cache or hosts.yaml password_command), retry
-                # once with password auth. `auth: password` hosts already
-                # ran the password chain inside _build_connect_kwargs, so
+                # (`portal ssh set` cache or hosts.yaml password_command),
+                # retry once with password auth. `auth: password` hosts
+                # already ran the password chain inside _build_connect_kwargs, so
                 # skip the retry to avoid masking a wrong password.
                 if cfg.auth == "password":
                     raise
@@ -592,7 +592,7 @@ class ConnectionManager:
                     raise
                 logger.info(
                     "Key auth refused by '%s'; retrying with side-channel "
-                    "password (ssh-login cache or password_command).",
+                    "password (`portal ssh set` cache or password_command).",
                     host_name,
                 )
                 pw_kwargs = dict(kwargs)
