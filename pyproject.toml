@@ -189,4 +189,3 @@ version_scheme = "pep440"
 version_provider = "uv"
 update_changelog_on_bump = true
 annotated_tag = true
-major_version_zero = true
