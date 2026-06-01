@@ -1,6 +1,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# portal-mcp-server  |  hosts.example.yaml
-# Copy this file to hosts.yaml and fill in your own values.
+# portal-mcp-server  |  hosts.yaml (example)
+# Copy this file to $XDG_CONFIG_HOME/portal-mcp-server/hosts.yaml
+# (default ~/.config/portal-mcp-server/hosts.yaml) and fill in your own values.
 # NEVER commit hosts.yaml — it contains real credentials.
 # Dynamic registration is also available via the portal_host MCP tool
 # (key-based hosts only — see README §Authentication).
@@ -65,18 +66,19 @@ hosts:
   #   2. The MCP `portal_host(action="register", ...)` tool does NOT accept
   #      a password — yaml is the only entry point, so the secret cannot
   #      land in LLM tool-call traces.
-  # Two sources for the password (order: in-memory cache → password_command
+  # Two sources for the password (order: broker cache → password_command
   # → error):
   #   - `password_command` (this file): shell command that prints the
   #     password to stdout. Same pattern as Borg's BORG_PASSCOMMAND and
   #     restic's RESTIC_PASSWORD_COMMAND. A single trailing newline is
   #     stripped.
   #   - `portal-mcp-server ssh-login <host>` (out-of-band): getpass prompt
-  #     in a separate terminal pushes the password into the running
-  #     server's per-host in-memory cache (default TTL 900s). Works even
-  #     when `password_command` is not set, AND for key-mode hosts (the
-  #     default — no `auth:` field below) as an automatic fallback if
-  #     asyncssh raises PermissionDenied.
+  #     in a separate terminal pushes the password into the per-user
+  #     systemd credential broker (per-host key, default TTL 900s). Works
+  #     even when `password_command` is not set, AND for key-mode hosts
+  #     (the default — no `auth:` field below) as an automatic fallback
+  #     if asyncssh raises PermissionDenied. Requires `portal-mcp-server
+  #     broker-install --now` once per user session.
   # legacy-host:
   #   host: 10.0.0.40
   #   user: admin
@@ -96,11 +98,13 @@ hosts:
   #   (a) sudo_password_command (below) — a shell command that prints the
   #       sudo password to stdout. Fully automatic; same contract as
   #       password_command (one trailing newline stripped, 10s timeout).
-  #   (b) Out-of-band cache — no yaml needed. In a terminal run:
+  #   (b) Out-of-band broker — no yaml needed. In a terminal run:
   #         portal-mcp-server sudo-login sudo-box           # hidden getpass
   #         portal-mcp-server sudo-login sudo-box --ttl 1800  # TTL secs (default 900)
-  #       which pushes the password into an in-memory TTL cache.
-  # Lookup order at sudo time: in-memory cache (b) -> sudo_password_command
+  #       which pushes the password into the per-user systemd credential
+  #       broker (TTL-cached, never on disk). Requires `portal-mcp-server
+  #       broker-install --now` once per user session.
+  # Lookup order at sudo time: broker cache (b) -> sudo_password_command
   # (a) -> error. NOTE: use_sudo runs a one-shot `sudo -S -k` exec, so it does
   # NOT inherit the cwd/env of your persistent portal_bash session.
   # sudo-box:

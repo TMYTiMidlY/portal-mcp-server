@@ -667,7 +667,7 @@ headless / CI 跑不动 ssh-agent 时，可在 `hosts.yaml` 写 `passphrase_comm
 1. **绝不** 在 `hosts.yaml` 写 `password: 明文`——启动会 ERROR 拒绝、字段被丢
 2. **绝不** 通过 MCP 工具传——`portal_host` 没有 password 参数，密码不会进 LLM tool-call trace
 
-两条来源（顺序：内存缓存 → `password_command` → 报错），同 sudo / secret 一脉相承：
+两条来源（顺序：broker 内存缓存 → `password_command` → 报错），同 sudo / secret 一脉相承：
 
 1. **密码管理器（1a，全自动）**——hosts.yaml 里 `auth: password` + 一段输出密码到 stdout 的 shell 命令，思路同 Borg 的 `BORG_PASSCOMMAND`、restic 的 `RESTIC_PASSWORD_COMMAND`、msmtp 的 `passwordeval`：
 
