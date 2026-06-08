@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.exceptions import ToolError
@@ -262,8 +263,8 @@ def _parse_env(env_json: str) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def portal_host(action: str, name: str = "", host: str = "",
-                 user: str = "root", port: int = 22,
+def portal_host(action: Literal["list", "register", "remove"], name: str = "",
+                 host: str = "", user: str = "root", port: int = 22,
                  key_path: str = "", tags: str = "") -> str:
     """Manage the SSH host registry.
 
@@ -332,10 +333,12 @@ def portal_host(action: str, name: str = "", host: str = "",
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_transfer(direction: str, host: str,
-                           local_path: str, remote_path: str,
-                           ctx: Context, checksum: bool = False,
-                           paths_json: str = "") -> str:
+async def portal_transfer(
+        direction: Literal["upload", "download", "sync", "mirror",
+                           "upload-list", "download-list"],
+        host: str, local_path: str, remote_path: str,
+        ctx: Context, checksum: bool = False,
+        paths_json: str = "") -> str:
     """Transfer files between local and remote via SFTP (binary-safe, atomic).
 
     ## Modes
@@ -439,7 +442,7 @@ async def portal_transfer(direction: str, host: str,
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_tunnel_open(mode: str, host: str,
+async def portal_tunnel_open(mode: Literal["local", "reverse", "socks"], host: str,
                               local_port: int = 0, local_bind: str = "127.0.0.1",
                               remote_host: str = "", remote_port: int = 0) -> str:
     """Open an SSH tunnel through `host`.
@@ -516,7 +519,8 @@ def portal_tunnel_list() -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_multi_exec(mode: str, command: str = "",
+async def portal_multi_exec(mode: Literal["parallel", "rolling", "broadcast"],
+                             command: str = "",
                              commands_json: str = "",
                              hosts_json: str = "", group_tag: str = "",
                              timeout: int = 3600, delay_s: float = 2.0,
@@ -729,8 +733,9 @@ def portal_check(host: str, command: str = "") -> str:
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def portal_audit(view: str = "snapshot", limit: int = 50,
-                  host_filter: str = "") -> str:
+def portal_audit(view: Literal["snapshot", "server", "sessions",
+                               "history", "stats", "policy"] = "snapshot",
+                  limit: int = 50, host_filter: str = "") -> str:
     """Inspect MCP server internal state and audit log.
 
     ## Views
