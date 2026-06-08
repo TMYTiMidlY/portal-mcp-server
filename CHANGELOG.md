@@ -1,3 +1,13 @@
+## v3.0.0 (2026-06-08)
+
+### BREAKING CHANGE
+
+- on macOS and Windows, config and logs now live under the platform-native locations above instead of ~/.config / ~/.local/state. Linux paths are unchanged except logs move from .../state/portal-mcp-server/logs (plural) to .../state/portal-mcp-server/log (singular, matching the XDG spec and platformdirs' default). Operators who want the legacy path can pin it via PORTAL_LOG_DIR=~/.local/state/portal-mcp-server/logs; see CHANGELOG for the migration steps (cat old/audit.jsonl >> new/audit.jsonl, then trash-put the old dir, after upgrading the running portal-mcp-server).
+
+### Feat
+
+- **paths**: adopt platformdirs for native config/state/log dirs
+
 ## v2.0.2 (2026-06-01)
 
 ### Fix
