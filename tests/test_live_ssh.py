@@ -233,7 +233,7 @@ class TestPersistentSessions:
 
 
 # ════════════════════════════════════════════════════════
-# TEST 4: Multi-host orchestration
+# TEST 4: Multi-host orchestration (now portal_exec fan-out)
 # ════════════════════════════════════════════════════════
 
 class TestOrchestration:
@@ -250,17 +250,20 @@ class TestOrchestration:
     @pytest.mark.asyncio
     async def test_parallel_exec(self):
         """Same command on multiple hosts simultaneously."""
-        from portal_mcp_server.orchestrator import ssh_parallel_exec
-        results = await ssh_parallel_exec(["fleet-01", "fleet-02"], "hostname")
+        from portal_mcp_server import cli
+        results = json.loads(await cli.portal_exec(
+            host=["fleet-01", "fleet-02"], command="hostname"))
         assert len(results) == 2
         for r in results:
             assert r["exit_code"] == 0, f"Parallel exec failed: {r}"
 
     @pytest.mark.asyncio
     async def test_rolling_exec(self):
-        """Sequential rolling exec with delay."""
-        from portal_mcp_server.orchestrator import ssh_rolling_exec
-        results = await ssh_rolling_exec(["fleet-01", "fleet-02"], "echo rolling", delay_s=0.1)
+        """Sequential (serialized) exec with delay."""
+        from portal_mcp_server import cli
+        results = json.loads(await cli.portal_exec(
+            host=["fleet-01", "fleet-02"], command="echo rolling",
+            serialize=True, delay_s=0.1))
         assert len(results) == 2
         for r in results:
             assert "rolling" in r.get("stdout", "")
@@ -268,24 +271,23 @@ class TestOrchestration:
     @pytest.mark.asyncio
     async def test_group_exec(self):
         """Execute on all hosts with a matching tag."""
-        from portal_mcp_server.orchestrator import ssh_exec_on_group
-        results = await ssh_exec_on_group("fleet", "echo tagged")
+        from portal_mcp_server import cli
+        results = json.loads(await cli.portal_exec(
+            group_tag="fleet", command="echo tagged"))
         assert len(results) >= 1
         for r in results:
             assert r["exit_code"] == 0
 
     @pytest.mark.asyncio
-    async def test_playbook(self):
-        """Run a multi-step playbook and verify all steps complete."""
-        from portal_mcp_server.orchestrator import run_playbook
-        playbook = {
-            "name": "test_playbook",
-            "on_error": "stop",
-            "steps": ["echo step1", "echo step2", "echo step3"]
-        }
-        result = await run_playbook(TEST_HOST_NAME, playbook)
-        assert result["steps_run"] == 3
-        assert result["playbook"] == "test_playbook"
+    async def test_command_sequence(self):
+        """Run a multi-step command sequence and verify all steps complete."""
+        from portal_mcp_server import cli
+        out = json.loads(await cli.portal_exec(
+            host=TEST_HOST_NAME,
+            commands=["echo step1", "echo step2", "echo step3"]))
+        assert len(out["results"]) == 3
+        assert out["host"] == TEST_HOST_NAME
+
 
 
 # ════════════════════════════════════════════════════════

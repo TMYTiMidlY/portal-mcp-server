@@ -218,35 +218,25 @@ class TestGateManyTwoPhase:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 4. _gate_playbook two-phase + non-string step rejection
+# 4. _gate_exec two-phase: a blocked command burns no rate-limit tokens
 # ════════════════════════════════════════════════════════════════════════════
 
-class TestGatePlaybook:
-    def test_non_string_step_rejected(self, policy):
-        """Old code silently `continue`d on non-string steps, letting the
-        bad playbook through the gate to crash later inside ssh_exec.
+class TestGateExec:
+    def test_blocked_command_does_not_burn_host_rate_limit(self, policy):
+        """A blocked command anywhere in the sequence must reject the run
+        before any per-host rate-limit token is consumed (two-phase gate).
         """
         from portal_mcp_server import cli
 
-        err = cli._gate_playbook(
-            ["safe-01"],
-            {"name": "p", "steps": ["echo a", {"cmd": "rm -rf /"}]},
-        )
-        assert err is not None and "invalid type" in err, err
-
-    def test_failed_step_does_not_burn_host_rate_limit(self, policy, monkeypatch):
-        """A blocked step must not consume rate-limit tokens on any host.
-        Old implementation incremented per-host counters BEFORE rejecting
-        the step.
-        """
-        from portal_mcp_server import cli
-
-        # Block "rm -rf /" specifically.
         policy.command_blocklist = ["rm -rf*"]
-
-        err = cli._gate_playbook(
-            ["safe-01"],
-            {"name": "p", "steps": ["echo a", "rm -rf /"]},
-        )
+        err = cli._gate_exec(["safe-01"], ["echo a", "rm -rf /"])
         assert err is not None
         assert policy._rate_counters.get("safe-01", []) == []
+
+    def test_all_pass_consumes_one_token_per_host(self, policy):
+        from portal_mcp_server import cli
+
+        err = cli._gate_exec(["safe-01", "safe-02"], ["echo a", "echo b"])
+        assert err is None
+        assert len(policy._rate_counters["safe-01"]) == 1
+        assert len(policy._rate_counters["safe-02"]) == 1

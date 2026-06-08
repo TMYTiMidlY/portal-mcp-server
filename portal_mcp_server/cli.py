@@ -1,8 +1,8 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 18 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+Exposes 17 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
 shell(+close_shell)/exec core + local_exec + host/transfer/tunnel(open,close,
-list)/playbook/ping/audit/check.
+list)/ping/audit/check.
 """
 import asyncio
 import json
@@ -20,7 +20,6 @@ from .shell_engine import ssh_exec
 from .file_ops import (ssh_upload_file, ssh_download_file, ssh_sync_directory,
                        ssh_mirror_directory, ssh_upload_list, ssh_download_list)
 from .network_tools import get_tunnel_manager
-from .orchestrator import run_playbook, run_playbook_on_group
 from .audit import audit_log, get_history, get_audit_stats
 from .security import get_policy
 from .server_info import server_info, set_transport as _set_server_transport
@@ -248,38 +247,6 @@ def _resolve_group(group_tag: str) -> list[str]:
     """Resolve a group tag to the list of registered host names carrying it."""
     mgr = get_manager()
     return [h.name for h in mgr._registry.values() if group_tag in h.tags]
-
-
-def _gate_playbook(hosts: list[str], playbook: dict) -> str | None:
-    """Policy gate for playbooks: check every step's command against the
-    blocklist/allowlist on every target host. Rate limit is checked per host
-    once (not per step) to avoid burning the rate-limit budget before the
-    playbook even runs. Same two-phase shape as ``_gate_many`` so a single
-    bad host can't burn rate-limit quota on the others.
-    """
-    pol = get_policy()
-    steps = playbook.get("steps", []) or []
-    # Phase 0: every step must be a string we can actually execute.
-    for step in steps:
-        if not isinstance(step, str):
-            return (f"step {step!r}: invalid type {type(step).__name__}; "
-                    "playbook steps must be shell-command strings")
-    # Phase 1: command blocklist for every step (no mutation).
-    for step in steps:
-        err = pol.check_command(step)
-        if err:
-            return f"step {step[:60]!r}: {err}"
-    # Phase 2: validate every host (no mutation).
-    for h in hosts:
-        err = pol.check_host(h)
-        if err:
-            return f"{h}: {err}"
-    # Phase 3: commit rate-limit only after every host validated.
-    for h in hosts:
-        err = pol.check_rate_limit(h)
-        if err:
-            return f"{h}: {err}"
-    return None
 
 
 def _parse_env(env_json: str) -> dict:
@@ -547,57 +514,7 @@ def portal_tunnel_list() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. MULTI-HOST EXECUTION  (portal_playbook)
-# ═══════════════════════════════════════════════════════════════════
-
-
-@mcp.tool()
-async def portal_playbook(playbook_json: str, host: str = "",
-                           group_tag: str = "") -> str:
-    """Execute an infrastructure playbook on a host or group.
-
-    Specify exactly one target:
-    - host="web01"        : run on a single host.
-    - group_tag="prod"    : run on all hosts with this tag.
-
-    Playbook JSON format:
-        {
-          "name": "deploy_docker_stack",
-          "on_error": "stop",
-          "steps": ["apt update", "apt install docker.io -y",
-                    "systemctl enable --now docker"]
-        }
-
-    Each `steps` entry is gate-checked against the security policy before
-    execution begins.
-    """
-    if bool(host) == bool(group_tag):
-        raise ToolError('specify exactly one of `host` or `group_tag`.')
-    try:
-        playbook = json.loads(playbook_json)
-    except Exception as e:
-        raise ToolError(f"Invalid playbook_json: {e}")
-    if host:
-        err = _gate_playbook([host], playbook)
-        if err:
-            raise ToolError(f"BLOCKED: {err}")
-        result = await run_playbook(host, playbook)
-        return json.dumps(result, indent=2)
-    hosts = _resolve_group(group_tag)
-    if not hosts:
-        return json.dumps([{"error": f"No hosts with tag {group_tag!r}"}], indent=2)
-    err = _gate_playbook(hosts, playbook)
-    if err:
-        raise ToolError(f"BLOCKED: {err}")
-    audit_log(",".join(hosts),
-              f"playbook:{playbook.get('name','unnamed')}",
-              f"group:{group_tag}", operation="playbook_group")
-    results = await run_playbook_on_group(group_tag, playbook)
-    return json.dumps(results, indent=2)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 5. HEALTH CHECK  (portal_ping)
+# 4. HEALTH CHECK  (portal_ping)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()

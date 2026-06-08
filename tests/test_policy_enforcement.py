@@ -13,8 +13,6 @@ against the policy, and playbook steps are individually checked.
 """
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from mcp.server.fastmcp.exceptions import ToolError
@@ -45,11 +43,9 @@ def restrictive_policy(monkeypatch, tmp_path):
 @pytest.fixture
 def populated_manager(monkeypatch, tmp_path):
     """ConnectionManager with three hosts in tag 'fleet': two safe-*, one
-    danger-*. The orchestrator's ``get_manager`` is rebound to it so
-    ``_resolve_group`` and the underlying orchestrator agree on which hosts
-    belong to the tag.
+    danger-*. Rebound into cli.get_manager so ``_resolve_group`` sees them.
     """
-    from portal_mcp_server import connection_manager, cli, orchestrator
+    from portal_mcp_server import connection_manager, cli
 
     yml = tmp_path / "hosts.yaml"
     yml.write_text("hosts: {}\n")
@@ -59,7 +55,6 @@ def populated_manager(monkeypatch, tmp_path):
     m.register_host("danger-01", "10.0.0.99", tags=["fleet"])
     monkeypatch.setattr(connection_manager, "_manager", m)
     monkeypatch.setattr(cli, "get_manager", lambda: m)
-    monkeypatch.setattr(orchestrator, "get_manager", lambda: m)
     return m
 
 
@@ -199,53 +194,55 @@ class TestBroadcastBatchGate:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  ssh_playbook + ssh_playbook_on_group — every step must pass blocklist
+#  portal_exec(group_tag=, commands=[...]) — multi-command over a group still
+#  gates every command + every resolved host (the old playbook gate semantics)
 # ════════════════════════════════════════════════════════════════════════════
 
-class TestPlaybookGate:
+class TestGroupMultiCommandGate:
     @pytest.mark.asyncio
-    async def test_single_host_playbook_blocks_dangerous_step(
+    async def test_group_multicommand_blocks_disallowed_host(
         self, restrictive_policy, populated_manager, monkeypatch
     ):
         from portal_mcp_server import cli
 
-        async def fake_run(*a, **k):
+        async def fake_exec(*a, **k):
             raise AssertionError("must not be called")
 
-        monkeypatch.setattr(cli, "run_playbook", fake_run)
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
-        playbook = {
-            "name": "evil",
-            "steps": ["uptime", "rm -rf /var", "echo done"],
-        }
+        # 'danger-01' is in the fleet group but not allowlisted → blocked even
+        # before any of the sequence's commands run.
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_playbook(json.dumps(playbook), host="safe-01")
+            await cli.portal_exec(group_tag="fleet",
+                                  commands=["uptime", "echo done"], timeout=5)
+        assert "BLOCKED" in str(exc_info.value)
+        assert "danger-01" in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_group_multicommand_blocks_dangerous_step(
+        self, restrictive_policy, populated_manager, monkeypatch
+    ):
+        from portal_mcp_server import cli
+
+        async def fake_exec(*a, **k):
+            raise AssertionError("must not be called")
+
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
+
+        # A blocked command anywhere in the sequence rejects the whole run.
+        with pytest.raises(ToolError) as exc_info:
+            await cli.portal_exec(
+                host=["safe-01"],
+                commands=["uptime", "rm -rf /var", "echo done"], timeout=5)
         msg = str(exc_info.value)
         assert "BLOCKED" in msg
         assert "rm -rf" in msg.lower() or "blocked by policy" in msg.lower()
 
-    @pytest.mark.asyncio
-    async def test_group_playbook_blocks_disallowed_host(
-        self, restrictive_policy, populated_manager, monkeypatch
-    ):
-        from portal_mcp_server import cli
-
-        async def fake_run(*a, **k):
-            raise AssertionError("must not be called")
-
-        monkeypatch.setattr(cli, "run_playbook_on_group", fake_run)
-
-        playbook = {"name": "ok", "steps": ["uptime"]}
-        with pytest.raises(ToolError) as exc_info:
-            await cli.portal_playbook(json.dumps(playbook), group_tag="fleet")
-        assert "BLOCKED" in str(exc_info.value)
-        assert "danger-01" in str(exc_info.value)
-
 
 # ════════════════════════════════════════════════════════════════════════════
-#  Note: the multi-session ssh_session_* tools were removed in 0.3.0 along with
-#  ssh_run/ssh_run_batch/ssh_run_script/ssh_run_with_env. Use portal_bash for
-#  single persistent session per host (which is policy-gated per-command in
-#  remote_bash.py) or portal_multi_exec for orchestrated parallel/rolling
-#  command execution. The session_manager module remains for any future caller.
+#  Note: the ssh_run/ssh_session_*/ssh_playbook families were removed during the
+#  agent-first redesign. Use portal_shell for a single persistent session per
+#  host (policy-gated per command) or portal_exec for one-shot / fan-out /
+#  multi-command execution (gated here). The session_manager module remains.
 # ════════════════════════════════════════════════════════════════════════════
+
