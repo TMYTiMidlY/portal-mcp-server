@@ -2,13 +2,17 @@
 
 Resolution order for each path:
 
-1. Environment variable override (e.g. ``PORTAL_HOSTS_YAML``).
+1. ``PORTAL_*`` environment variable override (e.g. ``PORTAL_HOSTS_YAML``).
+   **Must be absolute** — relative values are warned and ignored, matching
+   the XDG-spec policy applied to ``XDG_CONFIG_HOME`` / ``XDG_STATE_HOME``.
+   ``portal-mcp-server`` is a long-lived daemon, so a cwd-relative override
+   would silently let the launch directory poison the resolved path.
 2. Platform-native user directory resolved via :mod:`platformdirs`:
 
    - Linux:   ``~/.config/portal-mcp-server/``,
               ``~/.local/state/portal-mcp-server/``,
               ``~/.local/state/portal-mcp-server/log/``
-              (honours ``$XDG_CONFIG_HOME`` / ``$XDG_STATE_HOME``).
+              (honours absolute ``$XDG_CONFIG_HOME`` / ``$XDG_STATE_HOME``).
    - macOS:   ``~/Library/Application Support/portal-mcp-server/`` (config + state),
               ``~/Library/Logs/portal-mcp-server/`` (logs).
    - Windows: ``%LOCALAPPDATA%\\portal-mcp-server\\`` (config + state),
@@ -84,11 +88,26 @@ def xdg_state_home() -> Path:
     return Path(_DIRS.user_state_dir)
 
 
-def _resolve(env_var: str, xdg_default: Path) -> Path:
-    override = os.environ.get(env_var)
-    if override:
-        return Path(override).expanduser()
-    return xdg_default
+def _resolve(env_var: str, default: Path) -> Path:
+    """Honour an absolute ``PORTAL_*`` override; otherwise return ``default``.
+
+    Relative override values are rejected with a warning and ignored. This
+    matches the XDG-spec policy applied to ``XDG_CONFIG_HOME`` /
+    ``XDG_STATE_HOME``: ``portal-mcp-server`` is a long-lived daemon and
+    accepting a cwd-relative value here would silently let the directory
+    the server was launched from poison the resolved path.
+    """
+    raw = os.environ.get(env_var)
+    if not raw:
+        return default
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    logger.warning(
+        "Ignoring non-absolute %s=%r; only absolute paths are accepted. "
+        "Falling back to default %r.", env_var, raw, str(default),
+    )
+    return default
 
 
 def hosts_yaml_path() -> Path:
@@ -144,7 +163,14 @@ def _configured_agent_socket_path() -> Path | None:
 def credential_agent_socket_path() -> Path:
     override = os.environ.get("PORTAL_CREDENTIAL_AGENT_SOCKET")
     if override:
-        return Path(override).expanduser()
+        candidate = Path(override).expanduser()
+        if candidate.is_absolute():
+            return candidate
+        logger.warning(
+            "Ignoring non-absolute PORTAL_CREDENTIAL_AGENT_SOCKET=%r; "
+            "only absolute paths are accepted. Falling back to the "
+            "configured agent.json value.", override,
+        )
     configured = _configured_agent_socket_path()
     if configured is not None:
         return configured
