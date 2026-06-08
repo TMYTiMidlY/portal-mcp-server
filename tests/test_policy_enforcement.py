@@ -25,7 +25,7 @@ def restrictive_policy(monkeypatch, tmp_path):
     """Install a policy that blocks ``rm -rf /`` and only allows hosts
     matching ``safe-*``.
     """
-    from portal_mcp_server import security, cli, orchestrator
+    from portal_mcp_server import security, cli
 
     policy_yaml = tmp_path / "policies.yaml"
     policy_yaml.write_text(
@@ -64,7 +64,7 @@ def populated_manager(monkeypatch, tmp_path):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  ssh_group_exec — must gate command + every host in the resolved group
+#  portal_exec(group_tag=) — must gate command + every host in the group
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestGroupExecGate:
@@ -75,16 +75,15 @@ class TestGroupExecGate:
 
         called = []
 
-        async def fake_parallel(*a, **k):
+        async def fake_exec(*a, **k):
             called.append((a, k))
-            return [{"host": "x", "exit_code": 0}]
+            return {"host": "x", "exit_code": 0}
 
-        monkeypatch.setattr(cli, "ssh_parallel_exec", fake_parallel)
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_multi_exec(mode="parallel",
-                                        group_tag="fleet",
-                                        command="rm -rf /", timeout=5)
+            await cli.portal_exec(group_tag="fleet",
+                                  command="rm -rf /", timeout=5)
         assert "BLOCKED" in str(exc_info.value)
         assert "blocked by policy" in str(exc_info.value).lower()
         assert called == [], "exec must NOT run when command is blocked"
@@ -97,24 +96,23 @@ class TestGroupExecGate:
 
         called = []
 
-        async def fake_parallel(*a, **k):
+        async def fake_exec(*a, **k):
             called.append((a, k))
-            return []
+            return {"host": "x", "exit_code": 0}
 
-        monkeypatch.setattr(cli, "ssh_parallel_exec", fake_parallel)
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         # 'danger-01' is in the group but not in host_allowlist — must block.
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_multi_exec(mode="parallel",
-                                        group_tag="fleet",
-                                        command="uptime", timeout=5)
+            await cli.portal_exec(group_tag="fleet",
+                                  command="uptime", timeout=5)
         assert "BLOCKED" in str(exc_info.value)
         assert "danger-01" in str(exc_info.value)
         assert called == []
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  ssh_rolling — must gate command + every host
+#  portal_exec(host=[...], serialize=True) — rolling: gate command + every host
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestRollingGate:
@@ -125,17 +123,16 @@ class TestRollingGate:
 
         called = []
 
-        async def fake_rolling(*a, **k):
+        async def fake_exec(*a, **k):
             called.append((a, k))
-            return []
+            return {"host": "x", "exit_code": 0}
 
-        monkeypatch.setattr(cli, "ssh_rolling_exec", fake_rolling)
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError, match="BLOCKED"):
-            await cli.portal_multi_exec(
-                mode="rolling",
-                hosts_json=json.dumps(["safe-01", "safe-02"]),
-                command="rm -rf /tmp/x", timeout=5
+            await cli.portal_exec(
+                host=["safe-01", "safe-02"],
+                command="rm -rf /tmp/x", serialize=True, timeout=5,
             )
         assert called == []
 
@@ -144,23 +141,22 @@ class TestRollingGate:
                                              populated_manager, monkeypatch):
         from portal_mcp_server import cli
 
-        async def fake_rolling(*a, **k):
+        async def fake_exec(*a, **k):
             raise AssertionError("must not be called")
 
-        monkeypatch.setattr(cli, "ssh_rolling_exec", fake_rolling)
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_multi_exec(
-                mode="rolling",
-                hosts_json=json.dumps(["safe-01", "danger-01"]),
-                command="uptime", timeout=5
+            await cli.portal_exec(
+                host=["safe-01", "danger-01"],
+                command="uptime", serialize=True, timeout=5,
             )
         assert "BLOCKED" in str(exc_info.value)
         assert "danger-01" in str(exc_info.value)
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  ssh_broadcast_batch — every command in the array must pass
+#  portal_exec(commands=[...]) — every command in the sequence must pass
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestBroadcastBatchGate:
@@ -170,16 +166,15 @@ class TestBroadcastBatchGate:
     ):
         from portal_mcp_server import cli
 
-        async def fake_broadcast(*a, **k):
+        async def fake_exec(*a, **k):
             raise AssertionError("must not be called")
 
-        monkeypatch.setattr(cli, "ssh_broadcast", fake_broadcast)
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError, match="BLOCKED"):
-            await cli.portal_multi_exec(
-                mode="broadcast",
-                hosts_json=json.dumps(["safe-01", "safe-02"]),
-                commands_json=json.dumps(["uptime", "rm -rf /opt"]),
+            await cli.portal_exec(
+                host=["safe-01", "safe-02"],
+                commands=["uptime", "rm -rf /opt"],
                 timeout=5,
             )
 
@@ -189,18 +184,18 @@ class TestBroadcastBatchGate:
                                                 monkeypatch):
         from portal_mcp_server import cli
 
-        async def fake_broadcast(*a, **k):
+        async def fake_exec(*a, **k):
             raise AssertionError("must not be called")
 
-        monkeypatch.setattr(cli, "ssh_broadcast", fake_broadcast)
+        monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
-        with pytest.raises(ToolError, match="Invalid commands_json"):
-            await cli.portal_multi_exec(
-                mode="broadcast",
-                hosts_json=json.dumps(["safe-01"]),
-                commands_json=json.dumps(["uptime", 42]),
+        with pytest.raises(ToolError, match="commands must be a list of strings"):
+            await cli.portal_exec(
+                host=["safe-01"],
+                commands=["uptime", 42],
                 timeout=5,
             )
+
 
 
 # ════════════════════════════════════════════════════════════════════════════

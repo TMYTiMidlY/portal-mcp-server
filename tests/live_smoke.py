@@ -5,7 +5,7 @@ Target host comes from PORTAL_TEST_HOST / PORTAL_TEST_PORT / PORTAL_TEST_USER
 
 Verifies:
   1. ssh_exec basic round-trip still works (no regression).
-  2. Multi-host policy gate actually fires via portal_multi_exec.
+  2. Multi-host policy gate actually fires via portal_exec.
   3. portal_shell is gated per-command (per-command policy applies).
   4. portal_shell + portal_patch round-trip on /tmp succeeds AND emits audit.
   5. hosts.yaml containing 'password:' is loaded without crash and password
@@ -119,44 +119,44 @@ async def main() -> int:
 
         # 3a. blocked command on real host → BLOCKED, no exec
         try:
-            out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+            out = await cli.portal_exec(group_tag="smoke-fleet",
                                                command="rm -rf /tmp/x", timeout=5)
         except ToolError as e:
             if "BLOCKED" not in str(e):
-                failures.append(f"portal_multi_exec(group) raised wrong error: {e}")
+                failures.append(f"portal_exec(group) raised wrong error: {e}")
             else:
-                print(f"  ✓ portal_multi_exec(group) blocked rm -rf  →  {str(e)[:80]}")
+                print(f"  ✓ portal_exec(group) blocked rm -rf  →  {str(e)[:80]}")
         else:
-            failures.append(f"portal_multi_exec(group) did NOT block 'rm -rf': {out}")
+            failures.append(f"portal_exec(group) did NOT block 'rm -rf': {out}")
 
         # 3b. allowed command on real host → runs
-        out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+        out = await cli.portal_exec(group_tag="smoke-fleet",
                                            command="uptime", timeout=5)
         try:
             arr = json.loads(out)
             if not arr or arr[0].get("exit_code") != 0:
-                failures.append(f"portal_multi_exec uptime did not succeed: {out}")
+                failures.append(f"portal_exec uptime did not succeed: {out}")
             else:
-                print(f"  ✓ portal_multi_exec uptime OK on live-smoke")
+                print(f"  ✓ portal_exec uptime OK on live-smoke")
         except json.JSONDecodeError:
-            failures.append(f"portal_multi_exec output not JSON: {out}")
+            failures.append(f"portal_exec output not JSON: {out}")
 
         # 3c. disallowed host alias → blocked
         mgr.register_host(name="bad-host", host="127.0.0.1",
                           tags=["smoke-fleet"])
         try:
-            out = await cli.portal_multi_exec(mode="parallel", group_tag="smoke-fleet",
+            out = await cli.portal_exec(group_tag="smoke-fleet",
                                                command="uptime", timeout=5)
         except ToolError as e:
             if "BLOCKED" not in str(e) or "bad-host" not in str(e):
                 failures.append(
-                    f"portal_multi_exec should block bad-host (not in allowlist): {e}"
+                    f"portal_exec should block bad-host (not in allowlist): {e}"
                 )
             else:
-                print(f"  ✓ portal_multi_exec blocked unallowed bad-host  →  {str(e)[:80]}")
+                print(f"  ✓ portal_exec blocked unallowed bad-host  →  {str(e)[:80]}")
         else:
             failures.append(
-                f"portal_multi_exec should have raised ToolError for bad-host: {out}"
+                f"portal_exec should have raised ToolError for bad-host: {out}"
             )
         mgr.remove_host("bad-host")
 
@@ -273,7 +273,7 @@ async def main() -> int:
                 pass
         expected = {
             "shell", "file_patch",
-            "parallel_exec", "host_register",
+            "exec", "host_register",
         }
         missing = expected - ops_seen
         if missing:

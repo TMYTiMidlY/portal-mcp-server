@@ -20,7 +20,6 @@ _DISPATCH_ENUMS = [
     ("portal_transfer", "direction",
      {"upload", "download", "sync", "mirror", "upload-list", "download-list"}),
     ("portal_tunnel_open", "mode", {"local", "reverse", "socks"}),
-    ("portal_multi_exec", "mode", {"parallel", "rolling", "broadcast"}),
     ("portal_audit", "view",
      {"snapshot", "server", "sessions", "history", "stats", "policy"}),
 ]

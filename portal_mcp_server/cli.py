@@ -1,8 +1,8 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 19 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+Exposes 18 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
 shell(+close_shell)/exec core + local_exec + host/transfer/tunnel(open,close,
-list)/multi_exec/playbook/ping/audit/check.
+list)/playbook/ping/audit/check.
 """
 import asyncio
 import json
@@ -20,8 +20,7 @@ from .shell_engine import ssh_exec
 from .file_ops import (ssh_upload_file, ssh_download_file, ssh_sync_directory,
                        ssh_mirror_directory, ssh_upload_list, ssh_download_list)
 from .network_tools import get_tunnel_manager
-from .orchestrator import (ssh_parallel_exec, ssh_rolling_exec,
-                            ssh_broadcast, run_playbook, run_playbook_on_group)
+from .orchestrator import run_playbook, run_playbook_on_group
 from .audit import audit_log, get_history, get_audit_stats
 from .security import get_policy
 from .server_info import server_info, set_transport as _set_server_transport
@@ -181,35 +180,68 @@ async def _await_with_heartbeat(coro, ctx: "Context | None",
     return task.result()
 
 
-def _gate_many(hosts: list[str], command: str = "") -> str | None:
-    """Multi-host policy gate.
+def _gate_exec(hosts: list[str], commands: list[str]) -> str | None:
+    """Multi-host / multi-command policy gate for portal_exec.
 
     Two-phase to avoid burning rate-limit quota on hosts that pass when a
-    later host fails: first run all *non-mutating* checks (command +
-    host allowlist) over every host, only commit per-host rate-limit
-    consumption once every host has passed. Returns the first error
-    found, or None if all checks pass.
-
-    Used by multi-host orchestration tools (ssh_rolling, ssh_group_exec,
-    ssh_broadcast_batch, ssh_playbook_on_group) so they cannot bypass the
-    policy gate that ssh_run / ssh_exec_with_env etc. enforce.
+    later host fails: first run all *non-mutating* checks (every command
+    against the blocklist, then every host against the allowlist), and only
+    commit per-host rate-limit consumption ONCE per host after everything
+    validated. Returns the first error found, or None if all checks pass.
     """
     pol = get_policy()
-    if command:
-        err = pol.check_command(command)
+    # Phase 1: command blocklist for every command (no mutation).
+    for c in commands:
+        err = pol.check_command(c)
         if err:
-            return err
-    # Phase 1: validate every host (no mutation).
+            return f"command {c[:60]!r}: {err}"
+    # Phase 2: validate every host (no mutation).
     for h in hosts:
         err = pol.check_host(h)
         if err:
             return f"{h}: {err}"
-    # Phase 2: commit rate-limit only after every host validated.
+    # Phase 3: commit rate-limit only once per host after every host validated.
     for h in hosts:
         err = pol.check_rate_limit(h)
         if err:
             return f"{h}: {err}"
     return None
+
+
+def _gate_many(hosts: list[str], command: str = "") -> str | None:
+    """Single-command multi-host gate — thin wrapper over :func:`_gate_exec`.
+
+    Kept for the direct unit tests that pin the two-phase rate-limit behaviour.
+    """
+    return _gate_exec(hosts, [command] if command else [])
+
+
+def _sudo_missing_message(host: str) -> str:
+    """Friendly error when no sudo password is available for ``host``."""
+    return (
+        "No sudo password available for this host; the command "
+        "was NOT run. Ask the user to provide it out-of-band: "
+        "prefer an interactive input/choice tool (e.g. ask_user) "
+        "to request that they run "
+        f"`portal sudo set {host}` in a separate "
+        "terminal and confirm when done, then retry this call. If "
+        "you have no such tool, tell the user what to run and end "
+        "your turn to wait for their next message. (Alternatively "
+        "an operator can set `sudo_password_command` for the host "
+        "in hosts.yaml.) Never ask the user to paste the password "
+        "into this conversation."
+    )
+
+
+def _result_failed(r: dict) -> bool:
+    """True if a per-host result (single dict or {host, results:[...]}) carries
+    any non-zero / unknown exit code. Used to halt a serialized fan-out."""
+    if "results" in r:
+        return any(
+            x.get("exit_code", 0) not in (0, None)
+            for x in r["results"] if "exit_code" in x
+        )
+    return r.get("exit_code", 0) not in (0, None)
 
 
 def _resolve_group(group_tag: str) -> list[str]:
@@ -515,91 +547,8 @@ def portal_tunnel_list() -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. MULTI-HOST EXECUTION  (portal_multi_exec, portal_playbook)
+# 4. MULTI-HOST EXECUTION  (portal_playbook)
 # ═══════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-async def portal_multi_exec(mode: Literal["parallel", "rolling", "broadcast"],
-                             command: str = "",
-                             commands_json: str = "",
-                             hosts_json: str = "", group_tag: str = "",
-                             timeout: int = 3600, delay_s: float = 2.0,
-                             stop_on_error: bool = True) -> str:
-    """Execute commands across multiple hosts.
-
-    ## Modes
-    - mode="parallel": run `command` on all hosts simultaneously.
-        Required: command + (hosts_json OR group_tag).
-        Example: portal_multi_exec(mode="parallel", command="uptime",
-                                    hosts_json='["web01","web02"]')
-    - mode="rolling": run `command` sequentially with delay between hosts
-        (zero-downtime restart pattern).
-        Required: command + hosts_json. Optional: delay_s (default 2.0),
-        stop_on_error (default True).
-        Example: portal_multi_exec(mode="rolling",
-                                    command="systemctl restart nginx",
-                                    hosts_json='["web01","web02","web03"]',
-                                    delay_s=5)
-    - mode="broadcast": run a SEQUENCE of commands on all hosts in parallel
-        (each host runs the full sequence).
-        Required: commands_json (JSON array) + hosts_json.
-        Example: portal_multi_exec(mode="broadcast",
-                                    commands_json='["apt update","apt install -y nginx"]',
-                                    hosts_json='["web01","web02"]')
-
-    For single-host commands use portal_exec (one-shot) or portal_shell
-    (persistent session). To select hosts by tag instead of an explicit list,
-    pass group_tag="<tag>" instead of hosts_json (parallel mode only).
-    """
-    if group_tag:
-        hosts = _resolve_group(group_tag)
-        if not hosts:
-            return json.dumps([{"error": f"No hosts found with tag {group_tag!r}"}], indent=2)
-    else:
-        try:
-            hosts = json.loads(hosts_json) if hosts_json else []
-        except Exception as e:
-            raise ToolError(f"Invalid hosts_json: {e}")
-        if not hosts:
-            raise ToolError('must provide either hosts_json or group_tag.')
-
-    if mode == "parallel":
-        if not command:
-            raise ToolError('mode="parallel" requires `command`.')
-        err = _gate_many(hosts, command)
-        if err:
-            raise ToolError(f"BLOCKED: {err}")
-        results = await ssh_parallel_exec(hosts, command, timeout=timeout)
-        return json.dumps(results, indent=2)
-    if mode == "rolling":
-        if not command:
-            raise ToolError('mode="rolling" requires `command`.')
-        err = _gate_many(hosts, command)
-        if err:
-            raise ToolError(f"BLOCKED: {err}")
-        audit_log(",".join(hosts), command, "rolling", operation="multi_rolling")
-        results = await ssh_rolling_exec(hosts, command, delay_s=delay_s,
-                                          stop_on_error=stop_on_error,
-                                          timeout=timeout)
-        return json.dumps(results, indent=2)
-    if mode == "broadcast":
-        if not commands_json:
-            raise ToolError('mode="broadcast" requires `commands_json`.')
-        try:
-            commands = json.loads(commands_json)
-        except Exception as e:
-            raise ToolError(f"Invalid commands_json: {e}")
-        if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
-            raise ToolError('Invalid commands_json: must be a JSON array of strings.')
-        for cmd in commands:
-            err = _gate_many(hosts, cmd)
-            if err:
-                raise ToolError(f"BLOCKED on command {cmd[:60]!r}: {err}")
-        audit_log(",".join(hosts), f"{len(commands)} cmds",
-                  "broadcast", operation="multi_broadcast")
-        results = await ssh_broadcast(hosts, commands, timeout=timeout)
-        return json.dumps(results, indent=2)
-    raise ToolError(f'unknown mode {mode!r}. Valid: parallel, rolling, broadcast.')
 
 
 @mcp.tool()
@@ -987,87 +936,173 @@ async def portal_shell(host: str, command: str, timeout: float = 3600.0,
 
 
 @mcp.tool()
-async def portal_exec(host: str, command: str, timeout: float = 3600.0,
+async def portal_exec(host: "str | list[str]" = "", command: str = "",
+                      commands: "list[str] | None" = None,
+                      group_tag: str = "", timeout: float = 3600.0,
                       use_sudo: bool = False,
                       secrets: "list[str] | None" = None,
+                      serialize: bool = False, delay_s: float = 0.0,
+                      stop_on_error: bool = True,
                       ctx: "Context | None" = None) -> str:
-    """Run a command on a remote host and **get the result immediately** (exit
-    code + split stdout/stderr). This is the default workhorse: stateless and
-    fast (it reuses the connection pool, with no persistent-session setup).
+    """Run a command on one or more remote hosts and **get the result
+    immediately** (exit code + split stdout/stderr). This is the default
+    workhorse: stateless and fast (it reuses the connection pool, with no
+    persistent-session setup).
 
-    Need cwd/export to persist across calls? Use portal_shell instead.
+    Need cwd/export to persist across calls? Use portal_shell instead (single
+    host, stateful).
 
-    Behavior:
-      - One-shot execution over the pooled SSH connection (no `bash -i`
-        session): the first connect to a host pays the TCP+auth cost (~280ms),
-        every later call just opens a channel (~10-30ms).
-      - Returns {host, command, exit_code, stdout, stderr, elapsed_s}. stdout
-        and stderr are kept SEPARATE (unlike portal_shell, whose PTY merges
-        them) because conn.run gives them split natively.
-      - While the command runs, periodic MCP progress notifications keep the
-        client's request window alive (JSON-RPC -32001), independent of the
-        server-side `timeout`.
+    Targets (pick one):
+      - host="web01"               : a single host.
+      - host=["web01","web02"]     : an explicit list of hosts.
+      - group_tag="prod"           : every registered host carrying that tag.
 
-    use_sudo: run the command via `sudo -S`, feeding a password obtained
-        out-of-band (NEVER passed by the agent). The password comes from the
-        per-user credential agent populated by `portal sudo set <host>`, or
-        from the host's `sudo_password_command` in hosts.yaml. The command's
-        own stdin is consumed by the password (curl/CLI flag-reading tools are
-        unaffected; tools that themselves read stdin are not supported under
-        sudo).
+    Commands (pick one):
+      - command="uptime"                       : a single command.
+      - commands=["apt update","apt upgrade"]  : a sequence run in order on
+        each host (stops at the first non-zero exit when stop_on_error=True).
 
-    secrets: a list of named secrets (e.g. ["github_token"]) to inject as
-        environment variables for THIS command only. You pass the NAME, never
-        the value: the server resolves each from secrets.yaml or the
-        `portal secret set` cache and exports it as the uppercased env var
-        (github_token → $GITHUB_TOKEN). Reference it in `command` as
-        `$GITHUB_TOKEN`. The value is fed over SSH stdin (never on argv/audit)
-        and is redacted to *** in the returned stdout/stderr. Cannot be
-        combined with use_sudo.
+    Fan-out across multiple hosts is **parallel** by default. Set
+    serialize=True to run hosts one at a time (a rolling / zero-downtime
+    pattern), with delay_s seconds between hosts and stop_on_error to halt the
+    rollout on the first failing host.
+
+    Returns: a single result dict {host, command, exit_code, stdout, stderr,
+    elapsed_s} for one host + one command; otherwise a JSON list with one entry
+    per host (a multi-command host carries {host, results:[...]}). stdout and
+    stderr are kept SEPARATE (unlike portal_shell, whose PTY merges them).
+
+    While commands run, periodic MCP progress notifications keep the client's
+    request window alive (JSON-RPC -32001), independent of `timeout`.
+
+    use_sudo: run via `sudo -S`, feeding a password obtained out-of-band (NEVER
+        passed by the agent) — from the per-user credential agent populated by
+        `portal sudo set <host>`, or the host's `sudo_password_command` in
+        hosts.yaml. Resolved per host. The command's own stdin is consumed by
+        the password (curl/CLI flag-reading tools are unaffected; tools that
+        read stdin themselves are not supported under sudo).
+
+    secrets: a list of named secrets (e.g. ["github_token"]) injected as env
+        vars for the run. You pass the NAME, never the value: the server
+        resolves each from secrets.yaml or the `portal secret set` cache and
+        exports it as the uppercased env var (github_token → $GITHUB_TOKEN).
+        Reference it as `$GITHUB_TOKEN`. The value is fed over SSH stdin (never
+        on argv/audit) and redacted to *** in the returned stdout/stderr.
+        Cannot be combined with use_sudo.
     """
-    err = _gate(host, command)
+    # ── Resolve target hosts (host str | host list | group_tag) ──
+    if group_tag:
+        if host:
+            raise ToolError("pass either host or group_tag, not both.")
+        hosts = _resolve_group(group_tag)
+        if not hosts:
+            return json.dumps([{"error": f"No hosts found with tag {group_tag!r}"}],
+                              indent=2)
+        multi_host = True
+    elif isinstance(host, list):
+        hosts = [str(h) for h in host]
+        if not hosts:
+            raise ToolError("host list is empty.")
+        multi_host = True
+    elif host:
+        hosts = [host]
+        multi_host = False
+    else:
+        raise ToolError("provide a target: host (str or list) or group_tag.")
+
+    # ── Resolve command(s) ──
+    if commands:
+        if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
+            raise ToolError("commands must be a list of strings.")
+        cmd_list = list(commands)
+        multi_cmd = True
+    elif command:
+        cmd_list = [command]
+        multi_cmd = False
+    else:
+        raise ToolError("provide command (str) or commands (list of str).")
+
+    if use_sudo and secrets:
+        raise ToolError("secrets and use_sudo cannot be combined in one call.")
+
+    # ── Gate every (host, command) pair up front ──
+    err = _gate_exec(hosts, cmd_list)
     if err:
         raise ToolError(f"BLOCKED: {err}")
+
+    # ── Resolve secrets once (same env injected on every host) ──
+    secret_env: "dict | None" = None
+    secret_values: list[str] = []
     if secrets:
-        if use_sudo:
-            raise ToolError("secrets and use_sudo cannot be combined in one call.")
-        env, values, serr = await _resolve_secrets(secrets)
+        secret_env, secret_values, serr = await _resolve_secrets(secrets)
         if serr:
             raise ToolError(serr)
-        from . import secrets_store
-        res = await _await_with_heartbeat(
-            _re_exec_env(host, command, env, timeout=timeout), ctx)
-        res["stdout"] = secrets_store.redact(res.get("stdout", ""), values)
-        res["stderr"] = secrets_store.redact(res.get("stderr", ""), values)
-        audit_log(host, command + f"  [secrets: {','.join(secrets)}]",
-                  res.get("exit_code", "?"), operation="exec_secrets")
-        return json.dumps(res, indent=2, ensure_ascii=False)
-    if use_sudo:
-        from .sudo_creds import resolve_sudo_password
-        password = await resolve_sudo_password(host)
-        if password is None:
-            raise ToolError(
-                "No sudo password available for this host; the command "
-                "was NOT run. Ask the user to provide it out-of-band: "
-                "prefer an interactive input/choice tool (e.g. ask_user) "
-                "to request that they run "
-                f"`portal sudo set {host}` in a separate "
-                "terminal and confirm when done, then retry this call. If "
-                "you have no such tool, tell the user what to run and end "
-                "your turn to wait for their next message. (Alternatively "
-                "an operator can set `sudo_password_command` for the host "
-                "in hosts.yaml.) Never ask the user to paste the password "
-                "into this conversation."
-            )
-        res = await _await_with_heartbeat(
-            _re_sudo_exec(host, command, password, timeout=timeout), ctx)
-        audit_log(host, "sudo: " + command, res.get("exit_code", "?"),
-                  operation="exec_sudo")
-        return json.dumps(res, indent=2, ensure_ascii=False)
-    # Plain one-shot path: ssh_exec runs over the pool and audits as "exec".
-    res = await _await_with_heartbeat(
-        ssh_exec(host, command, timeout=int(timeout)), ctx)
-    return json.dumps(res, indent=2, ensure_ascii=False)
+    secret_label = f"  [secrets: {','.join(secrets)}]" if secrets else ""
+
+    from . import secrets_store
+    from .sudo_creds import resolve_sudo_password
+
+    async def run_one(h: str, cmd: str) -> dict:
+        if secret_env is not None:
+            res = await _re_exec_env(h, cmd, secret_env, timeout=timeout)
+            res["stdout"] = secrets_store.redact(res.get("stdout", ""), secret_values)
+            res["stderr"] = secrets_store.redact(res.get("stderr", ""), secret_values)
+            audit_log(h, cmd + secret_label, res.get("exit_code", "?"),
+                      operation="exec_secrets")
+            return res
+        if use_sudo:
+            password = await resolve_sudo_password(h)
+            if password is None:
+                if multi_host:
+                    return {"host": h, "command": cmd, "exit_code": -1,
+                            "stdout": "", "stderr": f"no sudo password for {h!r}",
+                            "error": "no sudo password available"}
+                raise ToolError(_sudo_missing_message(h))
+            res = await _re_sudo_exec(h, cmd, password, timeout=timeout)
+            audit_log(h, "sudo: " + cmd, res.get("exit_code", "?"),
+                      operation="exec_sudo")
+            return res
+        # Plain one-shot path: ssh_exec runs over the pool and audits as "exec".
+        return await ssh_exec(h, cmd, timeout=int(timeout))
+
+    async def run_host(h: str):
+        if not multi_cmd:
+            return await run_one(h, cmd_list[0])
+        results = []
+        for cmd in cmd_list:
+            r = await run_one(h, cmd)
+            results.append(r)
+            if stop_on_error and r.get("exit_code", 0) not in (0, None):
+                results.append({"info": f"stopped at {cmd!r} (exit {r.get('exit_code')})"})
+                break
+        return {"host": h, "results": results}
+
+    async def run_all():
+        if not multi_host:
+            return await run_host(hosts[0])
+        if serialize:
+            out = []
+            for i, h in enumerate(hosts):
+                r = await run_host(h)
+                out.append(r)
+                if stop_on_error and _result_failed(r):
+                    out.append({"info": f"serialized run stopped at host {h!r}"})
+                    break
+                if i < len(hosts) - 1 and delay_s > 0:
+                    await asyncio.sleep(delay_s)
+            return out
+        raw = await asyncio.gather(*[run_host(h) for h in hosts],
+                                   return_exceptions=True)
+        out = []
+        for h, r in zip(hosts, raw):
+            if isinstance(r, Exception):
+                out.append({"host": h, "error": str(r), "exit_code": -1})
+            else:
+                out.append(r)
+        return out
+
+    result = await _await_with_heartbeat(run_all(), ctx)
+    return json.dumps(result, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
