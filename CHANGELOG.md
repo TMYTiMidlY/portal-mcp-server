@@ -1,3 +1,9 @@
+## v3.0.1 (2026-06-08)
+
+### Fix
+
+- **paths**: reject relative PORTAL_* and PORTAL_CREDENTIAL_AGENT_SOCKET overrides
+
 ## v3.0.0 (2026-06-08)
 
 ### BREAKING CHANGE
