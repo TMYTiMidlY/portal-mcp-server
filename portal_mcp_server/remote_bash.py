@@ -116,7 +116,7 @@ async def remote_bash(host: str, cmd: str, timeout: float = 3600.0) -> Dict[str,
     exited, the TCP connection dropped, or an earlier command produced
     output the codec couldn't decode), this transparently recreates the
     session and retries the command **once** so the agent doesn't have
-    to call ``portal_bash_close`` and reissue every time.
+    to call ``portal_close_shell`` and reissue every time.
     """
     smgr = get_session_manager()
     sid = await _ensure_session(host)
@@ -163,9 +163,12 @@ async def remote_sudo_exec(host: str, command: str, password: str,
     the password from stdin, which would collide with the persistent shell's
     sentinel protocol. ``-p ''`` suppresses the prompt; ``-k`` forces a fresh
     auth so a previously-cached sudo ticket can't mask a wrong password. cwd/env
-    from the persistent ``portal_bash`` session therefore do NOT apply here.
+    from the persistent ``portal_shell`` session therefore do NOT apply here.
 
-    The password is never logged and never echoed (``sudo -S`` reads silently).
+    Returns ``{host, command, exit_code, stdout, stderr, elapsed_s}`` —
+    ``conn.run`` natively splits the streams (sudo auth failures land on
+    stderr). The password is never logged and never echoed (``sudo -S`` reads
+    silently) and never appears on argv (it goes in on stdin).
     """
     from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
     from .safety import quote_shell
@@ -173,6 +176,7 @@ async def remote_sudo_exec(host: str, command: str, password: str,
     mgr = get_manager()
     conn = await mgr.get_connection(host)
     wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(command)}"
+    t0 = time.monotonic()
     try:
         result = await asyncio.wait_for(
             conn.run(wrapped, input=password + "\n", check=False,
@@ -180,19 +184,16 @@ async def remote_sudo_exec(host: str, command: str, password: str,
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        return {"host": host, "error": f"sudo command timed out after {timeout}s",
-                "exit_code": -1}
+        return {"host": host, "command": command, "exit_code": -1, "stdout": "",
+                "stderr": f"[timeout] sudo command timed out after {timeout}s",
+                "elapsed_s": round(time.monotonic() - t0, 3)}
     finally:
         mgr.release_connection(host, conn)
 
-    stdout = result.stdout or ""
-    stderr = (result.stderr or "").strip()
-    # sudo emits auth failures on stderr; surface them so the agent can react,
-    # but keep them out of the audit log (handled by the caller).
-    output = _clean(stdout)
-    if stderr:
-        output = (output + "\n" if output else "") + f"[stderr] {stderr}"
-    return {"host": host, "output": output, "exit_code": result.returncode}
+    return {"host": host, "command": command, "exit_code": result.returncode,
+            "stdout": (result.stdout or "").rstrip("\n"),
+            "stderr": (result.stderr or "").rstrip("\n"),
+            "elapsed_s": round(time.monotonic() - t0, 3)}
 
 
 async def remote_exec_with_env(host: str, command: str, env: dict,
@@ -205,10 +206,11 @@ async def remote_exec_with_env(host: str, command: str, env: dict,
     :func:`remote_sudo_exec` this is a one-shot ``conn.run`` (not the persistent
     session): the command's own stdin is therefore already at EOF (fine for
     ``curl``/CLI tools that read flags, not stdin). cwd/env from prior
-    ``portal_bash`` calls do NOT apply.
+    ``portal_shell`` calls do NOT apply.
 
-    ``env`` maps already-resolved ``ENV_VAR_NAME -> value``. The caller is
-    responsible for redacting the returned output.
+    ``env`` maps already-resolved ``ENV_VAR_NAME -> value``. Returns
+    ``{host, command, exit_code, stdout, stderr, elapsed_s}``; the caller is
+    responsible for redacting ``stdout`` / ``stderr``.
     """
     from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
     from .safety import quote_shell
@@ -219,6 +221,7 @@ async def remote_exec_with_env(host: str, command: str, env: dict,
         f"export {name}={quote_shell(value)}\n" for name, value in env.items()
     )
     script = exports + command + "\n"
+    t0 = time.monotonic()
     try:
         result = await asyncio.wait_for(
             conn.run("bash -s", input=script, check=False,
@@ -226,15 +229,14 @@ async def remote_exec_with_env(host: str, command: str, env: dict,
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        return {"host": host, "error": f"command timed out after {timeout}s",
-                "exit_code": -1}
+        return {"host": host, "command": command, "exit_code": -1, "stdout": "",
+                "stderr": f"[timeout] command timed out after {timeout}s",
+                "elapsed_s": round(time.monotonic() - t0, 3)}
     finally:
         mgr.release_connection(host, conn)
 
-    stdout = result.stdout or ""
-    stderr = (result.stderr or "").strip()
-    output = _clean(stdout)
-    if stderr:
-        output = (output + "\n" if output else "") + f"[stderr] {stderr}"
-    return {"host": host, "output": output, "exit_code": result.returncode}
+    return {"host": host, "command": command, "exit_code": result.returncode,
+            "stdout": (result.stdout or "").rstrip("\n"),
+            "stderr": (result.stderr or "").rstrip("\n"),
+            "elapsed_s": round(time.monotonic() - t0, 3)}
 

@@ -133,7 +133,7 @@ class HostConfig:
     # Shell command that prints this host's *sudo* password to stdout. Same
     # execution model as ``password_command`` (run on demand, never persisted,
     # never logged, never exposed via any MCP tool parameter). Used by
-    # ``portal_bash(use_sudo=True)`` to feed ``sudo -S`` on stdin. The
+    # ``portal_exec(use_sudo=True)`` to feed ``sudo -S`` on stdin. The
     # alternative source is the per-user credential agent populated
     # out-of-band by ``portal sudo set`` (see sudo_creds.py).
     sudo_password_command: Optional[str] = None

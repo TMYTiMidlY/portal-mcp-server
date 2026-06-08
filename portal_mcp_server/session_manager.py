@@ -40,7 +40,7 @@ class ShellSession:
     # The pooled SSH connection that backs ``process``. Stored here so
     # ``close_session`` can release the pool slot back to ConnectionManager;
     # without this reference we leak ``in_use`` counters and the pool grows
-    # unboundedly under sustained portal_bash usage.
+    # unboundedly under sustained portal_shell usage.
     conn: asyncssh.SSHClientConnection
     created_at: float = field(default_factory=time.time)
     last_used: float = field(default_factory=time.time)
@@ -237,7 +237,7 @@ class SessionManager:
             # Release the pool slot regardless of how the bash process
             # terminated. Without this ``in_use`` keeps creeping up and
             # ``ConnectionManager`` opens a brand-new TCP connection for
-            # every subsequent ``portal_bash`` call once the per-conn cap
+            # every subsequent ``portal_shell`` call once the per-conn cap
             # is reached.
             get_manager().release_connection(session.host_name, session.conn)
         async with self._lock:

@@ -16,14 +16,14 @@ import pytest
 #  LLM-facing safety invariants
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_portal_bash_has_no_password_parameter():
-    """portal_bash exposes a boolean `use_sudo` switch, never a password."""
-    from portal_mcp_server.cli import portal_bash
-    params = inspect.signature(portal_bash).parameters
+def test_portal_exec_has_no_password_parameter():
+    """portal_exec exposes a boolean `use_sudo` switch, never a password."""
+    from portal_mcp_server.cli import portal_exec
+    params = inspect.signature(portal_exec).parameters
     assert "use_sudo" in params
     assert params["use_sudo"].annotation is bool
     assert not any("password" in p.lower() or "passwd" in p.lower() for p in params), (
-        "portal_bash must not take a password — it would leak into tool-call traces"
+        "portal_exec must not take a password — it would leak into tool-call traces"
     )
 
 

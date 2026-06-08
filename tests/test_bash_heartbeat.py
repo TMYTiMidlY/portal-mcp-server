@@ -1,4 +1,4 @@
-"""portal_bash keepalive heartbeat.
+"""portal_shell / portal_exec keepalive heartbeat.
 
 A remote command produces no output until it finishes, so without a keepalive a
 slow command leaves the MCP client hearing nothing and many clients abort the
@@ -126,15 +126,27 @@ def test_ctx_detected_as_context_param():
     from mcp.server.fastmcp.utilities.context_injection import (
         find_context_parameter,
     )
-    assert find_context_parameter(cli.portal_bash) == "ctx"
+    assert find_context_parameter(cli.portal_shell) == "ctx"
+    assert find_context_parameter(cli.portal_exec) == "ctx"
 
 
-async def test_portal_bash_schema_excludes_ctx():
+async def test_portal_shell_schema_excludes_ctx():
     tools = await cli.mcp.list_tools()
-    tool = next(t for t in tools if t.name == "portal_bash")
+    tool = next(t for t in tools if t.name == "portal_shell")
     props = (tool.inputSchema or {}).get("properties", {})
     assert "ctx" not in props
-    # The real client-facing params are still present.
+    # portal_shell is the pure session: host/command/timeout, no sudo/secrets.
+    assert {"host", "command", "timeout"} <= set(props)
+    assert "use_sudo" not in props
+    assert "secrets" not in props
+
+
+async def test_portal_exec_schema_excludes_ctx():
+    tools = await cli.mcp.list_tools()
+    tool = next(t for t in tools if t.name == "portal_exec")
+    props = (tool.inputSchema or {}).get("properties", {})
+    assert "ctx" not in props
+    # sudo + secrets moved here (one-shot paths).
     assert {"host", "command", "timeout", "use_sudo", "secrets"} <= set(props)
 
 
@@ -150,5 +162,5 @@ async def test_portal_local_exec_schema_excludes_ctx():
     tool = next(t for t in tools if t.name == "portal_local_exec")
     props = (tool.inputSchema or {}).get("properties", {})
     assert "ctx" not in props
-    # timeout is still client-settable, mirroring portal_bash.
+    # timeout is still client-settable, mirroring portal_exec.
     assert {"command", "secrets", "timeout"} <= set(props)

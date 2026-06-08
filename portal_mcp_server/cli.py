@@ -1,7 +1,7 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 18 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
-bash(+close) core + local_exec + host/transfer/tunnel(open,close,
+Exposes 19 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+shell(+close_shell)/exec core + local_exec + host/transfer/tunnel(open,close,
 list)/multi_exec/playbook/ping/audit/check.
 """
 import asyncio
@@ -136,7 +136,7 @@ async def _safe_report(ctx: "Context", done: int, total: "int | None" = None) ->
 
 
 def _heartbeat_interval() -> float:
-    """Seconds between portal_bash keepalive pings (env-overridable)."""
+    """Seconds between portal_shell/portal_exec keepalive pings (env-overridable)."""
     raw = os.environ.get("PORTAL_BASH_HEARTBEAT_INTERVAL", "")
     try:
         v = float(raw)
@@ -547,8 +547,9 @@ async def portal_multi_exec(mode: Literal["parallel", "rolling", "broadcast"],
                                     commands_json='["apt update","apt install -y nginx"]',
                                     hosts_json='["web01","web02"]')
 
-    For single-host commands use portal_bash. To select hosts by tag instead of
-    explicit list, pass group_tag="<tag>" instead of hosts_json (parallel mode only).
+    For single-host commands use portal_exec (one-shot) or portal_shell
+    (persistent session). To select hosts by tag instead of an explicit list,
+    pass group_tag="<tag>" instead of hosts_json (parallel mode only).
     """
     if group_tag:
         hosts = _resolve_group(group_tag)
@@ -748,7 +749,7 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
         use this when you only need to know "which version am I talking to?"
         without pulling the full snapshot.
     - view="sessions": the `host → session_id` map of cached persistent bash
-        sessions (what portal_bash reuses per host). Cheap; use it to see which
+        sessions (what portal_shell reuses per host). Cheap; use it to see which
         hosts currently have a warm `bash -i` whose cwd/env survive across calls.
     - view="history": last `limit` audit log entries (default 50). Optional `host_filter`.
         Example: portal_audit(view="history", limit=20, host_filter="web01")
@@ -805,7 +806,8 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
 # per host (via the connection pool) and provide:
 #   - portal_read / portal_patch :  hash-protected concurrent-safe edits
 #   - portal_grep / portal_glob  :  remote ripgrep / find with structured output
-#   - portal_bash                :  single persistent bash session (cwd + env survive)
+#   - portal_shell               :  single persistent bash session (cwd + env survive)
+#   - portal_exec                :  stateless one-shot exec (1 host; +sudo/secrets)
 
 @mcp.tool()
 async def portal_read(host: str, path: str, start: int = 1,
@@ -945,41 +947,83 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 
 
 @mcp.tool()
-async def portal_bash(host: str, command: str, timeout: float = 3600.0,
-                      use_sudo: bool = False,
-                      secrets: "list[str] | None" = None,
-                      ctx: "Context | None" = None) -> str:
-    """Run a command in the persistent bash session for <host>.
+async def portal_shell(host: str, command: str, timeout: float = 3600.0,
+                       ctx: "Context | None" = None) -> str:
+    """Run a command in the **persistent bash session** for one host — cwd and
+    environment (cd / export / venv activation) survive across calls.
+
+    Use portal_shell only when you need that state continuity; otherwise use
+    portal_exec (it's faster — no session setup — and can target many hosts).
 
     Behavior:
-      - First call for a host auto-creates a `bash -i` session via SSH.
-      - Subsequent calls reuse the same shell, so cwd and exported env vars survive.
-        Example: `cd /tmp` in one call, `pwd` in the next prints `/tmp`.
-      - Output is sentinel-bounded; PTY echo is disabled so output is clean.
+      - First call for a host auto-creates a `bash -i` session via SSH; later
+        calls reuse the same shell, so `cd /tmp` in one call makes the next
+        call's `pwd` print `/tmp`.
+      - Each host keeps exactly ONE sticky session (host → session_id), reused
+        across calls. This "session reuse" (state) is a different layer from the
+        connection pool's "connection reuse" (speed) — see README §"Two layers
+        of reuse".
+      - Output is the combined stdout/stderr stream (a PTY merges them — use
+        portal_exec when you need them split). Returns {host, session_id,
+        command, exit_code, output, duration_s}.
       - While the command runs, periodic MCP progress notifications are emitted
         as a keepalive so long, output-silent commands don't trip the client's
         request-timeout window (JSON-RPC -32001). The server-side `timeout`
         below is independent of that client window.
+      - sudo / secret injection are NOT available here (both are one-shot by
+        nature) — use portal_exec(use_sudo=True / secrets=[...]).
 
     ⚠️ Safety: by default, write operations should target /tmp/ on the remote
        unless the user has explicitly approved a different path. This tool does
        NOT enforce that — it's a convention for the agent's skill prompt.
+    """
+    err = _gate(host, command)
+    if err:
+        raise ToolError(f"BLOCKED: {err}")
+    res = await _await_with_heartbeat(
+        _re_bash(host, command, timeout=timeout), ctx)
+    audit_log(host, command, res.get("exit_code", "?"), operation="shell")
+    return json.dumps(res, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+async def portal_exec(host: str, command: str, timeout: float = 3600.0,
+                      use_sudo: bool = False,
+                      secrets: "list[str] | None" = None,
+                      ctx: "Context | None" = None) -> str:
+    """Run a command on a remote host and **get the result immediately** (exit
+    code + split stdout/stderr). This is the default workhorse: stateless and
+    fast (it reuses the connection pool, with no persistent-session setup).
+
+    Need cwd/export to persist across calls? Use portal_shell instead.
+
+    Behavior:
+      - One-shot execution over the pooled SSH connection (no `bash -i`
+        session): the first connect to a host pays the TCP+auth cost (~280ms),
+        every later call just opens a channel (~10-30ms).
+      - Returns {host, command, exit_code, stdout, stderr, elapsed_s}. stdout
+        and stderr are kept SEPARATE (unlike portal_shell, whose PTY merges
+        them) because conn.run gives them split natively.
+      - While the command runs, periodic MCP progress notifications keep the
+        client's request window alive (JSON-RPC -32001), independent of the
+        server-side `timeout`.
 
     use_sudo: run the command via `sudo -S`, feeding a password obtained
         out-of-band (NEVER passed by the agent). The password comes from the
         per-user credential agent populated by `portal sudo set <host>`, or
-        from the host's `sudo_password_command` in hosts.yaml. Because sudo
-        reads stdin, this runs as a ONE-SHOT command (not the persistent
-        session): cwd/env from prior portal_bash calls do not apply.
+        from the host's `sudo_password_command` in hosts.yaml. The command's
+        own stdin is consumed by the password (curl/CLI flag-reading tools are
+        unaffected; tools that themselves read stdin are not supported under
+        sudo).
 
     secrets: a list of named secrets (e.g. ["github_token"]) to inject as
         environment variables for THIS command only. You pass the NAME, never
         the value: the server resolves each from secrets.yaml or the
-        `portal secret set` cache and exports it as the uppercased env var (github_token
-        → $GITHUB_TOKEN). Reference it in `command` as `$GITHUB_TOKEN`. The value
-        is fed over SSH stdin (never on argv/audit) and is redacted to *** in the
-        returned output. Like use_sudo this is a ONE-SHOT command (cwd/env from
-        prior calls do not apply). Cannot be combined with use_sudo.
+        `portal secret set` cache and exports it as the uppercased env var
+        (github_token → $GITHUB_TOKEN). Reference it in `command` as
+        `$GITHUB_TOKEN`. The value is fed over SSH stdin (never on argv/audit)
+        and is redacted to *** in the returned stdout/stderr. Cannot be
+        combined with use_sudo.
     """
     err = _gate(host, command)
     if err:
@@ -993,9 +1037,10 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         from . import secrets_store
         res = await _await_with_heartbeat(
             _re_exec_env(host, command, env, timeout=timeout), ctx)
-        res["output"] = secrets_store.redact(res.get("output", ""), values)
+        res["stdout"] = secrets_store.redact(res.get("stdout", ""), values)
+        res["stderr"] = secrets_store.redact(res.get("stderr", ""), values)
         audit_log(host, command + f"  [secrets: {','.join(secrets)}]",
-                  res.get("exit_code", "?"), operation="remote_exec_secrets")
+                  res.get("exit_code", "?"), operation="exec_secrets")
         return json.dumps(res, indent=2, ensure_ascii=False)
     if use_sudo:
         from .sudo_creds import resolve_sudo_password
@@ -1017,11 +1062,11 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         res = await _await_with_heartbeat(
             _re_sudo_exec(host, command, password, timeout=timeout), ctx)
         audit_log(host, "sudo: " + command, res.get("exit_code", "?"),
-                  operation="remote_sudo")
+                  operation="exec_sudo")
         return json.dumps(res, indent=2, ensure_ascii=False)
+    # Plain one-shot path: ssh_exec runs over the pool and audits as "exec".
     res = await _await_with_heartbeat(
-        _re_bash(host, command, timeout=timeout), ctx)
-    audit_log(host, command, res.get("exit_code", "?"), operation="remote_bash")
+        ssh_exec(host, command, timeout=int(timeout)), ctx)
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
@@ -1044,7 +1089,7 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
         output is redacted to ***.
 
     timeout: seconds before the local command is killed (server-side). Like
-        portal_bash, this is independent of the client's request-timeout
+        portal_exec, this is independent of the client's request-timeout
         window; periodic MCP progress notifications are emitted while the
         command runs as a keepalive so long, output-silent commands don't trip
         that window (JSON-RPC -32001).
@@ -1078,8 +1123,13 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
 
 
 @mcp.tool()
-async def portal_bash_close(host: str) -> str:
-    """Close the cached default bash session for <host> (next call will reopen)."""
+async def portal_close_shell(host: str) -> str:
+    """Close the cached persistent bash session for <host> (the next
+    portal_shell call reopens a fresh one).
+
+    Rarely needed: the session is created/reused/auto-recreated implicitly by
+    portal_shell — you don't manage its lifecycle. Use this only to reset a
+    session whose state has gotten dirty."""
     err = _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")

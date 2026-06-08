@@ -19,10 +19,10 @@ from mcp.server.fastmcp.exceptions import ToolError
 # ────────────────────────────────────────────────────────────────────────────
 
 def test_tools_take_secret_names_not_values():
-    """portal_bash / portal_local_exec accept a list of secret NAMES via
+    """portal_exec / portal_local_exec accept a list of secret NAMES via
     `secrets`, never a token/value/secret parameter."""
-    from portal_mcp_server.cli import portal_bash, portal_local_exec
-    for fn in (portal_bash, portal_local_exec):
+    from portal_mcp_server.cli import portal_exec, portal_local_exec
+    for fn in (portal_exec, portal_local_exec):
         params = inspect.signature(fn).parameters
         assert "secrets" in params
         assert not any(
@@ -230,7 +230,7 @@ async def test_local_exec_unknown_secret_errors(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_portal_bash_secrets_and_sudo_mutually_exclusive():
+async def test_portal_exec_secrets_and_sudo_mutually_exclusive():
     from portal_mcp_server import cli
     with pytest.raises(ToolError, match="cannot be combined"):
-        await cli.portal_bash("web01", "echo hi", use_sudo=True, secrets=["x"])
+        await cli.portal_exec("web01", "echo hi", use_sudo=True, secrets=["x"])

@@ -139,7 +139,7 @@ class TestPortalBashCloseGate:
     async def test_bash_close_blocked_when_host_not_in_allowlist(
         self, policy, monkeypatch,
     ):
-        """portal_bash_close is state-changing (tears down a session) and
+        """portal_close_shell is state-changing (tears down a session) and
         must respect the same host allowlist as every other gated entry.
         """
         from portal_mcp_server import cli
@@ -154,7 +154,7 @@ class TestPortalBashCloseGate:
         monkeypatch.setattr(cli, "_re_bash_close", _must_not_be_called)
 
         with pytest.raises(ToolError, match="BLOCKED:"):
-            await cli.portal_bash_close("evil-host")
+            await cli.portal_close_shell("evil-host")
 
     @pytest.mark.asyncio
     async def test_bash_close_passes_when_host_in_allowlist(
@@ -168,7 +168,7 @@ class TestPortalBashCloseGate:
             return f"closed {host}"
 
         monkeypatch.setattr(cli, "_re_bash_close", _ok)
-        out = await cli.portal_bash_close("safe-01")
+        out = await cli.portal_close_shell("safe-01")
         assert out == "closed safe-01"
         assert called["with"] == "safe-01"
 
