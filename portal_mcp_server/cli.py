@@ -127,11 +127,57 @@ def _make_progress_cb(ctx: "Context | None"):
     return cb
 
 
-async def _safe_report(ctx: "Context", done: int, total: int) -> None:
+async def _safe_report(ctx: "Context", done: int, total: "int | None" = None) -> None:
     try:
         await ctx.report_progress(done, total)
     except Exception:  # pragma: no cover - progress is best-effort
         pass
+
+
+def _heartbeat_interval() -> float:
+    """Seconds between portal_bash keepalive pings (env-overridable)."""
+    raw = os.environ.get("PORTAL_BASH_HEARTBEAT_INTERVAL", "")
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 5.0
+    return v if v > 0 else 5.0
+
+
+async def _await_with_heartbeat(coro, ctx: "Context | None",
+                                interval: "float | None" = None):
+    """Await ``coro`` while emitting periodic MCP progress notifications.
+
+    Unlike portal_transfer, a remote command produces no output until it
+    finishes, so a slow command would leave the client hearing nothing. Many
+    clients abort a silent request after a fixed idle window (JSON-RPC
+    ``-32001`` request timeout) even though the server-side ``timeout`` is far
+    higher — and the remote command keeps running, so the result is simply
+    lost. Each progress notification resets that window; the value is just a
+    monotonic liveness tick (``total`` left indeterminate). No-op when ``ctx``
+    is None or the client supplied no progressToken.
+    """
+    task = asyncio.ensure_future(coro)
+    if ctx is None:
+        return await task
+    if interval is None:
+        interval = _heartbeat_interval()
+    tick = 0
+    try:
+        while True:
+            done, _ = await asyncio.wait({task}, timeout=interval)
+            if task in done:
+                break
+            tick += 1
+            await _safe_report(ctx, tick, None)
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+    return task.result()
 
 
 def _gate_many(hosts: list[str], command: str = "") -> str | None:
@@ -890,7 +936,8 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 @mcp.tool()
 async def portal_bash(host: str, command: str, timeout: float = 3600.0,
                       use_sudo: bool = False,
-                      secrets: "list[str] | None" = None) -> str:
+                      secrets: "list[str] | None" = None,
+                      ctx: "Context | None" = None) -> str:
     """Run a command in the persistent bash session for <host>.
 
     Behavior:
@@ -898,6 +945,10 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
       - Subsequent calls reuse the same shell, so cwd and exported env vars survive.
         Example: `cd /tmp` in one call, `pwd` in the next prints `/tmp`.
       - Output is sentinel-bounded; PTY echo is disabled so output is clean.
+      - While the command runs, periodic MCP progress notifications are emitted
+        as a keepalive so long, output-silent commands don't trip the client's
+        request-timeout window (JSON-RPC -32001). The server-side `timeout`
+        below is independent of that client window.
 
     ⚠️ Safety: by default, write operations should target /tmp/ on the remote
        unless the user has explicitly approved a different path. This tool does
@@ -929,7 +980,8 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         if serr:
             raise ToolError(serr)
         from . import secrets_store
-        res = await _re_exec_env(host, command, env, timeout=timeout)
+        res = await _await_with_heartbeat(
+            _re_exec_env(host, command, env, timeout=timeout), ctx)
         res["output"] = secrets_store.redact(res.get("output", ""), values)
         audit_log(host, command + f"  [secrets: {','.join(secrets)}]",
                   res.get("exit_code", "?"), operation="remote_exec_secrets")
@@ -951,18 +1003,21 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
                 "in hosts.yaml.) Never ask the user to paste the password "
                 "into this conversation."
             )
-        res = await _re_sudo_exec(host, command, password, timeout=timeout)
+        res = await _await_with_heartbeat(
+            _re_sudo_exec(host, command, password, timeout=timeout), ctx)
         audit_log(host, "sudo: " + command, res.get("exit_code", "?"),
                   operation="remote_sudo")
         return json.dumps(res, indent=2, ensure_ascii=False)
-    res = await _re_bash(host, command, timeout=timeout)
+    res = await _await_with_heartbeat(
+        _re_bash(host, command, timeout=timeout), ctx)
     audit_log(host, command, "ok", operation="remote_bash")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
 async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
-                            timeout: float = 600.0) -> str:
+                            timeout: float = 600.0,
+                            ctx: "Context | None" = None) -> str:
     """Run a ONE-SHOT command on the MCP server host (LOCAL), optionally with
     named secrets injected as environment variables.
 
@@ -976,6 +1031,12 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
         → $GITHUB_TOKEN) into the child process environment (never on argv/audit).
         Reference it in `command` as `$GITHUB_TOKEN`. Any echo of the value in the
         output is redacted to ***.
+
+    timeout: seconds before the local command is killed (server-side). Like
+        portal_bash, this is independent of the client's request-timeout
+        window; periodic MCP progress notifications are emitted while the
+        command runs as a keepalive so long, output-silent commands don't trip
+        that window (JSON-RPC -32001).
 
     Use this to run a local command/script that needs an API token without the
     token ever entering this conversation or being sent to the model backend.
@@ -996,7 +1057,8 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
         if serr:
             raise ToolError(serr)
     from . import secrets_store
-    res = await _local_exec_env(command, env, timeout=timeout)
+    res = await _await_with_heartbeat(
+        _local_exec_env(command, env, timeout=timeout), ctx)
     res["output"] = secrets_store.redact(res.get("output", ""), values)
     suffix = f"  [secrets: {','.join(secrets)}]" if secrets else ""
     audit_log("<local>", command + suffix, res.get("exit_code", "?"),

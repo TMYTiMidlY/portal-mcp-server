@@ -134,7 +134,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 |---|---|
 | `portal_read` / `portal_patch` | Read remote file with SHA-256 of file + range; patch checks `file_hash` + per-range hash to prevent concurrent overwrite; writes via tmp + `posix_rename` (atomic) and re-hash after write |
 | `portal_grep` / `portal_glob` | Remote `rg --json` / `find` with structured output; first-call probe is cached |
-| `portal_bash` / `_close` / `_status` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user credential agent / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--portal-sudo-set)) |
+| `portal_bash` / `_close` / `_status` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; emits MCP progress while the command runs as a keepalive so long, output-silent commands don't trip the client's idle timeout (JSON-RPC `-32001`); `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user credential agent / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--portal-sudo-set)) |
 | `portal_cleanup_tmps` | Garbage-collects orphan `*.mcp_tmp.*` files left by interrupted patches |
 
 ### 10 high-level tools (mode-switched)
@@ -536,6 +536,7 @@ All configurable knobs in portal-mcp-server are passed as environment variables,
 | Connection pool | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels per TCP connection |
 | Connection pool | `PORTAL_SSH_MAX_IDLE_TIME` | Idle-close timeout in seconds |
 | Connection pool | `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds |
+| Reliability | `PORTAL_BASH_HEARTBEAT_INTERVAL` | Keepalive heartbeat interval (s) while `portal_bash` runs |
 | Testing (dev only) | `PORTAL_TEST_LIVE` | Gate for live SSH integration tests |
 | Testing (dev only) | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | Live test target |
 
@@ -585,6 +586,12 @@ Controls the in-process asyncssh connection pool. Defaults work well for most se
 | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels (SFTP, exec, tunnel, …) multiplexed over one TCP connection. New connections are opened when exceeded, up to `PORTAL_SSH_POOL_SIZE` | `5` |
 | `PORTAL_SSH_MAX_IDLE_TIME` | Close idle connections (no active channels) after this many seconds. Set `0` to disable | `600` (10 min) |
 | `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds; aged connections with no active channels are closed. Guards against silent firewall / NAT drops | `3600` (1 hour) |
+
+### Reliability
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `PORTAL_BASH_HEARTBEAT_INTERVAL` | How often (seconds) `portal_bash` / `portal_local_exec` emits an MCP progress notification as a keepalive while the command runs, so an output-silent command doesn't trip the client's idle timeout (JSON-RPC `-32001`). Independent of the server-side `timeout` parameter. Non-positive or invalid values fall back to the default | `5` (seconds) |
 
 ### Testing (dev only)
 

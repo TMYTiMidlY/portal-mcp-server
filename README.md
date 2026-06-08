@@ -134,7 +134,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 |---|---|
 | `portal_read` / `portal_patch` | 读远端文件并拿 SHA-256；patch 用 `file_hash` + per-range hash 防并发覆盖，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验 |
 | `portal_grep` / `portal_glob` | 远端 `rg --json` / `find` 结构化输出，首次连接探测一次缓存 |
-| `portal_bash` / `portal_bash_close` / `portal_bash_status` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；`use_sudo=True` 走一次性 `sudo -S`（密码从 per-user credential agent / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--portal-sudo-set)） |
+| `portal_bash` / `portal_bash_close` / `portal_bash_status` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；命令执行期间发 MCP progress 当 keepalive，避免长时间无输出的命令撞客户端 idle 超时（JSON-RPC `-32001`）；`use_sudo=True` 走一次性 `sudo -S`（密码从 per-user credential agent / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--portal-sudo-set)） |
 | `portal_cleanup_tmps` | 清理 patch 中断后留下的孤儿 `*.mcp_tmp.*` |
 
 ### 10 个高层工具（mode 切换）
@@ -549,6 +549,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 | 连接池 | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 最大并发 channel 数 |
 | 连接池 | `PORTAL_SSH_MAX_IDLE_TIME` | 空闲连接自动关闭超时（秒） |
 | 连接池 | `PORTAL_SSH_MAX_CONN_AGE` | 连接最大存活时间（秒） |
+| 可靠性 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_bash` 执行期间 keepalive 心跳间隔（秒） |
 | 测试（仅 dev） | `PORTAL_TEST_LIVE` | 是否执行真实 SSH 集成测试 |
 | 测试（仅 dev） | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | live 测试目标 |
 
@@ -598,6 +599,12 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 上最大并发 channel 数（SFTP 会话、exec、tunnel 等共享）。超出后新建 TCP，直到 `PORTAL_SSH_POOL_SIZE` 上限 | `5` |
 | `PORTAL_SSH_MAX_IDLE_TIME` | 无活跃 channel 的连接空闲多久后自动关闭（秒）。设 `0` 禁用 | `600`（10 分钟） |
 | `PORTAL_SSH_MAX_CONN_AGE` | 连接最大存活时间（秒），超龄且无活跃 channel 时关闭。防止防火墙 / NAT 静默断连 | `3600`（1 小时） |
+
+### 可靠性
+
+| 环境变量 | 含义 | 默认 |
+|---|---|---|
+| `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_bash` / `portal_local_exec` 在命令执行期间每隔多少秒发一条 MCP progress 通知作 keepalive。命令无输出也不会让 client 撞 idle 超时（JSON-RPC `-32001`）；与服务端 `timeout` 参数相互独立。非正数或非法值回退到默认 | `5`（秒） |
 
 ### 测试（仅 dev）
 
