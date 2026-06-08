@@ -89,7 +89,7 @@ The naive way to give an agent remote access is to let it shell out to `ssh` / `
 
 ```bash
 # 1. Register with Claude Code (see "Client integration" for other MCP hosts)
-claude mcp add portal -- uvx portal-mcp-server
+claude mcp add portal -- uvx portal-mcp-server@latest
 
 # 2. Make sure the target host is in ~/.ssh/config or hosts.yaml
 #    (hosts.yaml defaults to ~/.config/portal-mcp-server/hosts.yaml;
@@ -296,7 +296,7 @@ No clone needed — let your MCP client launch it via `uvx` straight from PyPI. 
 Manual smoke test in a shell:
 
 ```bash
-uvx portal-mcp-server --help
+uvx portal-mcp-server@latest --help
 ```
 
 ### Developer (will modify code or run tests)
@@ -387,7 +387,7 @@ The `sudo` / `secret` subcommand trees mirror this shape (key noun is `host` / `
 
 ## Client integration
 
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlciJdfQ==)
+[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlckBsYXRlc3QiXX0=)
 
 `portal-mcp-server` is a local stdio MCP server — any MCP-capable host can install it. Each section below gives the minimal config for a popular host. `uvx` pulls from PyPI and caches automatically — no clone or venv required.
 
@@ -402,7 +402,7 @@ The `sudo` / `secret` subcommand trees mirror this shape (key noun is `host` / `
   "mcpServers": {
     "portal": {
       "command": "uvx",
-      "args": ["portal-mcp-server"]
+      "args": ["portal-mcp-server@latest"]
     }
   }
 }
@@ -423,7 +423,7 @@ To override hosts / policies / log paths, append an `env` block:
 Edit `<project>/.mcp.json` (same schema as above), or register via CLI / slash command:
 
 ```bash
-claude mcp add portal -- uvx portal-mcp-server
+claude mcp add portal -- uvx portal-mcp-server@latest
 # or run /mcp inside a Claude Code session; pass --scope user to register globally
 ```
 
@@ -433,7 +433,7 @@ claude mcp add portal -- uvx portal-mcp-server
 Write `<project>/.mcp.json` for project scope, or register at user scope with one command (applies to every project):
 
 ```bash
-copilot mcp add portal -- uvx portal-mcp-server
+copilot mcp add portal -- uvx portal-mcp-server@latest
 # or run /mcp inside a Copilot CLI session for the interactive flow
 ```
 
@@ -464,7 +464,7 @@ Click the **Install in VS Code** badge above for one-click setup, or write to `<
     "portal": {
       "type": "stdio",
       "command": "uvx",
-      "args": ["portal-mcp-server"]
+      "args": ["portal-mcp-server@latest"]
     }
   }
 }
@@ -501,7 +501,7 @@ Codex uses TOML. Edit `~/.codex/config.toml`:
 ```toml
 [mcp_servers.portal]
 command = "uvx"
-args = ["portal-mcp-server"]
+args = ["portal-mcp-server@latest"]
 ```
 
 After starting Codex, run `/mcp` in the TUI to confirm `portal` is loaded.
@@ -605,7 +605,7 @@ Only relevant when running `tests/`; regular MCP deployments do not need these. 
   "mcpServers": {
     "portal": {
       "command": "uvx",
-      "args": ["portal-mcp-server"],
+      "args": ["portal-mcp-server@latest"],
       "env": {
         "PORTAL_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
         "PORTAL_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
