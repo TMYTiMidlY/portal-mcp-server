@@ -11,7 +11,6 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras           # 准备 .venv + 所有 dev 依赖
 source .venv/bin/activate
-ruff check portal_mcp_server/  # lint，应零 error
 pytest                         # 应全绿（live SSH 测试默认 skip）
 ```
 
@@ -48,10 +47,7 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 
 ## 测试要求
 
-- 提交前两条**都**必须过（CI 在 4 个 Python 版本上跑同样的检查，本地任意一条挂 CI 就会红）：
-  - `ruff check portal_mcp_server/` 必须**零 error**（CI 只 lint 产品代码，不 lint 测试）
-  - `pytest tests/ -v` 必须**全绿**（live SSH 测试默认 skip，不需要真实 host）
-- 一行预检：`ruff check portal_mcp_server/ && pytest tests/ -v`
+- 提交前 `pytest tests/ -v` 必须**全绿**（live SSH 测试默认 skip，不需要真实 host）
 - 修复 bug 时**先写测试**重现问题，再修代码——这样能防止 regression
 - 安全 / 资源生命周期相关的修复，配套测试要进入 `tests/test_pool_leak_regression.py` 或 `tests/test_gate_coverage_fixes.py` 系列
 - 跑端到端验证用 `tests/live_smoke.py`（需要真实 SSH host，详见 README "测试" 节）
@@ -157,9 +153,9 @@ GH environment `pypi` 在仓库 Settings → Environments 里绑到 https://pypi
 **版本号、CHANGELOG、`uv.lock` 全部由 [Commitizen](https://commitizen-tools.github.io/commitizen/) 托管**——`pyproject.toml` 里配了 `version_provider = "uv"`，`cz bump` 会把 `uv.lock` 里的自身版本号一起更新并纳入同一个 bump commit。
 
 1. 确保要发版的 commit 都已 merge 进 `main`，本地在干净的 `main` HEAD 上
-2. 本地预检：`pytest tests/ -v && ruff check portal_mcp_server/`
+2. （可选 shift-left）本地预跑一遍 hooks：`uv run ruff check portal_mcp_server/ && uv run pytest tests/ -q`——不跑也行，下一步 `cz bump` 配的 `pre_bump_hooks` 会自动跑同样两条；先跑只是为了在 cz 改 `pyproject.toml` / `uv.lock` / `CHANGELOG.md` 之前就发现 lint / 测试问题
 3. 预览将要发的版本和 CHANGELOG：`uv run cz bump --dry-run`
-4. 正式发版：`uv run cz bump` —— 一条命令完成：按 commit 历史递增 `pyproject.toml` 的 `version`、更新 `uv.lock`、在 `CHANGELOG.md` 顶部生成 `## v<x.y.z> (<日期>)` 段、建 bump commit、打 annotated `v<x.y.z>` tag（`annotated_tag = true`）
+4. 正式发版：`uv run cz bump` —— 先跑 `pre_bump_hooks`（ruff + pytest，任一非零退出整个 bump 中止、不留半成品），再按 commit 历史递增 `pyproject.toml` 的 `version`、更新 `uv.lock`、在 `CHANGELOG.md` 顶部生成 `## v<x.y.z> (<日期>)` 段、建 bump commit、打 annotated `v<x.y.z>` tag（`annotated_tag = true`）
 5. 推送触发 release：`git push origin main --follow-tags`
 6. 在 [Actions 页](https://github.com/TMYTiMidlY/portal-mcp-server/actions) 等三个 job 全绿
 7. 验收：https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\> + https://pypi.org/project/portal-mcp-server/\<x.y.z\>/

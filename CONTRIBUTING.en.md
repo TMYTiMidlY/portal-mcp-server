@@ -13,7 +13,6 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras           # creates .venv with prod + dev deps
 source .venv/bin/activate
-ruff check portal_mcp_server/  # lint, should report zero errors
 pytest                         # should be all green (live SSH tests skip by default)
 ```
 
@@ -73,14 +72,8 @@ When adding a new `@mcp.tool()`:
 
 ## Testing requirements
 
-- Before you submit, **both** checks must pass (CI runs the same two
-  checks on four Python versions — failing either locally means a red
-  CI run):
-  - `ruff check portal_mcp_server/` must report **zero errors** (CI
-    lints product code only, not tests).
-  - `pytest tests/ -v` must be **all green** (live SSH tests are
-    skipped by default and don't need real hosts).
-- One-line pre-flight: `ruff check portal_mcp_server/ && pytest tests/ -v`.
+- `pytest tests/ -v` must be **all green** before you submit (live
+  SSH tests are skipped by default and don't need real hosts).
 - For bug fixes: **write the regression test first**, then fix the
   code. This prevents the bug from coming back.
 - Security and resource-lifecycle fixes get tests in
@@ -228,12 +221,19 @@ manually.**
 
 1. Make sure everything to ship is merged into `main` and you're on a
    clean `main` HEAD.
-2. Local pre-flight: `pytest tests/ -v && ruff check portal_mcp_server/`.
+2. (Optional shift-left) Run the hooks once yourself:
+   `uv run ruff check portal_mcp_server/ && uv run pytest tests/ -q`.
+   You can skip this — step 4's `cz bump` is configured with the same
+   `pre_bump_hooks`, so running them by hand first is just a way to catch
+   lint / test failures before cz touches `pyproject.toml` / `uv.lock` /
+   `CHANGELOG.md`.
 3. Preview the version and CHANGELOG: `uv run cz bump --dry-run`.
-4. Release: `uv run cz bump` — a single command that bumps `version`
-   in `pyproject.toml` per the commit history, updates `uv.lock`,
-   prepends a `## v<x.y.z> (<date>)` block to `CHANGELOG.md`, creates
-   the bump commit, and tags an annotated `v<x.y.z>` (`annotated_tag = true`).
+4. Release: `uv run cz bump` — runs `pre_bump_hooks` first (ruff +
+   pytest; any non-zero exit aborts the bump cleanly, no half-applied
+   files), then bumps `version` in `pyproject.toml` per the commit
+   history, updates `uv.lock`, prepends a `## v<x.y.z> (<date>)` block
+   to `CHANGELOG.md`, creates the bump commit, and tags an annotated
+   `v<x.y.z>` (`annotated_tag = true`).
 5. Push to trigger the release: `git push origin main --follow-tags`.
 6. Watch the [Actions page](https://github.com/TMYTiMidlY/portal-mcp-server/actions)
    until all three jobs go green.

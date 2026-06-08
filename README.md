@@ -308,7 +308,6 @@ git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
-ruff check portal_mcp_server/ # lint，应零 error
 pytest                        # 应全绿（live SSH 测试默认 skip）
 ```
 
@@ -902,7 +901,7 @@ uvx portal-mcp-server@latest --help
 - 不出现硬编码 hostname / username / IP / path
 - 新工具写好 docstring（FastMCP 用作 MCP description）+ 同步 README「工具列表」节（含折叠的完整签名 + 源码位置表）
 - 状态变更工具必须过 `_gate` + 写 `audit_log`
-- 测试覆盖关键路径；`ruff check portal_mcp_server/` + `pytest tests/ -v` 两条都要全绿
+- 测试覆盖关键路径；`pytest tests/ -v` 必须全绿
 - 不 commit secret；`examples/hosts.yaml` 是唯一 schema 模板
 - commit message 走 [Conventional Commits](https://www.conventionalcommits.org/)
 
