@@ -147,7 +147,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`, `hosts_json\|group_tag` | Multi-host command orchestration |
 | `portal_playbook` | `host\|group_tag` | Multi-step playbook |
 | `portal_ping` | optional `hosts_json` | Health check (single host or whole fleet) |
-| `portal_audit` | `view=snapshot\|history\|stats\|policy` | Audit log + server introspection |
+| `portal_audit` | `view=snapshot\|server\|history\|stats\|policy` | Audit log + server introspection (`server` view returns just version/pid/uptime/config-paths for cheap diagnostics) |
 | `portal_check` | `host`, optional `command` | Security policy dry-run |
 
 ### Specific tools vs `portal_bash`: which to use

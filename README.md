@@ -147,7 +147,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`，`hosts_json\|group_tag` | 多机命令编排 |
 | `portal_playbook` | `host\|group_tag` | 多步骤剧本 |
 | `portal_ping` | optional `hosts_json` | 健康检查（单机或全 fleet） |
-| `portal_audit` | `view=snapshot\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection |
+| `portal_audit` | `view=snapshot\|server\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection（`server` view 只回版本/pid/uptime/config 路径，便于诊断） |
 | `portal_check` | `host`，optional `command` | 安全策略 dry-run |
 
 ### 专用工具 vs `portal_bash`：怎么选

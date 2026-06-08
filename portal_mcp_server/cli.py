@@ -23,6 +23,7 @@ from .orchestrator import (ssh_parallel_exec, ssh_rolling_exec,
                             ssh_broadcast, run_playbook, run_playbook_on_group)
 from .audit import audit_log, get_history, get_audit_stats
 from .security import get_policy
+from .server_info import server_info, set_transport as _set_server_transport
 from .remote_text_editor import (
     remote_read as _re_read,
     remote_patch as _re_patch,
@@ -688,7 +689,13 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
 
     ## Views
     - view="snapshot" (default): full state — registered hosts, connection pool,
-        active sessions, active tunnels, audit aggregate stats, security policy summary.
+        active sessions, active tunnels, audit aggregate stats, security policy
+        summary, AND a `server` block (version, pid, uptime, transport,
+        resolved config paths). Use this when you want everything at once.
+    - view="server": just the server-level metadata (version, python_version,
+        pid, started_at, uptime_s, transport, resolved config paths). Cheap;
+        use this when you only need to know "which version am I talking to?"
+        without pulling the full snapshot.
     - view="history": last `limit` audit log entries (default 50). Optional `host_filter`.
         Example: portal_audit(view="history", limit=20, host_filter="web01")
     - view="stats": aggregate audit stats (counts by operation, error rate, etc.).
@@ -698,6 +705,8 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
     Read-only. Used to introspect what the MCP server has been doing and what
     limits are in place.
     """
+    if view == "server":
+        return json.dumps(server_info(), indent=2)
     if view == "history":
         history = get_history(limit=limit, host_filter=host_filter)
         return json.dumps(history, indent=2) if history \
@@ -715,6 +724,7 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
     if view == "snapshot":
         mgr = get_manager()
         snap = {
+            "server": server_info(),
             "registered_hosts": len(mgr._registry),
             "hosts": mgr.list_hosts(),
             "connection_pool": mgr.pool_status(),
@@ -727,7 +737,7 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
             },
         }
         return json.dumps(snap, indent=2)
-    raise ToolError(f'unknown view {view!r}. Valid: snapshot, history, stats, policy.')
+    raise ToolError(f'unknown view {view!r}. Valid: snapshot, server, history, stats, policy.')
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1511,19 +1521,18 @@ def main() -> None:
                     "  portal secret set / confirm / show / clear / list  <name>",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    from importlib.metadata import version as _pkg_version, PackageNotFoundError
-    try:
-        _ver = _pkg_version("portal-mcp-server")
-    except PackageNotFoundError:
-        _ver = "unknown"
-    parser.add_argument("--version", action="version", version=f"%(prog)s {_ver}")
+    from . import server_info as _si
+    parser.add_argument("--version", action="version",
+                        version=f"%(prog)s {_si._VERSION}")
     parser.add_argument("--transport", choices=["stdio", "streamable_http"], default="stdio",
                         help="MCP transport (default: stdio)")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port (default: 8000)")
     parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
     args = parser.parse_args()
 
-    logger.info(f"portal-mcp-server starting | transport={args.transport}")
+    _set_server_transport(args.transport)
+    logger.info(
+        f"portal-mcp-server v{_si._VERSION} starting | transport={args.transport}")
 
     if args.transport == "streamable_http":
         import uvicorn
