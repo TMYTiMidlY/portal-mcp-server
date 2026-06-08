@@ -16,7 +16,7 @@ Quirks handled:
     emits even with `stty -echo`.
 
 Tools:
-  - remote_bash(host, cmd, timeout?) -> {host, session_id, output}
+  - remote_bash(host, cmd, timeout?) -> {host, session_id, command, exit_code, output, duration_s}
   - remote_bash_close(host) -> close the cached session
   - remote_bash_status() -> list cached sessions
 
@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import Dict
 
 from .session_manager import SessionDead, get_session_manager
@@ -101,10 +102,15 @@ async def _ensure_session(host: str) -> str:
         return new_sid
 
 
-async def remote_bash(host: str, cmd: str, timeout: float = 3600.0) -> Dict[str, str]:
+async def remote_bash(host: str, cmd: str, timeout: float = 3600.0) -> Dict[str, object]:
     """Run a command in the persistent bash session for <host>.
 
     cwd and env vars are preserved across calls.
+
+    Returns ``{host, session_id, command, exit_code, output, duration_s}``.
+    ``exit_code`` is the remote ``$?`` (``None`` only if the command timed
+    out before completing). ``output`` is the combined stdout/stderr stream
+    (a PTY merges them; use the one-shot exec path when you need them split).
 
     If the cached session's SSH channel has died (e.g. the remote shell
     exited, the TCP connection dropped, or an earlier command produced
@@ -114,8 +120,9 @@ async def remote_bash(host: str, cmd: str, timeout: float = 3600.0) -> Dict[str,
     """
     smgr = get_session_manager()
     sid = await _ensure_session(host)
+    t0 = time.monotonic()
     try:
-        raw = await smgr.execute_in_session(sid, cmd, timeout=timeout)
+        raw, code = await smgr.execute_in_session(sid, cmd, timeout=timeout)
     except SessionDead as dead:
         logger.warning(
             "remote_bash: session %s on host %s died (%s); recreating once",
@@ -127,8 +134,10 @@ async def remote_bash(host: str, cmd: str, timeout: float = 3600.0) -> Dict[str,
             if _HOST_SESSIONS.get(host) == dead.session_id:
                 _HOST_SESSIONS.pop(host, None)
         sid = await _ensure_session(host)
-        raw = await smgr.execute_in_session(sid, cmd, timeout=timeout)
-    return {"host": host, "session_id": sid, "output": _clean(raw)}
+        raw, code = await smgr.execute_in_session(sid, cmd, timeout=timeout)
+    return {"host": host, "session_id": sid, "command": cmd,
+            "exit_code": code, "output": _clean(raw),
+            "duration_s": round(time.monotonic() - t0, 3)}
 
 
 async def remote_bash_close(host: str) -> str:

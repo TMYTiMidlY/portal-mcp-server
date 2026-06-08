@@ -3,6 +3,7 @@ Session Manager — persistent interactive shell sessions per host.
 Each session maintains its own SSH channel, CWD, and env vars.
 """
 import asyncio
+import re
 import time
 import uuid
 import logging
@@ -110,8 +111,15 @@ class SessionManager:
             pass
 
     async def execute_in_session(self, session_id: str, command: str,
-                                  timeout: float = 30.0) -> str:
+                                  timeout: float = 30.0) -> "tuple[str, int | None]":
         """Execute a command inside a persistent shell session.
+
+        Returns ``(output, exit_code)`` where ``output`` is the command's
+        combined stdout/stderr (PTY merges the two streams, so they cannot
+        be separated here — use the one-shot exec path when you need them
+        split) and ``exit_code`` is the remote ``$?``. ``exit_code`` is
+        ``None`` only when the command timed out before the sentinel
+        arrived (``output`` then carries a trailing ``[timeout]`` marker).
 
         Raises:
             SessionDead: the underlying SSH channel died (write failed,
@@ -127,7 +135,13 @@ class SessionManager:
         # collision per call, which is fine for an isolated test but a
         # latent corruption source under bursty multi-host workloads.
         sentinel = f"__DONE_{uuid.uuid4().hex}__"
-        full_cmd = f"{command}\necho {sentinel}\n"
+        # ``echo {sentinel}:$?`` captures the command's exit status right
+        # after it runs, so the agent learns whether the command succeeded
+        # instead of guessing from stdout. The regex below only matches once
+        # the digits AND a terminator (newline) have arrived, so a sentinel
+        # line split across read chunks never yields a truncated exit code.
+        full_cmd = f"{command}\necho {sentinel}:$?\n"
+        sentinel_re = re.compile(re.escape(sentinel) + r":(\d+)\b")
         try:
             session.process.stdin.write(full_cmd)
         except (BrokenPipeError, ConnectionResetError, OSError,
@@ -138,7 +152,7 @@ class SessionManager:
             # transparently retry.
             await self._invalidate(session_id)
             raise SessionDead(session_id, e) from e
-        output_lines = []
+        buf = ""
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -160,13 +174,13 @@ class SessionManager:
                 # longer usable.
                 await self._invalidate(session_id)
                 raise SessionDead(session_id, EOFError("stdout EOF"))
-            lines = chunk.splitlines()
-            for line in lines:
-                clean = self._strip_ansi(line)
-                if sentinel in clean:
-                    return "\n".join(output_lines)
-                output_lines.append(clean)
-        return "\n".join(output_lines) + "\n[timeout]"
+            buf += chunk
+            m = sentinel_re.search(buf)
+            if m:
+                exit_code = int(m.group(1))
+                output = self._strip_ansi(buf[:m.start()]).replace("\r\n", "\n")
+                return output.rstrip("\n"), exit_code
+        return self._strip_ansi(buf).replace("\r\n", "\n").rstrip("\n") + "\n[timeout]", None
 
     async def _invalidate(self, session_id: str) -> None:
         """Drop a session from the registry and release its pool slot.
@@ -190,7 +204,6 @@ class SessionManager:
         logger.info(f"Session {session_id} invalidated (channel dead)")
 
     def _strip_ansi(self, text: str) -> str:
-        import re
         return re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', text)
 
     def read_buffer(self, session_id: str, lines: int = 100) -> str:

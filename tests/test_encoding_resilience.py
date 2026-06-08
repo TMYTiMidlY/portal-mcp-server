@@ -261,7 +261,7 @@ class TestRemoteBashAutoRecover:
                 raise session_manager.SessionDead(
                     sid, BrokenPipeError("channel gone")
                 )
-            return f"OK from {sid}"
+            return f"OK from {sid}", 0
 
         monkeypatch.setattr(remote_bash, "_ensure_session", fake_ensure)
         monkeypatch.setattr(

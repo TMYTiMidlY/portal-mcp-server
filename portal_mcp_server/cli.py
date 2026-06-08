@@ -1016,7 +1016,7 @@ async def portal_bash(host: str, command: str, timeout: float = 3600.0,
         return json.dumps(res, indent=2, ensure_ascii=False)
     res = await _await_with_heartbeat(
         _re_bash(host, command, timeout=timeout), ctx)
-    audit_log(host, command, "ok", operation="remote_bash")
+    audit_log(host, command, res.get("exit_code", "?"), operation="remote_bash")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 

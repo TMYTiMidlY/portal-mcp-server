@@ -184,8 +184,8 @@ class TestPersistentSessions:
         sid = await sm.create_session(TEST_HOST_NAME)
         assert sid, "Session ID must not be empty"
         # CWD change must persist across calls
-        out1 = await sm.execute_in_session(sid, "cd /tmp && pwd")
-        out2 = await sm.execute_in_session(sid, "pwd")
+        out1, _ = await sm.execute_in_session(sid, "cd /tmp && pwd")
+        out2, _ = await sm.execute_in_session(sid, "pwd")
         assert "/tmp" in out2, f"CWD did not persist: {out2}"
         await sm.close_session(sid)
 
@@ -197,7 +197,7 @@ class TestPersistentSessions:
         sid = await sm.create_session(TEST_HOST_NAME)
         sm.set_env(sid, "MCP_TEST_VAR", "hello123")
         await asyncio.sleep(0.3)
-        out = await sm.execute_in_session(sid, "echo $MCP_TEST_VAR")
+        out, _ = await sm.execute_in_session(sid, "echo $MCP_TEST_VAR")
         assert "hello123" in out
         await sm.close_session(sid)
 
@@ -224,8 +224,8 @@ class TestPersistentSessions:
         sid2 = await sm.create_session(TEST_HOST_NAME)
         await sm.execute_in_session(sid1, "cd /tmp")
         await sm.execute_in_session(sid2, "cd /var")
-        out1 = await sm.execute_in_session(sid1, "pwd")
-        out2 = await sm.execute_in_session(sid2, "pwd")
+        out1, _ = await sm.execute_in_session(sid1, "pwd")
+        out2, _ = await sm.execute_in_session(sid2, "pwd")
         assert "/tmp" in out1
         assert "/var" in out2
         await sm.close_session(sid1)
