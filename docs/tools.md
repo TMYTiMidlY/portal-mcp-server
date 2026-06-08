@@ -10,7 +10,7 @@ Every tool that targets a host accepts a `host` parameter. The host can be:
 - a name registered via `portal_host(action="register", ...)`, **or**
 - a `Host` alias from `~/.ssh/config` (auto-resolved on first use; explicit registration is only needed for tag-based grouping).
 
-All state-changing tools write to `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`). Read-only tools are intentionally not audited (see the Security section of [`README.md`](../README.md#security)).
+All state-changing tools write to `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`). Read-only tools are intentionally not audited (see the Security section of [`README.md`](../README.md#security)).
 
 ---
 
@@ -104,7 +104,7 @@ Full signature: `(direction, host, local_path, remote_path, checksum=False, path
 |---|---|---|
 | `portal_ping` | `(hosts_json="")` | SSH connectivity test. Empty `hosts_json` pings every registered host in parallel; `hosts_json='["web01"]'` pings the listed subset. Returns `{"online": N, "total": M, "hosts": [{host, reachable, latency_s, exit_code}, ...]}`. |
 | `portal_check` | `(host, command="")` | Dry-run a host (and optionally a command) through the security policy without executing anything. Returns `"ALLOWED"` or `"BLOCKED: <reason>"`. ⚠️ Default policy is **permissive** — empty allowlists allow everything. `ALLOWED` means "no current rule blocks this", not "this is safe". Use `portal_audit(view="policy")` to inspect what is loaded. |
-| `portal_audit` | `view=snapshot \| server \| history \| stats \| policy` | Read-only introspection. `snapshot` (default): registered hosts, connection pool state, active tunnels, audit aggregates, security summary, plus a `server` block (version, pid, uptime, transport, resolved config paths). `server`: cheap version+metadata-only view. `history`: last `limit` audit entries (default 50), filterable by `host_filter`. `stats`: aggregate counts by operation and error rate. `policy`: full security policy detail (allowlists, blocklists, rate limits, sandbox users). |
+| `portal_audit` | `view=snapshot \| server \| history \| stats \| policy` | Read-only introspection. `snapshot` (default): registered hosts, connection pool state, active tunnels, audit aggregates, security summary, plus a `server` block (version, pid, uptime, transport, resolved config paths). `server`: cheap version+metadata-only view. `history`: last `limit` audit entries (default 50), filterable by `host_filter`. `stats`: aggregate counts by operation and error rate. `policy`: full security policy detail (allowlists, blocklists, rate limits). |
 
 ---
 

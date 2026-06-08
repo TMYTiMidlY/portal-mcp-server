@@ -281,7 +281,7 @@ The second candidate, `notifications/message` ([logging capability](https://mode
 - **Important warnings** (misconfigured yaml, missing credentials, ignored fields, …) → collected into the server's `_config_warnings` set and attached to the return value of `portal_host(action="list")` (see `connection_manager.py`)
 - **Fatal config errors** → raised inline in the relevant tool result, not just logged at server startup
 - **Info-level stderr** → only useful for the server author at debug time; never assumed to reach the user
-- **Audit log** → written to `$XDG_STATE_HOME/portal-mcp-server/logs/` ([XDG Base Directory Spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) explicitly places "logs, history" in the state-home tier — persistent but non-critical state); for ops review and post-hoc audit, never assumed to be read live
+- **Audit log** → written to `$XDG_STATE_HOME/portal-mcp-server/log/` ([XDG Base Directory Spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) explicitly places "logs, history" in the state-home tier — persistent but non-critical state); for ops review and post-hoc audit, never assumed to be read live
 
 The rule cuts the other way too: **anything the user should know but the server cannot raise immediately** must be attached to the next relevant tool call's return value. A bare `logger.error()` is a dead letter.
 
@@ -548,7 +548,7 @@ Detailed breakdown below.
 | `PORTAL_HOSTS_YAML` | Host registry YAML | `~/.config/portal-mcp-server/hosts.yaml` |
 | `PORTAL_POLICIES_YAML` | Security policy YAML | `~/.config/portal-mcp-server/policies.yaml` |
 | `PORTAL_SECRETS_YAML` | Named secrets YAML | `~/.config/portal-mcp-server/secrets.yaml` |
-| `PORTAL_LOG_DIR` | Audit + server log directory | `~/.local/state/portal-mcp-server/logs/` |
+| `PORTAL_LOG_DIR` | Audit + server log directory | `~/.local/state/portal-mcp-server/log/` |
 
 Resolution order: **env var > XDG directory** (`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` honored per the spec). The current working directory is **not** consulted — `portal-mcp-server` is a long-lived user-level daemon, not a project tool, and a cwd-relative auto-load would let any directory the server happens to be launched from silently override your real config (no mainstream user-level CLI — `ssh`, `gh`, `docker`, `kubectl`, `rclone`, … — does this).
 
@@ -799,7 +799,7 @@ So "waiting" surfaces only as a normal conversational turn handoff: the `getpass
 - **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).
 - **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate limit; every state-changing tool runs through `_gate` with no side doors (`portal_host(register)` gates against the target IP, not the alias; `portal_tunnel_close` is gated; multi-host gates are two-phase).
 - **Authentication**: SSH keys are the default and recommended path; password auth is supported but only via `password_command` in `hosts.yaml`, never exposed through any MCP tool — config in [Authentication](#authentication), security design in [`SECURITY.md` § Authentication](./SECURITY.md#authentication).
-- **Audit**: every state-changing operation is appended to `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`); fail-closed by default (`PORTAL_AUDIT_FAIL_OPEN=1` switches to fail-open).
+- **Audit**: every state-changing operation is appended to `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`); fail-closed by default (`PORTAL_AUDIT_FAIL_OPEN=1` switches to fail-open).
 - **Hash-protected edits**: `portal_read` + `portal_patch` use SHA-256 + per-range hashes + atomic `posix_rename` + post-write rehash to refuse concurrent overwrites.
 
 The full threat model, layer-by-layer defences, operator hygiene, known limitations, and algorithmic provenance live in **[`SECURITY.md`](./SECURITY.md)**.

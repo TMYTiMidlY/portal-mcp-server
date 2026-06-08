@@ -281,7 +281,7 @@ portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有�
 - **重要 warning**（yaml 配错、缺凭据、被忽略的字段……）→ 进 server 内 `_config_warnings` 集合，挂在 `portal_host(action="list")` 的返回值上随调用返回（见 `connection_manager.py`）
 - **致命 config 错误** → 操作时 inline 在 tool result 里 raise，不是启动时打一行 log 就当结案
 - **info 级 stderr** → 只留给 server 作者 debug 时看；不假设用户会看
-- **audit log** → 写 `$XDG_STATE_HOME/portal-mcp-server/logs/`（[XDG Base Directory Spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) 把 logs / history 这种"持久但非关键"状态明确归到 state home），给运维和事后审计用，不假设用户实时读
+- **audit log** → 写 `$XDG_STATE_HOME/portal-mcp-server/log/`（[XDG Base Directory Spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) 把 logs / history 这种"持久但非关键"状态明确归到 state home），给运维和事后审计用，不假设用户实时读
 
 这条原则倒过来约束 server 内部代码：**任何"用户该知道但 server 自己不能立即 raise"的事**，必须挂到下一次相关 tool call 的返回值里输出。`logger.error()` 完就当结案 = 死信。
 
@@ -561,7 +561,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 | `PORTAL_HOSTS_YAML` | 主机注册 YAML | `~/.config/portal-mcp-server/hosts.yaml` |
 | `PORTAL_POLICIES_YAML` | 安全策略 YAML | `~/.config/portal-mcp-server/policies.yaml` |
 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML | `~/.config/portal-mcp-server/secrets.yaml` |
-| `PORTAL_LOG_DIR` | audit + server log 目录 | `~/.local/state/portal-mcp-server/logs/` |
+| `PORTAL_LOG_DIR` | audit + server log 目录 | `~/.local/state/portal-mcp-server/log/` |
 
 路径解析优先级：**环境变量 > XDG 目录**（`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` 受 spec 支持）。当前工作目录 **不** 参与解析——`portal-mcp-server` 是用户级常驻服务，不是项目工具，cwd-relative 自动加载会让任意工作目录默默劫持你的真实配置（`ssh` / `gh` / `docker` / `kubectl` / `rclone` 等用户级 CLI 均不这么做）。
 
@@ -812,7 +812,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）
 - **认证**：默认且推荐 SSH key；密码登录支持但只走 `hosts.yaml` 的 `password_command`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
-- **审计**：所有状态变更写 `$PORTAL_LOG_DIR/audit.jsonl`（默认 `~/.local/state/portal-mcp-server/logs/audit.jsonl`）；默认 fail-closed（`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open）
+- **审计**：所有状态变更写 `$PORTAL_LOG_DIR/audit.jsonl`（默认 `~/.local/state/portal-mcp-server/log/audit.jsonl`）；默认 fail-closed（`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open）
 - **hash 保护编辑**：`portal_read` + `portal_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
 
 完整威胁模型、各防御层细节、运维 hygiene、已知限制、算法引用见 **[`SECURITY.md`](./SECURITY.md)**。

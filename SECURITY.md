@@ -51,7 +51,7 @@ The defences below are layered:
 | Per-tool gate         | `cli.py:_gate*`                | Every state-changing tool runs the policy on every call                      |
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
 | Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
-| Audit log             | `audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`; override the directory via `PORTAL_LOG_DIR`) | Every state-changing op recorded; fail-closed by default                     |
+| Audit log             | `audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`; override the directory via `PORTAL_LOG_DIR`) | Every state-changing op recorded; fail-closed by default                     |
 | Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` or out-of-band `portal ssh set` — plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `portal sudo set`); no MCP tool accepts a password parameter (SSH or sudo) |
 | Strict host-key check | `connection_manager.py`        | Defaults to OpenSSH-equivalent `StrictHostKeyChecking`                       |
 
@@ -347,7 +347,7 @@ fresh authentication each time; `-p ''` suppresses the prompt text.
 
 ### Audit log
 
-All state-changing tools write `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`):
+All state-changing tools write `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`):
 
 - `exec` / `file write` / `patch` / `register` / `tunnel` / `playbook`
   / multi-host orchestration
@@ -423,7 +423,7 @@ every exit path).
   using `root` or personal accounts.
 - Review `policies.yaml` allowlists and blocklists periodically — the
   default policy is **permissive** (empty allowlists = all allowed).
-- Keep `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/logs/audit.jsonl`) rotated and shipped off-host; the file is
+- Keep `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`) rotated and shipped off-host; the file is
   the only forensic record of what the agent did.
 
 ## Known limitations
