@@ -45,7 +45,7 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 ## Overview
 
-`portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 19-tool surface:
+`portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 18-tool surface:
 
 - **2** hash-protected remote file editing tools (`portal_read` / `portal_patch`), with the SHA-256 conflict-detection algorithm referenced from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT), reimplemented for SFTP
 - **6** core IO / search / persistent bash tools
@@ -59,7 +59,7 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 - **Same speed on Windows**: no dependency on OpenSSH `ControlMaster`; the pool is plain Python objects, so the three major OSes get identical reuse performance.
 - **Persistent bash sessions**: `portal_bash` keeps a `bash -i` per host with cwd / env preserved across calls — the agent doesn't have to rebuild context every command.
 - **Hash-protected remote edits**: `portal_read` + `portal_patch` use whole-file SHA-256 plus per-range hashes, write through tmp + `posix_rename` (atomic), then re-hash on disk to refuse stale or concurrent overwrites.
-- **Agent-first tool budget**: 19 tools instead of the upstream's 57; the tool-list context drops from ~7.5k tokens to ~2.5k, and `mode` parameters collapse semantically overlapping entries.
+- **Agent-first tool budget**: 18 tools instead of the upstream's 57; the tool-list context drops from ~7.5k tokens to ~2.5k, and `mode` parameters collapse semantically overlapping entries.
 - **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default.
 - **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
 - **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
@@ -109,7 +109,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 │  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
 │ (Claude Code │                    │                                     │
 │  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
-│  Cursor ...) │                    │  │ 19 tools │──►│ security gate  │  │
+│  Cursor ...) │                    │  │ 18 tools │──►│ security gate  │  │
 └──────────────┘                    │  └──────────┘   │ + audit log    │  │
                                     │                  └───────┬────────┘  │
                                     │                          │           │
@@ -134,7 +134,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 |---|---|
 | `portal_read` / `portal_patch` | Read remote file with SHA-256 of file + range; patch checks `file_hash` + per-range hash to prevent concurrent overwrite; writes via tmp + `posix_rename` (atomic) and re-hash after write |
 | `portal_grep` / `portal_glob` | Remote `rg --json` / `find` with structured output; first-call probe is cached |
-| `portal_bash` / `_close` / `_status` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; emits MCP progress while the command runs as a keepalive so long, output-silent commands don't trip the client's idle timeout (JSON-RPC `-32001`); `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user credential agent / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--portal-sudo-set)) |
+| `portal_bash` / `_close` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; emits MCP progress while the command runs as a keepalive so long, output-silent commands don't trip the client's idle timeout (JSON-RPC `-32001`); `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user credential agent / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--portal-sudo-set)). The host→session_id map lives in `portal_audit(view="sessions")` |
 | `portal_cleanup_tmps` | Garbage-collects orphan `*.mcp_tmp.*` files left by interrupted patches |
 
 ### 10 high-level tools (mode-switched)
@@ -147,7 +147,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`, `hosts_json\|group_tag` | Multi-host command orchestration |
 | `portal_playbook` | `host\|group_tag` | Multi-step playbook |
 | `portal_ping` | optional `hosts_json` | Health check (single host or whole fleet) |
-| `portal_audit` | `view=snapshot\|server\|history\|stats\|policy` | Audit log + server introspection (`server` view returns just version/pid/uptime/config-paths for cheap diagnostics) |
+| `portal_audit` | `view=snapshot\|server\|sessions\|history\|stats\|policy` | Audit log + server introspection (`server` view returns just version/pid/uptime/config-paths for cheap diagnostics; `sessions` view returns the host→session_id sticky-bash map, replacing the old `portal_bash_status`) |
 | `portal_check` | `host`, optional `command` | Security policy dry-run |
 
 ### Specific tools vs `portal_bash`: which to use
@@ -191,7 +191,6 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `portal_glob` | `(host, pattern, path='.')` |
 | `portal_bash` | `(host, command, timeout=3600.0, use_sudo=False)` |
 | `portal_bash_close` | `(host)` |
-| `portal_bash_status` | `()` |
 | `portal_host` | `(action, name='', host='', user='root', port=22, key_path='', tags='')` |
 | `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False, paths_json='')` |
 | `portal_tunnel_open` | `(mode, host, local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
@@ -210,7 +209,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `connection_manager.py` | connection pool shared by every tool |
 | `remote_text_editor.py` | `portal_read`, `portal_patch`, `portal_cleanup_tmps` |
 | `remote_search.py` | `portal_grep`, `portal_glob` |
-| `remote_bash.py` | `portal_bash`, `portal_bash_close`, `portal_bash_status` |
+| `remote_bash.py` | `portal_bash`, `portal_bash_close` |
 | `file_ops.py` | `portal_transfer` |
 | `network_tools.py` | `portal_tunnel_*` |
 | `orchestrator.py` | `portal_multi_exec`, `portal_playbook` |
@@ -221,7 +220,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 
 ## Design notes
 
-### Tool consolidation: 19 vs. 57
+### Tool consolidation: 18 vs. 57
 
 Anthropic's [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) is explicit:
 
@@ -231,8 +230,8 @@ The upstream `ssh-shell-mcp` exposes one tool per ergonomic — `ssh_run` / `ssh
 
 | Bucket | Count | What we did |
 |---|---:|---|
-| **Kept and redesigned** | 8 | `portal_read` + `portal_patch` use SHA-256 hashes to fix the concurrency hole in raw cat/write; `portal_grep` / `portal_glob` give structured search output; `portal_bash`(`_close`/`_status`) provide a persistent shell; `portal_cleanup_tmps` handles interrupted writes |
-| **Mode-flag merged** | 10 | `portal_tunnel_open(mode=local\|reverse\|socks)` replaces 3 upstream tools; `portal_multi_exec(mode=parallel\|rolling\|broadcast)` replaces 4; `portal_audit(view=...)` collapses 4 introspection endpoints |
+| **Kept and redesigned** | 7 | `portal_read` + `portal_patch` use SHA-256 hashes to fix the concurrency hole in raw cat/write; `portal_grep` / `portal_glob` give structured search output; `portal_bash`(`_close`) provides a persistent shell; `portal_cleanup_tmps` handles interrupted writes |
+| **Mode-flag merged** | 10 | `portal_tunnel_open(mode=local\|reverse\|socks)` replaces 3 upstream tools; `portal_multi_exec(mode=parallel\|rolling\|broadcast)` replaces 4; `portal_audit(view=...)` collapses the sessions/history/stats/policy introspection endpoints (the `sessions` view is the former `portal_bash_status`) |
 | **Removed entirely** | 27 | All trivially expressible as `portal_bash` invocations: 5 exec-family, 6 multi-session-family, 7 sysinfo (ps/df/free/journalctl/info/netstat/service), 5 process-management, 4 tmux |
 
 Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no longer has to disambiguate between semantically overlapping tools.
@@ -908,7 +907,7 @@ Apache License 2.0 (see [`LICENSE`](LICENSE)).
 
 Lineage and third-party algorithmic references are tracked in [`NOTICE`](NOTICE):
 
-- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0)** — git ancestor; the lower-level modules (asyncssh engine, connection pool, tunnel manager, orchestrator, security policy) are inherited. The 19-tool `portal_*` upper layer is new.
+- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0)** — git ancestor; the lower-level modules (asyncssh engine, connection pool, tunnel manager, orchestrator, security policy) are inherited. The 18-tool `portal_*` upper layer is new.
 - **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT)** — algorithmic reference for the SHA-256 hash-protected edit semantics in `remote_text_editor.py`, reimplemented for AsyncSSH SFTP.
 
 > ⚠️ This tool gives an agent SSH access to remote systems. Use it only on systems you own or are authorised to access.

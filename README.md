@@ -45,7 +45,7 @@
 
 ## 简介
 
-`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 19 个面向 agent 的 `portal_*` 工具：
+`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 18 个面向 agent 的 `portal_*` 工具：
 
 - **2 个** hash-protected 的远端文件编辑工具（`portal_read` / `portal_patch`），算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT），针对 SFTP 重写
 - **6 个** 核心 IO / 搜索 / 持久 bash 工具
@@ -59,7 +59,7 @@
 - **Windows 上同样快**：不依赖 OpenSSH `ControlMaster`，连接池是纯 Python 对象，三大平台获得一致的复用性能。
 - **持久 bash 会话**：`portal_bash` 为每台 host 维护一个 `bash -i`，cwd / env 跨调用保留；agent 不需要每条命令重建上下文。
 - **hash 保护的远端编辑**：`portal_read` + `portal_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
-- **agent-first 工具数量**：把上游 57 个工具收敛到 19 个，tool-list context 从 ~7.5k tokens 降到 ~2.5k；`mode` 字段合并语义重复的入口。
+- **agent-first 工具数量**：把上游 57 个工具收敛到 18 个，tool-list context 从 ~7.5k tokens 降到 ~2.5k；`mode` 字段合并语义重复的入口。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
@@ -109,7 +109,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 │  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
 │ (Claude Code │                    │                                     │
 │  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
-│  Cursor ...) │                    │  │ 19 tools │──►│ security gate  │  │
+│  Cursor ...) │                    │  │ 18 tools │──►│ security gate  │  │
 └──────────────┘                    │  └──────────┘   │ + audit log    │  │
                                     │                  └───────┬────────┘  │
                                     │                          │           │
@@ -134,7 +134,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 |---|---|
 | `portal_read` / `portal_patch` | 读远端文件并拿 SHA-256；patch 用 `file_hash` + per-range hash 防并发覆盖，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验 |
 | `portal_grep` / `portal_glob` | 远端 `rg --json` / `find` 结构化输出，首次连接探测一次缓存 |
-| `portal_bash` / `portal_bash_close` / `portal_bash_status` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；命令执行期间发 MCP progress 当 keepalive，避免长时间无输出的命令撞客户端 idle 超时（JSON-RPC `-32001`）；`use_sudo=True` 走一次性 `sudo -S`（密码从 per-user credential agent / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--portal-sudo-set)） |
+| `portal_bash` / `portal_bash_close` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；命令执行期间发 MCP progress 当 keepalive，避免长时间无输出的命令撞客户端 idle 超时（JSON-RPC `-32001`）；`use_sudo=True` 走一次性 `sudo -S`（密码从 per-user credential agent / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--portal-sudo-set)）。会话表（host→session_id）见 `portal_audit(view="sessions")` |
 | `portal_cleanup_tmps` | 清理 patch 中断后留下的孤儿 `*.mcp_tmp.*` |
 
 ### 10 个高层工具（mode 切换）
@@ -147,7 +147,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`，`hosts_json\|group_tag` | 多机命令编排 |
 | `portal_playbook` | `host\|group_tag` | 多步骤剧本 |
 | `portal_ping` | optional `hosts_json` | 健康检查（单机或全 fleet） |
-| `portal_audit` | `view=snapshot\|server\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection（`server` view 只回版本/pid/uptime/config 路径，便于诊断） |
+| `portal_audit` | `view=snapshot\|server\|sessions\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection（`server` view 只回版本/pid/uptime/config 路径；`sessions` view 回 host→session_id 粘性 bash 会话表，取代旧 `portal_bash_status`） |
 | `portal_check` | `host`，optional `command` | 安全策略 dry-run |
 
 ### 专用工具 vs `portal_bash`：怎么选
@@ -191,7 +191,6 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | `portal_glob` | `(host, pattern, path='.')` |
 | `portal_bash` | `(host, command, timeout=3600.0, use_sudo=False)` |
 | `portal_bash_close` | `(host)` |
-| `portal_bash_status` | `()` |
 | `portal_host` | `(action, name='', host='', user='root', port=22, key_path='', tags='')` |
 | `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False, paths_json='')` |
 | `portal_tunnel_open` | `(mode, host, local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
@@ -210,7 +209,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | `connection_manager.py` | 所有工具共用的连接池 |
 | `remote_text_editor.py` | `portal_read`、`portal_patch`、`portal_cleanup_tmps` |
 | `remote_search.py` | `portal_grep`、`portal_glob` |
-| `remote_bash.py` | `portal_bash`、`portal_bash_close`、`portal_bash_status` |
+| `remote_bash.py` | `portal_bash`、`portal_bash_close` |
 | `file_ops.py` | `portal_transfer` |
 | `network_tools.py` | `portal_tunnel_*` |
 | `orchestrator.py` | `portal_multi_exec`、`portal_playbook` |
@@ -221,7 +220,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 ## 设计理念
 
-### 工具精简：19 vs. 57
+### 工具精简：18 vs. 57
 
 Anthropic 的 [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) 明确说：
 
@@ -231,8 +230,8 @@ Anthropic 的 [_Writing Tools for Agents_](https://www.anthropic.com/engineering
 
 | 类别 | 数量 | 处理方式 |
 |---|---:|---|
-| **保留并重新设计** | 8 | `portal_read` + `portal_patch` 用 SHA-256 hash 保护取代裸 cat/write 的并发漏洞；`portal_grep` / `portal_glob` 提供结构化搜索结果；`portal_bash`(`_close`/`_status`) 持久 shell；`portal_cleanup_tmps` 处理中断遗留 |
-| **mode-flag 合并** | 10 | `portal_tunnel_open(mode=local\|reverse\|socks)` 取代上游 3 个独立 tool；`portal_multi_exec(mode=parallel\|rolling\|broadcast)` 取代 4 个；`portal_audit(view=...)` 合并 status/history/stats/policy 4 个 introspection 接口 |
+| **保留并重新设计** | 7 | `portal_read` + `portal_patch` 用 SHA-256 hash 保护取代裸 cat/write 的并发漏洞；`portal_grep` / `portal_glob` 提供结构化搜索结果；`portal_bash`(`_close`) 持久 shell；`portal_cleanup_tmps` 处理中断遗留 |
+| **mode-flag 合并** | 10 | `portal_tunnel_open(mode=local\|reverse\|socks)` 取代上游 3 个独立 tool；`portal_multi_exec(mode=parallel\|rolling\|broadcast)` 取代 4 个；`portal_audit(view=...)` 合并 sessions/history/stats/policy 等 introspection 接口（`sessions` view 即原 `portal_bash_status`） |
 | **完全砍掉** | 27 | 全部能由 `portal_bash` 直接覆盖：命令执行族 5、多 session 族 6、系统检查族（ps/df/free/journalctl/info/netstat/service）7、进程管理族 5、tmux 族 4 |
 
 收益：context 从 ~7.5k tokens 降到 ~2.5k；agent 不再需要在多个语义重复的工具里选择。
@@ -920,7 +919,7 @@ Apache License 2.0（见 [`LICENSE`](LICENSE)）。
 
 衍生关系与 third-party 算法引用见 [`NOTICE`](NOTICE)：
 
-- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）**——git ancestry，底层模块（asyncssh 引擎、连接池、tunnel 管理、orchestrator、安全策略）沿用；上层 19 个 `portal_*` 工具是新设计
+- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）**——git ancestry，底层模块（asyncssh 引擎、连接池、tunnel 管理、orchestrator、安全策略）沿用；上层 18 个 `portal_*` 工具是新设计
 - **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT）**——`remote_text_editor.py` 的 SHA-256 hash-protected edit 算法参考来源，针对 AsyncSSH SFTP 重写
 
 > ⚠️ 本工具让 agent 拥有对远端系统的 SSH 访问能力。请只在你拥有或被授权的系统上使用。

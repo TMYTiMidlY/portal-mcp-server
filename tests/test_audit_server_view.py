@@ -36,6 +36,26 @@ def test_view_snapshot_embeds_server_block():
         cli.portal_audit(view="server"))["version"]
 
 
+def test_view_snapshot_embeds_bash_sessions():
+    """The host→session_id map (formerly portal_bash_status) is folded into
+    the snapshot so introspection lives in one place."""
+    data = json.loads(cli.portal_audit(view="snapshot"))
+    assert "bash_sessions" in data, f"snapshot missing 'bash_sessions': {data}"
+    assert isinstance(data["bash_sessions"], dict)
+
+
+def test_view_sessions_returns_host_session_map():
+    """view='sessions' replaces the deleted portal_bash_status tool."""
+    out = cli.portal_audit(view="sessions")
+    data = json.loads(out)
+    assert isinstance(data, dict)  # host -> session_id (empty when no warm shells)
+
+
+def test_portal_bash_status_tool_removed():
+    """The standalone portal_bash_status tool was folded into portal_audit."""
+    assert not hasattr(cli, "portal_bash_status")
+
+
 def test_set_transport_records_value():
     si.set_transport("stdio")
     assert json.loads(cli.portal_audit(view="server"))["transport"] == "stdio"
@@ -48,5 +68,5 @@ def test_set_transport_records_value():
 def test_unknown_view_raises_with_new_view_listed():
     from mcp.server.fastmcp.exceptions import ToolError
     import pytest
-    with pytest.raises(ToolError, match=r"snapshot, server, history, stats, policy"):
+    with pytest.raises(ToolError, match=r"snapshot, server, sessions, history, stats, policy"):
         cli.portal_audit(view="bogus")

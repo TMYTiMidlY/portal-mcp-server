@@ -1,7 +1,7 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 19 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
-bash(+close,status) core + local_exec + host/transfer/tunnel(open,close,
+Exposes 18 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+bash(+close) core + local_exec + host/transfer/tunnel(open,close,
 list)/multi_exec/playbook/ping/audit/check.
 """
 import asyncio
@@ -735,13 +735,16 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
 
     ## Views
     - view="snapshot" (default): full state — registered hosts, connection pool,
-        active sessions, active tunnels, audit aggregate stats, security policy
+        bash sessions, active tunnels, audit aggregate stats, security policy
         summary, AND a `server` block (version, pid, uptime, transport,
         resolved config paths). Use this when you want everything at once.
     - view="server": just the server-level metadata (version, python_version,
         pid, started_at, uptime_s, transport, resolved config paths). Cheap;
         use this when you only need to know "which version am I talking to?"
         without pulling the full snapshot.
+    - view="sessions": the `host → session_id` map of cached persistent bash
+        sessions (what portal_bash reuses per host). Cheap; use it to see which
+        hosts currently have a warm `bash -i` whose cwd/env survive across calls.
     - view="history": last `limit` audit log entries (default 50). Optional `host_filter`.
         Example: portal_audit(view="history", limit=20, host_filter="web01")
     - view="stats": aggregate audit stats (counts by operation, error rate, etc.).
@@ -753,6 +756,8 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
     """
     if view == "server":
         return json.dumps(server_info(), indent=2)
+    if view == "sessions":
+        return json.dumps(_re_bash_status(), indent=2)
     if view == "history":
         history = get_history(limit=limit, host_filter=host_filter)
         return json.dumps(history, indent=2) if history \
@@ -774,6 +779,7 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
             "registered_hosts": len(mgr._registry),
             "hosts": mgr.list_hosts(),
             "connection_pool": mgr.pool_status(),
+            "bash_sessions": _re_bash_status(),
             "active_tunnels": get_tunnel_manager().list_tunnels(),
             "audit_stats": get_audit_stats(),
             "security": {
@@ -783,7 +789,7 @@ def portal_audit(view: str = "snapshot", limit: int = 50,
             },
         }
         return json.dumps(snap, indent=2)
-    raise ToolError(f'unknown view {view!r}. Valid: snapshot, server, history, stats, policy.')
+    raise ToolError(f'unknown view {view!r}. Valid: snapshot, server, sessions, history, stats, policy.')
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1073,12 +1079,6 @@ async def portal_bash_close(host: str) -> str:
     if err:
         raise ToolError(f"BLOCKED: {err}")
     return await _re_bash_close(host)
-
-
-@mcp.tool()
-async def portal_bash_status() -> str:
-    """List host -> session_id mappings for cached default bash sessions."""
-    return json.dumps(_re_bash_status(), indent=2)
 
 
 # ═══════════════════════════════════════════════════════════════════

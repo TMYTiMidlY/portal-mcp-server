@@ -1,6 +1,6 @@
 # Tool Reference
 
-Complete index of all **19 MCP tools** exposed by `portal-mcp-server`.
+Complete index of all **18 MCP tools** exposed by `portal-mcp-server`.
 Tools are split into two layers:
 
 - **9 portal core** — direct, single-purpose entry points used by the agent for day-to-day work (read / patch / search / persistent bash / local exec).
@@ -41,7 +41,6 @@ These are the tools an agent should reach for first. They share one SSH connecti
 |---|---|---|
 | `portal_bash` | `(host, command, timeout=3600.0, use_sudo=False, secrets=None)` | Run `command` in a sticky `bash -i` for `<host>`. First call auto-creates the session; subsequent calls reuse the same shell so `cwd` and exported env vars survive. PTY echo + bracketed-paste are disabled so sentinel parsing is reliable. ⚠️ Each command is gated by the security policy — a persistent session does not authorise arbitrary commands. `use_sudo=True` runs the command via `sudo -S` using a password obtained out-of-band (never passed by the agent) — see the sudo note below; this runs as a one-shot command, so the persistent session's `cwd`/env do not apply. `secrets=["name", …]` injects named API tokens as env vars for that one command — see the secrets note below (mutually exclusive with `use_sudo`). |
 | `portal_bash_close` | `(host)` | Close the cached default bash session for `<host>` (next `portal_bash` call reopens). |
-| `portal_bash_status` | `()` | Return the `host → session_id` mapping for all cached default sessions. |
 
 > Prompt-layer convention (not enforced in code): write operations should target remote `/tmp/` unless the user has explicitly approved another path. `portal_bash` itself does **not** scope paths — see the README's *Agent-side conventions* section for the recommended ruleset.
 
@@ -104,7 +103,7 @@ Full signature: `(direction, host, local_path, remote_path, checksum=False, path
 |---|---|---|
 | `portal_ping` | `(hosts_json="")` | SSH connectivity test. Empty `hosts_json` pings every registered host in parallel; `hosts_json='["web01"]'` pings the listed subset. Returns `{"online": N, "total": M, "hosts": [{host, reachable, latency_s, exit_code}, ...]}`. |
 | `portal_check` | `(host, command="")` | Dry-run a host (and optionally a command) through the security policy without executing anything. Returns `"ALLOWED"` or `"BLOCKED: <reason>"`. ⚠️ Default policy is **permissive** — empty allowlists allow everything. `ALLOWED` means "no current rule blocks this", not "this is safe". Use `portal_audit(view="policy")` to inspect what is loaded. |
-| `portal_audit` | `view=snapshot \| server \| history \| stats \| policy` | Read-only introspection. `snapshot` (default): registered hosts, connection pool state, active tunnels, audit aggregates, security summary, plus a `server` block (version, pid, uptime, transport, resolved config paths). `server`: cheap version+metadata-only view. `history`: last `limit` audit entries (default 50), filterable by `host_filter`. `stats`: aggregate counts by operation and error rate. `policy`: full security policy detail (allowlists, blocklists, rate limits). |
+| `portal_audit` | `view=snapshot \| server \| sessions \| history \| stats \| policy` | Read-only introspection. `snapshot` (default): registered hosts, connection pool state, bash sessions, active tunnels, audit aggregates, security summary, plus a `server` block (version, pid, uptime, transport, resolved config paths). `server`: cheap version+metadata-only view. `sessions`: the `host → session_id` map of cached persistent bash sessions (replaces the former `portal_bash_status` tool). `history`: last `limit` audit entries (default 50), filterable by `host_filter`. `stats`: aggregate counts by operation and error rate. `policy`: full security policy detail (allowlists, blocklists, rate limits). |
 
 ---
 
@@ -129,7 +128,7 @@ Every tool is registered in `portal_mcp_server/cli.py` with the `@mcp.tool()` de
 | `connection_manager.py` | underlying connection pool used by every tool |
 | `remote_text_editor.py` | `portal_read`, `portal_patch`, `portal_cleanup_tmps` |
 | `remote_search.py` | `portal_grep`, `portal_glob` |
-| `remote_bash.py` | `portal_bash`, `portal_bash_close`, `portal_bash_status` |
+| `remote_bash.py` | `portal_bash`, `portal_bash_close` |
 | `local_exec.py` | `portal_local_exec` (local one-shot execution) |
 | `credential_agent.py` | per-user systemd socket-activated TTL cache for `portal ssh set`, `portal sudo set`, and `portal secret set` |
 | `secrets_store.py` | named-secret resolution / agent + `secrets.yaml` lookup / output redaction |
