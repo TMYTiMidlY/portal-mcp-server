@@ -25,6 +25,7 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 - [Overview](#overview)
 - [Highlights](#highlights)
+- [Why portal-mcp-server vs. plain SSH](#why-portal-mcp-server-vs-plain-ssh)
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
 - [Tools](#tools)
@@ -62,6 +63,27 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 - **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default.
 - **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
 - **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
+
+## Why portal-mcp-server vs. plain SSH
+
+The naive way to give an agent remote access is to let it shell out to `ssh` / `scp` / `rsync`. That "plain" path is barely workable on Linux/macOS with `ControlMaster`, **effectively broken on Windows**, and missing essential affordances around file editing, sudo, multi-host orchestration, and audit. The table below puts the key differences in one place — each row is a concrete pitfall an agent hits with the plain approach and how portal-mcp-server addresses it.
+
+| Dimension | Plain (bash + `ssh` / `scp` / `rsync`) | portal-mcp-server |
+|---|---|---|
+| **SSH reuse · Linux/macOS** | OpenSSH `ControlMaster auto` + Unix socket; default `ControlPersist 10m`, master dies after that | asyncssh **in-process pool**; reused for as long as the MCP server lives (hours) |
+| **SSH reuse · Windows** | ❌ **Doesn't work** — Microsoft's Win32-OpenSSH port has had `ControlMaster` broken since v0.0.3.0 (`muxclient socket(): Unknown error`), [issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) open since 2017 (the implementation needs Unix-domain-socket fd sharing, which Windows lacks) | ✅ **Identical to Linux** — the pool is a plain Python dict; asyncssh needs no OS-level socket sharing |
+| **First connect / subsequent latency** | First ~200–500ms; **without reuse every command is a fresh TCP+auth, ~300ms each** (the default on Windows); with ControlMaster, ~10–30ms after the first | First ~200–500ms, **then ~10–30ms (same on all three OSes)** — just channel creation |
+| **Cross-"tool" reuse** | `ssh` and `scp` only reuse a master if `ControlPath` matches exactly; in practice each binary opens its own connection | ✅ Every `portal_*` tool (bash / read / patch / transfer / tunnel …) naturally shares the same TCP |
+| **Persistent shell state** | Every `ssh host cmd` is a new shell; `cd` / `export` / venv activation **all reset**; the agent has to prepend `cd /path && source venv/bin/activate && ...` to every command | ✅ `portal_bash` keeps a sticky `bash -i`; cwd / env / venv survive across calls |
+| **Remote file editing (safe edit)** | All three options are unsafe: ① `scp` down → edit → `scp` up (no concurrency check, concurrent writer's changes silently lost, non-atomic); ② `ssh host "sed -i ..."` (no dry-run, no rollback, line numbers brittle); ③ `ssh host "cat > file"` (concurrent overwrite, half-written file if the connection drops mid-write) | ✅ `portal_read` returns SHA-256 + per-range hashes; `portal_patch` checks the hashes → writes to `*.mcp_tmp.*` → atomic `posix_rename` → re-hashes after write. **Concurrent edits / interrupted writes / line-number drift all fail instead of silently corrupting** |
+| **File / directory transfer** | `scp` has no incremental skip and a single failure kills the batch; `rsync` is better but forks a new process per invocation, and **its progress never reaches the agent** — MCP clients drop the connection on idle timeout during long transfers | ✅ `portal_transfer` does size+mtime (or sha256) incremental skipping, **emits MCP progress as a keepalive against idle timeout**, lands per-file failures in `failed[]` without aborting the batch, and `paths_json` supports arbitrary local↔remote pair batches |
+| **sudo password ergonomics** | All options are bad: ① `ssh -t host sudo cmd` **prompts every time** — the agent can't drive it; ② `echo $PASS \| ssh host "sudo -S cmd"` — **password lands in the LLM context**; ③ `sshpass -p $PASS ssh ...` — **password ends up in `ps` argv and the LLM**; ④ NOPASSWD sudoers — give up on auth entirely | ✅ `portal_bash(use_sudo=True)`: password source is either ① `sudo_password_command` (pulled from `pass` / `op` / `bw` on demand, fully automatic) or ② `portal sudo set <host>` (user types it once in another terminal via `getpass`, stored in the systemd `--user` credential agent's in-memory TTL cache). **Password never reaches the LLM, never appears in `ps` argv, never hits disk** |
+| **Multi-host parallel execution** | `for h in $hosts; do ssh $h cmd; done` — **serial** startup (one fork+auth per host), no policy gate, a single failure depends on `set -e` or hand-rolled error handling | ✅ `portal_multi_exec(mode=parallel\|rolling\|broadcast)` runs in true parallel with a two-phase safety gate (check every host *first*, then execute), plus `portal_playbook` for multi-step + `on_error` |
+| **SSH tunnel lifecycle** | `ssh -L 8080:db:5432 host -fN` runs unsupervised — **no one tracks when to close it**, who opened it, or whether it's still alive; you need `pgrep` to find it | ✅ `portal_tunnel_open` returns a `tunnel_id`, `portal_tunnel_list` enumerates live tunnels, `portal_tunnel_close` shuts one down; everything is auditable |
+| **Command audit** | None — you'd have to wrap shell history with `script(1)` or a custom logger; agent calls are invisible | ✅ Every state-changing tool runs through `_gate` and writes to `audit.jsonl` (host, command, policy decision, timestamp); fail-closed by default |
+| **Structured search** | `ssh host "grep -rn ... \| head"` returns **raw text the agent must parse**; degrades gracefully only if you remember to install rg | ✅ `portal_grep` / `portal_glob` prefer `rg --json`, fall back to `grep -rn` / `find` automatically, and return `{file, line, text}` structured output |
+
+> **Windows users, this matters**: the "SSH reuse · Windows" row above isn't a footnote — it's a **fundamental gap**. The default Windows OpenSSH client has no ControlMaster, so every remote command an agent issues pays the ~300 ms TCP+auth tax; fifty calls is fifteen seconds of pure overhead. portal-mcp-server is ~280 ms first call and ~20 ms thereafter on Windows, identical to Linux — which is why we recommend it over a `ssh` subprocess approach by default.
 
 ## Quick start
 
@@ -217,51 +239,24 @@ Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no lon
 
 ### In-process connection pool
 
-portal-mcp-server runs an asyncssh connection pool inside its own server process. Every tool invocation (`portal_bash`, `portal_read`, `portal_transfer`, …) shares the same TCP. **Everything except the first connect amortises down to channel creation (~10–30 ms).**
+portal-mcp-server runs an asyncssh connection pool inside its own server process. Every tool invocation (`portal_bash`, `portal_read`, `portal_transfer`, …) shares the same TCP. **Everything except the first connect amortises down to channel creation (~10–30 ms).** The full comparison against `ControlMaster` / Windows OpenSSH / `ssh`↔`scp` reuse / persistent shell / cross-platform behaviour is already laid out in [§ Why portal-mcp-server vs. plain SSH](#why-portal-mcp-server-vs-plain-ssh) above; below are just the mechanism-level details:
 
-Compared to the best plain-ssh option (`ControlMaster auto / ControlPersist 10m` in `~/.ssh/config`):
-
-| Dimension | portal-mcp-server | plain ssh + ControlMaster |
-|---|---|---|
-| Reuse mechanism | asyncssh in-process pool (≤ 5 concurrent ops per connection, new ones created on demand) | OpenSSH master process + Unix domain socket |
-| Reuse scope | process-level (lives as long as the MCP server) | session-level (default 10-min `ControlPersist`) |
-| First connect | TCP + auth (~200–500 ms) | TCP + auth (~200–500 ms) |
-| Subsequent commands | reuse pool, open new channel (~10–30 ms) | reuse master, open new channel (~10–30 ms) |
-| Cross-tool reuse | ✅ `portal_bash` and `portal_read` share the same TCP | ❌ `ssh` and `scp` only reuse if both have matching `ControlPath` |
-| Persistent shell state | ✅ `portal_bash` keeps `bash -i`; cwd/env survive across calls | ❌ each `ssh host cmd` is a fresh shell; cwd/env discarded |
-| Concurrency | true asyncio multi-channel parallelism | one ssh process per command, serial startup (sharing master) |
-| Windows | ✅ identical performance everywhere Python runs | ❌ Windows OpenSSH does not support ControlMaster |
-
-Anonymised microbenchmark: same LAN (< 1ms RTT), 100× `echo pong`. Plain ssh + ControlMaster averaged 23 ms/call; portal-mcp-server through `portal_bash` averaged 18 ms/call (no ssh client process startup). First-connect both ~280 ms (auth dominated).
-
-### Windows behaviour
-
-`ControlMaster` **doesn't work on Windows OpenSSH** — it relies on Unix-domain-socket-based fd sharing between the master and the child ssh processes, and the default Windows OpenSSH build lacks that primitive (the experimental named-pipe support is also unreliable).
-
-portal-mcp-server **doesn't depend on any OS-level socket sharing**. The pool is plain Python objects in the MCP server's own memory (asyncssh is pure Python). Any platform that runs Python (Windows / macOS / Linux) gets the same reuse performance as Linux.
-
-```text
-On Windows:
-  plain ssh:        every command opens a new TCP+auth      → ~300 ms × N
-  portal-mcp-server: first ~280 ms, then ~20 ms thereafter   → drops to channel-creation floor
-```
-
-Side benefit: pool connections live as long as the MCP server (typically hours), not the 10-minute `ControlPersist` default — fewer reconnect spikes inside long sessions.
+- **Pool shape**: `PORTAL_SSH_POOL_SIZE` caps TCP connections per host (default 5); `PORTAL_SSH_MAX_CHANNELS_PER_CONN` caps channels per TCP (default 5). When all connections hit the channel ceiling, the least-loaded one is reused with a warning. asyncio gives **true multi-channel parallelism over a single TCP**, unlike plain ssh where each parallel command requires a separate ssh process (fork + auth per channel).
+- **Idle / age**: `PORTAL_SSH_MAX_IDLE_TIME` defaults to 600 s, `PORTAL_SSH_MAX_CONN_AGE` defaults to 3600 s — idle-expired or aged-out connections close once they have no active channels, guarding against silent NAT / firewall drops.
+- **Long-session stability**: pool connections live as long as the MCP server (typically hours), not the 10-minute `ControlPersist` default — fewer reconnect spikes inside long sessions.
+- **Anonymised microbenchmark**: same LAN (< 1 ms RTT), 100× `echo pong`. Plain ssh + ControlMaster averaged 23 ms/call; portal-mcp-server through `portal_bash` averaged 18 ms/call (no ssh client process startup). First connect ~280 ms on both (auth dominated).
+- **What this looks like on Windows**: plain ssh pays ~300 ms × N (no reuse — and the experimental named-pipe fallback is also unreliable); portal-mcp-server is ~280 ms for the first call and ~20 ms thereafter, dropping to the channel-creation floor — because asyncssh is pure Python and the pool lives in the MCP server's own memory with zero OS-level socket-sharing dependency (which is exactly where Windows OpenSSH's ControlMaster falls over).
 
 ### Stack choice: asyncssh, not subprocess-wrapped OpenSSH
 
 [asyncssh](https://github.com/ronf/asyncssh) (EPL-2.0 / GPL-2.0 dual-licensed) is an **independent pure-Python SSHv2 implementation**, protocol-equivalent to OpenSSH:
 
-- **One process, many connections, many sessions per connection** — the pool is a Python dict; no process boundaries, no fd sharing required
-- **Full protocol coverage** — local/remote/dynamic port forwarding, SFTP, SCP, X11 forwarding, TUN/TAP — anything OpenSSH does at the protocol layer, asyncssh does too
-- **OpenSSH-compatible** — natively parses `~/.ssh/config`, `known_hosts`, `authorized_keys`, ssh-agent / Pageant
-- **Only depends on PyCA `cryptography`** — install Python and you're done; no C deps, no OS-specific IPC
+- **One process, many connections, many sessions per connection** — the pool is a Python dict; no process boundaries, no fd sharing required. That's also why portal gets the same reuse performance on Windows as on Linux (the OpenSSH master/child model just doesn't work on Windows).
+- **Full protocol coverage** — local/remote/dynamic port forwarding, SFTP, SCP, X11 forwarding, TUN/TAP — anything OpenSSH does at the protocol layer, asyncssh does too.
+- **OpenSSH-compatible** — natively parses `~/.ssh/config`, `known_hosts`, `authorized_keys`, ssh-agent / Pageant.
+- **Only depends on PyCA `cryptography`** — install Python and you're done; no C deps, no OS-specific IPC.
 
-Compared to "shell out to `ssh` / `scp`":
-
-- No new process per command (saves the ~50–100 ms fork)
-- No need to coordinate SSH reuse across multiple OS processes (which is exactly what breaks ControlMaster on Windows)
-- Error handling, retries, and timeouts are first-class Python async primitives, not stderr-string parsing
+Versus "shell out to `ssh` / `scp`": no ~50–100 ms fork per command, no need to coordinate SSH reuse across OS processes (the root cause of the Windows ControlMaster failure), and error handling / retries / timeouts are first-class Python async primitives rather than stderr-string parsing.
 
 ### Feedback channel: warnings ride tool results, not stderr
 

@@ -25,6 +25,7 @@
 
 - [简介](#简介)
 - [项目特色](#项目特色)
+- [为什么用 portal-mcp-server：和传统方案的对比](#为什么用-portal-mcp-server和传统方案的对比)
 - [快速开始](#快速开始)
 - [架构](#架构)
 - [工具列表](#工具列表)
@@ -62,6 +63,27 @@
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
+
+## 为什么用 portal-mcp-server：和传统方案的对比
+
+让 agent 操作远端，最朴素的方案是让它直接调 `bash` 跑 `ssh` / `scp` / `rsync`。这套"传统方案"在 Linux/macOS 配 `ControlMaster` 下勉强能用，但在 **Windows 上几乎不可用**，并且在文件编辑、sudo、多机、审计等多个维度都缺关键能力。下表把核心差异一次性列清楚——每一行就是一个具体的"agent 用传统方案会踩的坑"和 portal-mcp-server 怎么解。
+
+| 维度 | 传统方案（bash + `ssh` / `scp` / `rsync`） | portal-mcp-server |
+|---|---|---|
+| **SSH 复用 · Linux/macOS** | OpenSSH `ControlMaster auto` + Unix socket；默认 `ControlPersist 10m`，超时后整条 master 断 | asyncssh **进程内连接池**，MCP server 活着就一直复用（小时级） |
+| **SSH 复用 · Windows** | ❌ **不工作**——微软移植的 Win32-OpenSSH 自 v0.0.3.0 起 `ControlMaster` 失败（`muxclient socket(): Unknown error`），[issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) 自 2017 年起 open 至今（依赖 Unix domain socket fd 共享，Win 没有等价原语） | ✅ **和 Linux 同等性能**——连接池是纯 Python dict，asyncssh 不需要任何 OS 级 socket 共享 |
+| **首次连接 / 后续命令延迟** | 首次 ~200–500ms；**无复用时每条命令都是新 TCP+auth ~300ms**（Win 默认场景）；有 ControlMaster 时后续 ~10–30ms | 首次 ~200–500ms，**后续 ~10–30ms（三平台一致）**——只开 channel |
+| **跨"工具"复用** | `ssh` 和 `scp` 复用要求两边 `ControlPath` 完全一致；实际多数项目各开各的，scp 和 ssh 并不共享 master | ✅ 所有 `portal_*` 工具（bash / read / patch / transfer / tunnel ...）天然共享同一条 TCP |
+| **持久 shell 状态** | 每次 `ssh host cmd` 是新 shell，`cd` / `export` / venv 激活 **全部丢失**；agent 必须每条命令重复 `cd /path && source venv/bin/activate && ...` | ✅ `portal_bash` 维护粘性 `bash -i`，cwd / env / venv 跨调用保留 |
+| **远端文件编辑（safe edit）** | 三种都不安全：① `scp` 拉到本地→改→`scp` 推回（无并发检测，并发改 silently 丢；非原子）；② `ssh host "sed -i ..."`（无 dry-run、无 rollback、行号易错）；③ `ssh host "cat > file"`（并发覆盖、写一半连接断就半截文件） | ✅ `portal_read` 返回 SHA-256 + 行范围 hash；`portal_patch` 校验 hash → 写入 `*.mcp_tmp.*` → `posix_rename` 原子替换 → 写后再 rehash。**并发改 / 中途断连 / 行号漂移全部失败而非污染** |
+| **文件 / 目录传输** | `scp` 无增量、单文件失败整批挂；`rsync` 较好但每次 fork 新进程，**进度无法回传给 agent**，大文件传输期间 MCP client idle 超时会断 | ✅ `portal_transfer` 增量短路（size+mtime 或 sha256）、**MCP progress 心跳防 idle 超时**、单文件失败进 `failed[]` 不中断批量、`paths_json` 支持任意 local↔remote 文件对批传 |
+| **sudo 密码输入便利性** | 全是坑：① `ssh -t host sudo cmd` **每次弹密码**，agent 跑不了；② `echo $PASS \| ssh host "sudo -S cmd"`——**密码进 LLM 上下文**；③ `sshpass -p $PASS ssh ...`——**密码进 `ps` argv 和 LLM**；④ NOPASSWD sudoers——彻底放弃认证 | ✅ `portal_bash(use_sudo=True)`：密码源 = ① `sudo_password_command`（从密码管理器 `pass` / `op` / `bw` 现取，全自动）或 ② `portal sudo set <host>`（用户在另一终端 `getpass` 无回显输入一次，进 systemd `--user` 凭据 agent 内存 TTL）。**密码全程不进 LLM、不进 ps argv、不落盘** |
+| **多机并发执行** | `for h in $hosts; do ssh $h cmd; done`——**串行**启动（每次 fork + auth），无 policy gate，一台失败靠 `set -e` 或脚本自己处理 | ✅ `portal_multi_exec(mode=parallel\|rolling\|broadcast)` 真并发 + 两阶段安全 gate（先 check 所有 host 再执行），`portal_playbook` 多步骤 + `on_error` |
+| **SSH 隧道生命周期** | `ssh -L 8080:db:5432 host -fN` 后台跑飞，**没人管它什么时候关**、谁开的、是否还活着；要靠 `pgrep` 自己找 | ✅ `portal_tunnel_open` 返回 `tunnel_id`，`portal_tunnel_list` 看所有活跃隧道，`portal_tunnel_close` 显式关；audit 可追溯 |
+| **命令审计** | 无——要审计得自己用 `script(1)` / shell history wrapper 包一遍，agent 调用不可见 | ✅ 所有状态变更工具都过 `_gate` → 写 `audit.jsonl`（含 host、command、policy decision、timestamp）；默认 fail-closed |
+| **结构化搜索** | `ssh host "grep -rn ... \| head"` 返回 **raw text，agent 自己 parse**；远端没装 rg 就降级 | ✅ `portal_grep` / `portal_glob` 优先 `rg --json`，自动 fallback `grep -rn` / `find`；返回 `{file, line, text}` 结构化 |
+
+> **Windows 用户特别留意**：表格里的"SSH 复用 · Windows"那一行不是细节，是**根本性差距**。Windows 默认的 OpenSSH 客户端没有 ControlMaster，意味着 agent 每跑一条远端命令都要等 ~300ms 的 TCP+auth；跑 50 次就是 15 秒纯 overhead。portal-mcp-server 在 Win 上首条 ~280ms、后续 ~20ms，和 Linux 完全一致——这是为什么我们默认推荐它而不是 `ssh` 子进程方案。
 
 ## 快速开始
 
@@ -217,51 +239,24 @@ Anthropic 的 [_Writing Tools for Agents_](https://www.anthropic.com/engineering
 
 ### 进程内连接池
 
-portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有工具调用（`portal_bash`、`portal_read`、`portal_transfer` ...）共享同一条 TCP，**除第一次连接外全部摊销到 channel 创建（~10–30 ms）**。
+portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有工具调用（`portal_bash`、`portal_read`、`portal_transfer` ...）共享同一条 TCP。**除第一次连接外全部摊销到 channel 创建（~10–30 ms）**，覆盖维度（vs OpenSSH `ControlMaster` / Win OpenSSH 无复用 / `ssh-scp` 跨工具复用 / persistent shell / 跨平台）已在上文 [§ 为什么用 portal-mcp-server](#为什么用-portal-mcp-server和传统方案的对比) 一次性对比过；下面只补几条机制层面的实现细节：
 
-与「裸 ssh + ControlMaster」（最佳 plain 方案）对比：
-
-| 维度 | portal-mcp-server | plain ssh + ControlMaster |
-|---|---|---|
-| 复用机制 | asyncssh 进程内连接池（每条连接最多 5 个并发操作，按需新建） | OpenSSH master 进程 + Unix domain socket |
-| 复用粒度 | 进程级（MCP server 活着就持续） | 会话级（默认 10min `ControlPersist`） |
-| 第一次连接 | TCP + auth（~200–500 ms） | TCP + auth（~200–500 ms） |
-| 后续命令 | 复用连接，开新 channel（~10–30 ms） | 复用 master，开新 channel（~10–30 ms） |
-| 跨工具复用 | ✅ `portal_bash` 和 `portal_read` 共享同一 TCP | ❌ `ssh` 和 `scp` 复用要求两边 `ControlPath` 一致 |
-| 持久 shell 状态 | ✅ `portal_bash` 维护 `bash -i`，cwd/env 跨调用保留 | ❌ 每次 `ssh host cmd` 是新 shell，cwd/env 不留 |
-| 并发 | asyncio 多 channel 真并发 | 多 ssh 进程串行启动（共享 master） |
-| Windows | ✅ 任何能跑 Python 的平台都享受同等性能 | ❌ Windows OpenSSH 不支持 ControlMaster |
-
-实测脱敏：同 LAN（< 1ms RTT）跑 100 次 `echo pong`，plain ssh + ControlMaster 平均 23 ms；portal-mcp-server 通过 `portal_bash` 平均 18 ms（省了 ssh 客户端进程启动）。第一次连接两边都 ~280 ms（auth 占大头）。
-
-### Windows 上的差距
-
-`ControlMaster` 在 Windows OpenSSH 上**不工作**——它依赖 Unix domain socket 实现 master/子进程之间共享文件描述符，Win10/11 默认编译不带这个机制（实验性 named-pipe 也常出问题）。
-
-portal-mcp-server **完全不依赖** OS 级 socket 共享：连接池放在 MCP server 自己的 Python 进程内存里（asyncssh 是纯 Python），任何能跑 Python 的平台（Windows / macOS / Linux）都享受**与 Linux 一致**的复用性能。
-
-```text
-Windows 下：
-  plain ssh:        每次 cmd 都新建 TCP+auth      → ~300 ms × N
-  portal-mcp-server: 第一次 ~280 ms，后续 ~20 ms  → 单调下降到 channel 极限
-```
-
-副作用红利：池连接随 MCP server 进程持续（小时级），不是 `ControlPersist` 默认的 10 分钟，长会话里的 reconnect 抖动也省了。
+- **池形态**：`PORTAL_SSH_POOL_SIZE` 控制每 host 最多 TCP 连接数（默认 5），`PORTAL_SSH_MAX_CHANNELS_PER_CONN` 控制单条 TCP 上 channel 上限（默认 5）；超出后新建 TCP，再超出则按"最空闲"复用并 warning。asyncio 在同一条 TCP 上支持多 channel **真并发**，不像 plain ssh 必须串行启动多个 ssh 进程（每个 channel 一个 fork+auth）。
+- **空闲与老化**：`PORTAL_SSH_MAX_IDLE_TIME` 默认 600 秒、`PORTAL_SSH_MAX_CONN_AGE` 默认 3600 秒；空闲到期或超龄且无活跃 channel 即关闭，防止 NAT/防火墙静默断连。
+- **长连接稳定性**：池连接随 MCP server 进程持续（小时级），相对 `ControlMaster` 默认 10 分钟 `ControlPersist`，长会话里的 reconnect 抖动也省了。
+- **微基准（脱敏）**：同 LAN（< 1ms RTT）跑 100 次 `echo pong`，plain ssh + ControlMaster 平均 23 ms；portal-mcp-server 通过 `portal_bash` 平均 18 ms（省了 ssh 子进程启动）。首次两边都 ~280 ms（auth 占大头）。
+- **Windows 上的具体表现**：plain ssh 每条命令 ~300 ms × N（无复用，连实验性的 named-pipe fallback 也常出问题），portal-mcp-server 首次 ~280 ms、后续 ~20 ms 直降到 channel 创建极限——asyncssh 是纯 Python，连接池放在自己进程内存，不依赖任何 OS 级 socket 共享（这正是 Win OpenSSH 的 ControlMaster 挂掉的地方）。
 
 ### 技术选型：asyncssh 而非 subprocess
 
 [asyncssh](https://github.com/ronf/asyncssh)（EPL-2.0 / GPL-2.0 双许可）是 SSHv2 协议的**独立纯 Python 实现**，与 OpenSSH 协议层等价：
 
-- **单进程多连接、单连接多 session**：连接池就是 Python dict，没有进程边界、没有 fd 共享需求
-- **协议层完整覆盖**：local/remote/dynamic 端口转发、SFTP、SCP、X11 fwd、TUN/TAP——OpenSSH 能干的协议层动作 asyncssh 全都能干
-- **OpenSSH 兼容**：原生解析 `~/.ssh/config`、`known_hosts`、`authorized_keys`、ssh-agent / Pageant
-- **仅依赖 PyCA `cryptography`**：装上 Python 就能跑，无 C 依赖、无 OS 特定 IPC
+- **单进程多连接、单连接多 session**：连接池就是 Python dict，没有进程边界、没有 fd 共享需求——也是为什么 portal 能在 Win 上做到和 Linux 一致的复用性能（OpenSSH master/child 模型在 Win 没法工作）。
+- **协议层完整覆盖**：local/remote/dynamic 端口转发、SFTP、SCP、X11 fwd、TUN/TAP——OpenSSH 能干的协议层动作 asyncssh 全都能干。
+- **OpenSSH 兼容**：原生解析 `~/.ssh/config`、`known_hosts`、`authorized_keys`、ssh-agent / Pageant。
+- **仅依赖 PyCA `cryptography`**：装上 Python 就能跑，无 C 依赖、无 OS 特定 IPC。
 
-对比「用 subprocess 调 `ssh` / `scp`」：
-
-- 不用每次 fork 新进程（启动 ~50–100 ms 没了）
-- 不用协调多进程之间共享 SSH 复用（这正是 ControlMaster 在 Win 上挂的地方）
-- 错误处理、重试、超时都是 Python 异步原语，不是解析 stderr 字符串
+对比"用 subprocess 调 `ssh` / `scp`"：免去每命令 ~50–100 ms 的 fork、不需要协调多进程之间共享 SSH 复用（这正是 ControlMaster 在 Win 上挂的根因）、错误处理 / 重试 / 超时都是 Python 异步原语，而不是解析 stderr 字符串。
 
 ### 反馈通道：warning 走 tool result，不走 stderr
 
