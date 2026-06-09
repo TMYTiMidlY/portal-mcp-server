@@ -216,14 +216,16 @@ into the per-user credential agent over a systemd --user managed local
 unix socket. It exists for two
 reasons:
 
-> **Platform**: the shipped install path is **Linux only** — `portal agent
-> install` writes systemd user units (`.socket` + `.service` under
-> `~/.config/systemd/user/`) and supervises them via the systemd user
-> instance (`systemd --user`) with socket activation. macOS / Windows have
-> no shipped equivalent and therefore no supported no-echo CLI path; on
-> those hosts use `password_command` / `sudo_password_command` (and
-> `secrets.yaml`'s `command:`) to pull credentials from the system password
-> manager instead.
+> **Platform**: auto-install is **Linux + macOS** — `portal agent install`
+> writes systemd user units (Linux, `.socket` + `.service` under
+> `~/.config/systemd/user/`, socket-activated) or a launchd LaunchAgent
+> (macOS, run-and-keepalive), both supervising the agent on its AF_UNIX
+> socket. On **Windows** the agent's transport is a **named pipe** (no
+> AF_UNIX), runnable via a manual `portal agent run` and verified by the
+> `windows-latest` CI job; there is no auto-start service install yet. On any
+> host without the agent, use `password_command` / `sudo_password_command`
+> (and `secrets.yaml`'s `command:`) to pull credentials from the system
+> password manager instead.
 
 - **`auth: password` hosts that can't or shouldn't pre-stage a
   `password_command`** (no password manager available; rotating

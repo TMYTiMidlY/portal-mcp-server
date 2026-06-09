@@ -124,16 +124,21 @@ skipped).
 The agent never sees a credential value. Passwords / passphrases / secrets are
 provisioned by a human in a separate terminal and held by a per-user agent.
 
-> **⚠️ Platform: Linux + macOS.** The credential agent install is OS-dispatched
+> **⚠️ Auto-install platform: Linux + macOS** (Windows transport works via a
+> manual run — see below). The credential agent install is OS-dispatched
 > (`portal agent install`): **Linux** uses **systemd user units** (`.socket` +
 > `.service`, socket-activated); **macOS** uses a **launchd LaunchAgent**
 > (`~/Library/LaunchAgents/com.tmytimidly.portal-credential-agent.plist`,
-> run-and-keepalive — the agent self-binds its AF_UNIX socket). **Windows** has
-> no automated install yet, so `portal agent install` (and the three `set`
-> CLIs) print an actionable error there. On any unsupported platform, drive sudo
-> and SSH credentials from `hosts.yaml`'s `password_command` / `passphrase_command`
-> / `sudo_password_command`, and named secrets from `secrets.yaml`'s `command:`
-> — the rest of the server (every `portal_*` remote tool) is platform-agnostic.
+> run-and-keepalive — the agent self-binds its AF_UNIX socket). **Windows** uses
+> a **named-pipe** transport (no AF_UNIX), verified end-to-end by the
+> `windows-latest` CI job: run it manually with `portal agent run --socket
+> \\.\pipe\portal-mcp-server-credentials-<user>` (+ the same
+> `PORTAL_CREDENTIAL_AGENT_SOCKET`); only auto-start-at-logon is unwired, so
+> `portal agent install` still prints an actionable hint there. Where there's no
+> agent, drive sudo and SSH credentials from `hosts.yaml`'s `password_command` /
+> `passphrase_command` / `sudo_password_command`, and named secrets from
+> `secrets.yaml`'s `command:` — the rest of the server (every `portal_*` remote
+> tool) is platform-agnostic.
 
 > **Design principle — plaintext never leaves the agent's memory.** There is no
 > `show plaintext` / `dump` verb on `portal ssh` / `portal sudo` / `portal

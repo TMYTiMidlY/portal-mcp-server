@@ -389,9 +389,9 @@ portal secret set GITHUB_TOKEN
 
 ### 凭据 agent（Linux systemd / macOS launchd）
 
-> **⚠️ 平台支持：Linux + macOS**。`portal agent install` 按 OS 自动分派：**Linux** 装一对 **systemd 用户级单元**（`.socket` + `.service`，放 `~/.config/systemd/user/`，socket activation 拉起）；**macOS** 装一个 **launchd LaunchAgent**（`~/Library/LaunchAgents/com.tmytimidly.portal-credential-agent.plist`，run-and-keepalive——agent 自己 bind AF_UNIX socket，省掉 `launch_activate_socket` 的 ctypes 复杂度）。**Windows** 暂无自动安装路径（named pipe 需 pywin32，待平台 CI），`portal agent install` 会打印一条可操作的错误。
+> **⚠️ 自动安装平台：Linux + macOS**（Windows 传输可用，走手动 run——见下）。`portal agent install` 按 OS 自动分派：**Linux** 装一对 **systemd 用户级单元**（`.socket` + `.service`，放 `~/.config/systemd/user/`，socket activation 拉起）；**macOS** 装一个 **launchd LaunchAgent**（`~/Library/LaunchAgents/com.tmytimidly.portal-credential-agent.plist`，run-and-keepalive——agent 自己 bind AF_UNIX socket，省掉 `launch_activate_socket` 的 ctypes 复杂度）。**Windows** 的 agent IPC 传输是**命名管道**（没有 AF_UNIX）且已可用——由 `windows-latest` CI job 端到端实测覆盖——可手动 `portal agent run --socket \\.\pipe\portal-mcp-server-credentials-<user>` 拉起（并把同名值写进 `PORTAL_CREDENTIAL_AGENT_SOCKET`）；只是开机自启的 **service** 自动安装还没接，所以 `portal agent install` 仍会打印一条可操作的提示。
 >
-> 不支持自动安装的平台上的替代方案：用 `hosts.yaml` 的 `password_command` / `passphrase_command` / `sudo_password_command`，或 `secrets.yaml` 的 `command:` 字段，从系统密码管理器（Keychain、`pass`、`secret-tool`、`gopass`、1Password CLI 等）按需读取——见下文「[认证](#认证)」。MCP server 本身（`portal_shell` 等所有远端工具）在 Windows / macOS / Linux 都正常工作；只有这个**本机交互式无回显塞密码**的 agent 路径依赖 OS service manager。
+> 没有 agent 时的替代方案：用 `hosts.yaml` 的 `password_command` / `passphrase_command` / `sudo_password_command`，或 `secrets.yaml` 的 `command:` 字段，从系统密码管理器（Keychain、`pass`、`secret-tool`、`gopass`、1Password CLI 等）按需读取——见下文「[认证](#认证)」。MCP server 本身（`portal_shell` 等所有远端工具）在 Windows / macOS / Linux 都正常工作；只有这个**本机交互式无回显塞密码**的 agent 路径依赖 OS service manager（或 Windows 上手动 `portal agent run` 起命名管道 agent）。
 
 `portal ssh set` / `portal sudo set` / `portal secret set` 的无回显交互值不再塞进某个 MCP server 进程自己的内存，而是进入一个 per-user、systemd socket-activated 的**凭据 agent**（credential agent）。使用这些交互凭据命令前，先显式安装并启动用户级 socket：
 
