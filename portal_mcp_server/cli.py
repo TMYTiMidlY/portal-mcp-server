@@ -1296,7 +1296,7 @@ def _agent_install_cli(args) -> int:
         print(f"  recorded path: {res['socket_path']}")
         if not args.now:
             print(f"Enable it with: systemctl --user enable --now {SOCKET_UNIT}")
-    else:  # launchd
+    elif backend == "launchd":
         print("Installed portal credential agent LaunchAgent:")
         print(f"  plist:         {res['plist']}")
         print(f"  config:        {res['config_path']}")
@@ -1304,6 +1304,16 @@ def _agent_install_cli(args) -> int:
         if not args.now:
             print(f"Load it with: launchctl load -w "
                   f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
+    else:  # schtasks (Windows per-user logon task)
+        print("Installed portal credential agent scheduled task (per-user):")
+        print(f"  task name:     {res['task_name']}")
+        print(f"  task xml:      {res['task_xml']}")
+        print(f"  config:        {res['config_path']}")
+        print(f"  recorded pipe: {res['socket_path']}")
+        print("  (runs as you, in your session, at logon — never as SYSTEM)")
+        if not args.now:
+            print(f"Start it now with: schtasks /Run /TN {res['task_name']}"
+                  f"  (or just log out and back in)")
     return 0
 
 

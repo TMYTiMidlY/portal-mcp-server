@@ -212,23 +212,37 @@ def default_namedpipe_credential_agent_address() -> str:
     return rf"\\.\pipe\{_APP}-credentials-{safe}"
 
 
+def default_scheduled_task_name() -> str:
+    """Windows Task Scheduler task name for the credential agent (per-user).
+
+    Scheduled-task names share a per-user namespace under the calling account,
+    so a fixed name is fine; we keep it stable so install/uninstall agree.
+    """
+    return f"{_APP}-credential-agent"
+
+
 def credential_agent_platform() -> str:
     """Which credential-agent *install* backend fits this OS.
 
     ``"systemd"`` (Linux user units) / ``"launchd"`` (macOS LaunchAgent) /
-    ``"unsupported"`` (Windows and everything else — no automated *install*
-    path yet; use the command-source credentials, or run the agent manually).
+    ``"schtasks"`` (Windows per-user logon scheduled task) / ``"unsupported"``
+    (everything else — use the command-source credentials, or run the agent
+    manually).
 
-    Note this is the *install* backend only. The agent's IPC *transport* is
-    chosen separately by :data:`sys.platform` (Unix domain socket on
-    Linux/macOS, named pipe on Windows), so the no-echo caching path is usable
-    on Windows via a manual ``portal agent run`` even though auto-install is
-    deferred.
+    All three supported backends auto-start a **per-user** agent that runs as
+    the logged-in user: systemd ``--user`` and launchd LaunchAgent run in the
+    user session, and the Windows scheduled task uses an *interactive-token*
+    logon trigger (runs as you, only while you're logged on — never as SYSTEM,
+    and with no stored password). The IPC transport is chosen separately by
+    :data:`sys.platform` (Unix domain socket on Linux/macOS, named pipe on
+    Windows).
     """
     if sys.platform.startswith("linux"):
         return "systemd"
     if sys.platform == "darwin":
         return "launchd"
+    if sys.platform == "win32":
+        return "schtasks"
     return "unsupported"
 
 
@@ -239,29 +253,19 @@ def credential_agent_unsupported_hint() -> str:
     needs an OS service manager to auto-start. Where we don't have one wired up,
     the agent's purpose — keeping a value out of the LLM — is still fully
     achievable via the command-source credentials, which this message points at.
-    On Windows the named-pipe transport works, so a manual ``portal agent run``
-    is also an option.
     """
-    base = (
+    return (
         f"The interactive credential agent has no automated install on this "
         f"platform ({sys.platform}). The MCP server and every remote portal_* "
         f"tool still work — only the no-echo `portal {{ssh,sudo,secret}} set` "
         f"caching path needs an OS service manager (systemd on Linux, launchd "
-        f"on macOS). Instead, drive credentials from command sources: "
-        f"`password_command` / `passphrase_command` / `sudo_password_command` "
-        f"in hosts.yaml, and a `command:` in secrets.yaml — each reads from "
-        f"your password manager (Keychain, pass, 1Password CLI, ...) on demand "
-        f"and never enters the model context."
+        f"on macOS, a logon scheduled task on Windows). Instead, drive "
+        f"credentials from command sources: `password_command` / "
+        f"`passphrase_command` / `sudo_password_command` in hosts.yaml, and a "
+        f"`command:` in secrets.yaml — each reads from your password manager "
+        f"(Keychain, pass, 1Password CLI, ...) on demand and never enters the "
+        f"model context."
     )
-    if sys.platform == "win32":
-        base += (
-            " On Windows the agent's named-pipe transport is supported: you can "
-            "also start it manually with `portal agent run --socket "
-            f"{default_namedpipe_credential_agent_address()}` (set the same "
-            "value in PORTAL_CREDENTIAL_AGENT_SOCKET for the MCP server) — "
-            "auto-start at logon is not yet wired up."
-        )
-    return base
 
 
 def systemd_user_unit_dir() -> Path:

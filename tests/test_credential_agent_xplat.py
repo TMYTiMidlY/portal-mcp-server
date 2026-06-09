@@ -13,6 +13,7 @@ are fully asserted.)
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -29,8 +30,9 @@ def _isolate_xdg(monkeypatch):
     ("linux", "systemd"),
     ("linux2", "systemd"),
     ("darwin", "launchd"),
-    ("win32", "unsupported"),
+    ("win32", "schtasks"),
     ("cygwin", "unsupported"),
+    ("freebsd13", "unsupported"),
 ])
 def test_credential_agent_platform(monkeypatch, plat, expected):
     from portal_mcp_server import paths
@@ -40,11 +42,11 @@ def test_credential_agent_platform(monkeypatch, plat, expected):
 
 def test_unsupported_hint_is_actionable(monkeypatch):
     from portal_mcp_server import paths
-    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setattr(paths.sys, "platform", "freebsd13")
     hint = paths.credential_agent_unsupported_hint()
     assert "password_command" in hint
     assert "secrets.yaml" in hint
-    assert "win32" in hint
+    assert "freebsd13" in hint
 
 
 def test_launchd_socket_path_uses_tmpdir(monkeypatch):
@@ -69,7 +71,7 @@ def test_install_agent_dispatches_to_systemd(monkeypatch, tmp_path):
 
 def test_install_agent_unsupported_raises_hint(monkeypatch):
     from portal_mcp_server import credential_agent, paths
-    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setattr(paths.sys, "platform", "freebsd13")
     with pytest.raises(RuntimeError, match="password_command"):
         credential_agent.install_agent(enable_now=False)
 
@@ -141,3 +143,83 @@ def test_uninstall_launchd_removes_plist(monkeypatch, tmp_path):
     assert res["backend"] == "launchd"
     assert not plist.exists()
     assert any("plist" in r for r in res["removed"])
+
+
+# ── Windows per-user logon scheduled task ───────────────────────────────────
+#
+# A real schtasks run needs Windows (the windows-latest CI job does an actual
+# register/query/delete). Here we mock subprocess + monkeypatch the platform so
+# the install/uninstall *logic* and the generated Task Scheduler XML are fully
+# asserted on any OS.
+
+def test_scheduled_task_xml_is_per_user_and_unkillable():
+    from portal_mcp_server import credential_agent
+    xml = credential_agent._scheduled_task_xml_text(
+        r"C:\Python\pythonw.exe",
+        r"-m portal_mcp_server agent run --socket \\.\pipe\portal-x",
+        user_id=r"DESKTOP\me", task_name="portal-mcp-server-credential-agent")
+    # Per-user: runs as the interactive logon user, least privilege, never SYSTEM.
+    assert "<LogonTrigger>" in xml
+    assert "<LogonType>InteractiveToken</LogonType>" in xml
+    assert "<RunLevel>LeastPrivilege</RunLevel>" in xml
+    assert "<UserId>DESKTOP\\me</UserId>" in xml
+    # Unkillable + keepalive: no 72h default kill, restart on crash.
+    assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in xml
+    assert "<RestartOnFailure>" in xml
+    # The named pipe is carried through to the agent's argv (XML-escaped).
+    assert "--socket \\\\.\\pipe\\portal-x" in xml
+
+
+def test_install_agent_dispatches_to_schtasks(monkeypatch, tmp_path):
+    from portal_mcp_server import credential_agent, paths
+    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+
+    calls = []
+    monkeypatch.setattr(credential_agent.subprocess, "run",
+                        lambda *a, **k: calls.append(a[0]))
+
+    res = credential_agent.install_agent(enable_now=False)
+    assert res["backend"] == "schtasks"
+    assert res["task_name"] == "portal-mcp-server-credential-agent"
+    # The task was registered from the generated XML.
+    assert any(c[:2] == ["schtasks", "/Create"] and "/XML" in c for c in calls)
+    # enable_now=False -> no /Run.
+    assert not any("/Run" in c for c in calls)
+    # XML + config landed on disk, config records the named-pipe address.
+    assert Path(res["task_xml"]).exists()
+    cfg = json.loads(Path(res["config_path"]).read_text())
+    assert cfg["socket_path"].startswith(r"\\.\pipe\portal-mcp-server-credentials")
+
+
+def test_install_scheduled_task_enable_now_runs_task(monkeypatch, tmp_path):
+    from portal_mcp_server import credential_agent, paths
+    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+    calls = []
+    monkeypatch.setattr(credential_agent.subprocess, "run",
+                        lambda *a, **k: calls.append(a[0]))
+
+    credential_agent.install_agent(enable_now=True)
+    assert any(c[:2] == ["schtasks", "/Run"] for c in calls)
+
+
+def test_uninstall_scheduled_task_deletes_and_cleans(monkeypatch, tmp_path):
+    from portal_mcp_server import credential_agent, paths
+    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "home" / ".config"))
+    calls = []
+    monkeypatch.setattr(credential_agent.subprocess, "run",
+                        lambda *a, **k: calls.append(a[0]))
+
+    credential_agent.install_agent(enable_now=False)
+    xml_path = credential_agent.scheduled_task_xml_path()
+    assert xml_path.exists()
+    res = credential_agent.uninstall_agent(stop_now=True, remove_config=True)
+    assert res["backend"] == "schtasks"
+    assert any(c[:2] == ["schtasks", "/Delete"] for c in calls)
+    assert not xml_path.exists()
+    assert any("credential-agent-task.xml" in r for r in res["removed"])

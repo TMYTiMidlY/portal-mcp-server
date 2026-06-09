@@ -48,6 +48,7 @@ from .paths import (
     credential_agent_unsupported_hint,
     default_launchd_credential_agent_socket_path,
     default_namedpipe_credential_agent_address,
+    default_scheduled_task_name,
     default_systemd_credential_agent_socket_path,
     systemd_user_unit_dir,
 )
@@ -679,6 +680,156 @@ def uninstall_launchd_agent(*, stop_now: bool = True,
             "errors": errors}
 
 
+# ── Windows per-user logon scheduled task ────────────────────────────────────
+#
+# Windows Services run in session 0 and default to the LocalSystem identity —
+# the wrong trust boundary for a per-user secret cache (any admin/SYSTEM could
+# read it). The correct per-user analog of `systemd --user` / a launchd
+# LaunchAgent is a *scheduled task* with a **logon trigger** and an
+# **interactive-token principal**: it runs as the logged-in user, in their
+# session, only while they are logged on, and stores no password. We register it
+# from a Task Scheduler XML because the `schtasks` command line cannot set
+# `ExecutionTimeLimit` (so a plain task would be killed after the 72h default)
+# nor a `RestartOnFailure` keepalive — both of which the XML provides.
+
+TASK_SCHEDULER_NS = "http://schemas.microsoft.com/windows/2004/02/mit/task"
+
+
+def _current_windows_user_id() -> str:
+    domain = os.environ.get("USERDOMAIN")
+    user = os.environ.get("USERNAME")
+    if domain and user:
+        return f"{domain}\\{user}"
+    if user:
+        return user
+    import getpass
+    try:
+        return getpass.getuser()
+    except Exception:  # pragma: no cover - getuser only fails w/o any user env
+        return "user"
+
+
+def _pythonw_executable() -> str:
+    """Prefer pythonw.exe (no flashing console window) next to the interpreter."""
+    exe = Path(sys.executable)
+    candidate = exe.with_name("pythonw.exe")
+    return str(candidate if candidate.exists() else exe)
+
+
+def scheduled_task_xml_path() -> Path:
+    return credential_agent_config_path().with_name("credential-agent-task.xml")
+
+
+def _scheduled_task_xml_text(exec_path: str, exec_args: str, *,
+                             user_id: str, task_name: str) -> str:
+    esc = _xml_escape
+    uri = "\\" + task_name
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="{TASK_SCHEDULER_NS}">
+  <RegistrationInfo>
+    <Description>portal-mcp-server credential agent (per-user)</Description>
+    <URI>{esc(uri)}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{esc(user_id)}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{esc(user_id)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{esc(exec_path)}</Command>
+      <Arguments>{esc(exec_args)}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def install_scheduled_task(*, socket_path: Path | None = None,
+                           enable_now: bool = False) -> dict[str, str]:
+    task_name = default_scheduled_task_name()
+    socket_addr = (str(socket_path) if socket_path
+                   else default_namedpipe_credential_agent_address())
+    exec_args = f"-m portal_mcp_server agent run --socket {socket_addr}"
+    xml_text = _scheduled_task_xml_text(
+        _pythonw_executable(), exec_args,
+        user_id=_current_windows_user_id(), task_name=task_name)
+
+    xml_path = scheduled_task_xml_path()
+    xml_path.parent.mkdir(parents=True, exist_ok=True)
+    # schtasks expects a Unicode XML; UTF-16 (with BOM) is the most-compatible.
+    xml_path.write_text(xml_text, encoding="utf-16")
+
+    config_path = credential_agent_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({"socket_path": socket_addr}, indent=2) + "\n")
+
+    subprocess.run(["schtasks", "/Create", "/TN", task_name, "/XML",
+                    str(xml_path), "/F"], check=True)
+    if enable_now:
+        subprocess.run(["schtasks", "/Run", "/TN", task_name], check=True)
+
+    return {
+        "task_name": task_name,
+        "task_xml": str(xml_path),
+        "socket_path": socket_addr,
+        "config_path": str(config_path),
+    }
+
+
+def uninstall_scheduled_task(*, stop_now: bool = True,
+                             remove_config: bool = True) -> dict[str, Any]:
+    task_name = default_scheduled_task_name()
+    errors: list[str] = []
+    if stop_now:
+        try:
+            subprocess.run(["schtasks", "/End", "/TN", task_name], check=False)
+        except OSError as e:
+            errors.append(str(e))
+    try:
+        # /F suppresses the confirm prompt; a missing task just exits non-zero.
+        subprocess.run(["schtasks", "/Delete", "/TN", task_name, "/F"], check=False)
+    except OSError as e:
+        errors.append(str(e))
+
+    removed: list[str] = []
+    targets = [scheduled_task_xml_path()]
+    if remove_config:
+        targets.append(credential_agent_config_path())
+    for path in targets:
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except FileNotFoundError:
+            pass
+
+    return {"removed": removed, "config_removed": remove_config,
+            "errors": errors}
+
+
 # ── OS-dispatching install entry points ──────────────────────────────────────
 
 
@@ -686,15 +837,18 @@ def install_agent(*, socket_path: Path | None = None,
                   enable_now: bool = False) -> dict[str, Any]:
     """Install the per-user credential agent for the current OS.
 
-    Linux -> systemd user units; macOS -> launchd LaunchAgent. Raises
-    ``RuntimeError`` with an actionable hint on platforms without an automated
-    install (Windows etc. — use command-source credentials instead).
+    Linux -> systemd user units; macOS -> launchd LaunchAgent; Windows ->
+    per-user logon scheduled task (named-pipe transport). Raises ``RuntimeError``
+    with an actionable hint on platforms without an automated install — use
+    command-source credentials instead.
     """
     backend = credential_agent_platform()
     if backend == "systemd":
         res = install_user_units(socket_path=socket_path, enable_now=enable_now)
     elif backend == "launchd":
         res = install_launchd_agent(socket_path=socket_path, enable_now=enable_now)
+    elif backend == "schtasks":
+        res = install_scheduled_task(socket_path=socket_path, enable_now=enable_now)
     else:
         raise RuntimeError(credential_agent_unsupported_hint())
     res["backend"] = backend
@@ -708,6 +862,8 @@ def uninstall_agent(*, stop_now: bool = True,
         res = uninstall_user_units(stop_now=stop_now, remove_config=remove_config)
     elif backend == "launchd":
         res = uninstall_launchd_agent(stop_now=stop_now, remove_config=remove_config)
+    elif backend == "schtasks":
+        res = uninstall_scheduled_task(stop_now=stop_now, remove_config=remove_config)
     else:
         raise RuntimeError(credential_agent_unsupported_hint())
     res["backend"] = backend

@@ -73,12 +73,13 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v --tb=short
 
-  # Windows has no AF_UNIX, so the credential agent uses a named-pipe transport.
-  # This job is the *only* place that transport runs on a real Windows kernel:
-  # it verifies the named-pipe server/client round trip plus the platform
-  # dispatch. The broader POSIX-shell remote tests are not in scope here.
+  # Windows has no AF_UNIX, so the credential agent uses a named-pipe transport
+  # plus a per-user logon scheduled task for install. This job is the *only*
+  # place both run on a real Windows kernel: it verifies the named-pipe
+  # server/client round trip AND a real Task Scheduler register/query/delete.
+  # The broader POSIX-shell remote tests are not in scope here.
   test-windows:
-    name: test (windows, named-pipe agent)
+    name: test (windows, named-pipe + scheduled task)
     runs-on: windows-latest
 
     steps:
@@ -100,5 +101,5 @@ jobs:
       - name: Verify CLI entrypoint
         run: portal-mcp-server --help
 
-      - name: Run credential-agent named-pipe round-trip tests
+      - name: Run credential-agent named-pipe + scheduled-task tests
         run: pytest tests/test_credential_agent_namedpipe.py -v --tb=short

@@ -90,3 +90,44 @@ def test_named_pipe_clear_removes_entry(pipe_agent):
     assert ssh_creds.fetch_ssh_password_from_agent("web02") == "temp"
     credential_agent.clear("ssh", "web02")
     assert ssh_creds.fetch_ssh_password_from_agent("web02") is None
+
+
+# ── Real scheduled-task install/query/delete (Windows Task Scheduler) ────────
+#
+# Exercises the *install* path end to end on a real Windows runner: register the
+# per-user logon task from generated XML, confirm Task Scheduler accepted it,
+# then uninstall and confirm it's gone. enable_now is False — we don't /Run it
+# (an InteractiveToken task won't start in CI's non-interactive session; the
+# live transport is covered by the round-trip tests above).
+
+@pytest.fixture
+def _cleanup_task():
+    yield
+    import subprocess
+
+    from portal_mcp_server.paths import default_scheduled_task_name
+    subprocess.run(["schtasks", "/Delete", "/TN", default_scheduled_task_name(),
+                    "/F"], capture_output=True)
+
+
+def test_scheduled_task_install_query_uninstall(_cleanup_task):
+    import subprocess
+
+    from portal_mcp_server import credential_agent
+    from portal_mcp_server.paths import default_scheduled_task_name
+
+    name = default_scheduled_task_name()
+
+    res = credential_agent.install_agent(enable_now=False)
+    assert res["backend"] == "schtasks"
+
+    query = subprocess.run(["schtasks", "/Query", "/TN", name],
+                           capture_output=True, text=True)
+    assert query.returncode == 0, query.stderr or query.stdout
+
+    out = credential_agent.uninstall_agent(stop_now=True, remove_config=True)
+    assert out["backend"] == "schtasks"
+
+    gone = subprocess.run(["schtasks", "/Query", "/TN", name],
+                          capture_output=True, text=True)
+    assert gone.returncode != 0, "task should be deleted"
