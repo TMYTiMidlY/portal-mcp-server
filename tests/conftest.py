@@ -13,6 +13,7 @@ Goals
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 
@@ -56,6 +57,11 @@ def agent_socket(_isolate_credential_agent, tmp_path, monkeypatch):
     invisible to readers and silently inverts if the isolation fixture is
     ever refactored.
     """
+    if sys.platform == "win32":
+        pytest.skip(
+            "AF_UNIX credential-agent fixture; Windows named-pipe transport is "
+            "covered by test_credential_agent_namedpipe.py"
+        )
     from portal_mcp_server import credential_agent
 
     sock = tmp_path / "agent.sock"

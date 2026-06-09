@@ -47,6 +47,7 @@ from .paths import (
     credential_agent_socket_path,
     credential_agent_unsupported_hint,
     default_launchd_credential_agent_socket_path,
+    default_namedpipe_credential_agent_address,
     default_systemd_credential_agent_socket_path,
     systemd_user_unit_dir,
 )
@@ -89,14 +90,18 @@ class CredentialAgent:
                 )
                 return
 
-            data = await asyncio.wait_for(reader.read(65536), timeout=10)
+            # Newline-delimited single-line JSON framing (transport-agnostic:
+            # works over a Unix socket AND a Windows named pipe, neither of
+            # which can rely on a half-close to delimit the request).
+            data = await asyncio.wait_for(reader.readline(), timeout=10)
             msg = json.loads(data.decode("utf-8"))
             resp = await self.dispatch(msg)
-            writer.write(json.dumps(resp).encode("utf-8"))
+            writer.write(json.dumps(resp).encode("utf-8") + b"\n")
             await writer.drain()
         except Exception as e:  # pragma: no cover - defensive
             try:
-                writer.write(json.dumps({"status": "error", "error": str(e)}).encode())
+                writer.write(json.dumps(
+                    {"status": "error", "error": str(e)}).encode() + b"\n")
                 await writer.drain()
             except OSError:
                 pass
@@ -284,7 +289,51 @@ async def serve_async(sock: socket.socket) -> None:
         await server.serve_forever()
 
 
+async def serve_async_pipe(pipe_name: str) -> None:
+    """Windows named-pipe server.
+
+    asyncio's named-pipe support is protocol-based (ProactorEventLoop only), so
+    we bridge it to the same stream ``handle(reader, writer)`` used on Unix via
+    a ``StreamReaderProtocol``. ``start_serving_pipe`` manages creating fresh
+    pipe instances per client connection.
+    """
+    agent = CredentialAgent()
+    loop = asyncio.get_running_loop()
+
+    def factory() -> asyncio.StreamReaderProtocol:
+        reader = asyncio.StreamReader()
+        return asyncio.StreamReaderProtocol(reader, agent.handle)
+
+    servers = await loop.start_serving_pipe(factory, pipe_name)
+    try:
+        await asyncio.Event().wait()  # serve until the process is stopped
+    finally:
+        for srv in servers:
+            srv.close()
+
+
+def _resolve_windows_pipe_name(socket_path: Path | None) -> str:
+    """Pipe address for the Windows agent: explicit arg > configured > default.
+
+    Unlike the Unix path (which *requires* configuration so a missing install is
+    a hard error), Windows has no auto-install yet, so we fall back to a stable
+    per-user default pipe name to keep manual ``portal agent run`` ergonomic.
+    """
+    if socket_path is not None:
+        return str(socket_path)
+    try:
+        return str(credential_agent_socket_path())
+    except CredentialAgentNotConfigured:
+        return default_namedpipe_credential_agent_address()
+
+
 def serve_forever(socket_path: Path | None = None) -> None:
+    if sys.platform == "win32":
+        # ProactorEventLoop is the Windows default (3.8+) and is required for
+        # start_serving_pipe; set it explicitly for robustness.
+        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+        asyncio.run(serve_async_pipe(_resolve_windows_pipe_name(socket_path)))
+        return
     sockets = _systemd_activated_sockets()
     if len(sockets) > 1:
         logger.warning("received %d activated sockets; using the first", len(sockets))
@@ -292,8 +341,19 @@ def serve_forever(socket_path: Path | None = None) -> None:
     asyncio.run(serve_async(sock))
 
 
-def request(msg: dict[str, Any], *, timeout: float = 10.0) -> dict[str, Any]:
-    path = credential_agent_socket_path()
+def _recv_line(sock: socket.socket, timeout: float) -> bytes:
+    """Read one newline-delimited frame from a connected stream socket."""
+    sock.settimeout(timeout)
+    buf = b""
+    while b"\n" not in buf:
+        chunk = sock.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
+    return buf.split(b"\n", 1)[0]
+
+
+def _request_unix_socket(path: Path, payload: bytes, timeout: float) -> bytes:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -303,12 +363,55 @@ def request(msg: dict[str, Any], *, timeout: float = 10.0) -> dict[str, Any]:
                 f"credential agent socket {path} peer uid {peer_uid(s)!r} "
                 f"does not match our uid {os.getuid()}; refusing to send"
             )
-        s.sendall(json.dumps(msg).encode("utf-8"))
-        s.shutdown(socket.SHUT_WR)
-        resp = s.recv(65536)
+        s.sendall(payload + b"\n")
+        return _recv_line(s, timeout)
     finally:
         s.close()
-    return json.loads(resp.decode("utf-8")) if resp else {"status": "error", "error": "no response"}
+
+
+def _request_named_pipe(pipe_name: str, payload: bytes, timeout: float) -> bytes:
+    """Windows transport: a named pipe is openable as a file. Retry briefly if
+    the server is between pipe instances (ERROR_PIPE_BUSY). Same-uid is
+    guaranteed by the pipe's default per-session ACL (no SO_PEERCRED on
+    Windows), matching the filesystem-permission posture on Unix."""
+    deadline = time.monotonic() + timeout
+    f = None
+    while f is None:
+        try:
+            f = open(pipe_name, "r+b", buffering=0)
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+    try:
+        f.write(payload + b"\n")
+        f.flush()
+        buf = b""
+        while b"\n" not in buf:
+            chunk = f.read(65536)
+            if not chunk:
+                break
+            buf += chunk
+        return buf.split(b"\n", 1)[0]
+    finally:
+        f.close()
+
+
+def request(msg: dict[str, Any], *, timeout: float = 10.0) -> dict[str, Any]:
+    """Send one request to the credential agent and return its JSON response.
+
+    Transport-agnostic newline-delimited framing over a Unix socket
+    (Linux/macOS) or a Windows named pipe; the address comes from
+    :func:`credential_agent_socket_path`.
+    """
+    path = credential_agent_socket_path()
+    payload = json.dumps(msg).encode("utf-8")
+    if sys.platform == "win32":
+        resp = _request_named_pipe(str(path), payload, timeout)
+    else:
+        resp = _request_unix_socket(path, payload, timeout)
+    return json.loads(resp.decode("utf-8")) if resp else {
+        "status": "error", "error": "no response"}
 
 
 def fetch(kind: str, key: str) -> Optional[str]:

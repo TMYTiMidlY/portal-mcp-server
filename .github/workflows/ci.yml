@@ -8,6 +8,7 @@ on:
 
 jobs:
   lint-and-test:
+    name: lint-and-test (ubuntu, py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -43,3 +44,61 @@ jobs:
           else
             echo "No tests found — skipping."
           fi
+
+  # macOS is POSIX (AF_UNIX works), so it runs the full suite and additionally
+  # exercises the launchd credential-agent install path that ubuntu cannot.
+  test-macos:
+    name: test (macos)
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Check package imports
+        run: python -c "import portal_mcp_server; assert portal_mcp_server.main; print('import ok')"
+
+      - name: Verify CLI entrypoint
+        run: portal-mcp-server --help
+
+      - name: Run tests
+        run: pytest tests/ -v --tb=short
+
+  # Windows has no AF_UNIX, so the credential agent uses a named-pipe transport.
+  # This job is the *only* place that transport runs on a real Windows kernel:
+  # it verifies the named-pipe server/client round trip plus the platform
+  # dispatch. The broader POSIX-shell remote tests are not in scope here.
+  test-windows:
+    name: test (windows, named-pipe agent)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Check package imports
+        run: python -c "import portal_mcp_server; assert portal_mcp_server.main; print('import ok')"
+
+      - name: Verify CLI entrypoint
+        run: portal-mcp-server --help
+
+      - name: Run credential-agent named-pipe round-trip tests
+        run: pytest tests/test_credential_agent_namedpipe.py -v --tb=short
