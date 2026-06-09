@@ -1,3 +1,43 @@
+## v3.1.0 (2026-06-09)
+
+### Feat
+
+- **exec**: route sudo here, flag credentialed runs high-risk, auto-install agent
+- **job**: best-effort persist the job table across restarts
+- **job**: reject use_sudo/secrets on submit with a redirect to portal_exec
+- **audit**: size-based log rotation via stdlib RotatingFileHandler
+- **server**: close pool + sessions on shutdown via FastMCP lifespan
+- **credential-agent**: Windows per-user logon scheduled-task install
+- **credential-agent**: named-pipe transport for Windows + CI matrix
+- **job**: page portal_job poll output on demand; clean UTF-8 chunk seams
+- **agent**: cross-platform credential agent install (Linux + macOS)
+- **auth**: symmetrize SSH passphrase with the login-password side channel
+- **host**: add proxy_jump / keepalive_interval / forward_agent to hosts.yaml
+- **host**: detect hosts.yaml <-> ssh config conflicts; fix use_ssh_config
+- **job**: add portal_job — background submit/poll/cancel/list (L1 async)
+- **bash**: return exit codes from the persistent session path
+- **bash**: emit MCP progress heartbeats during portal_bash/portal_local_exec
+- **audit**: expose server metadata via portal_audit (view="server" + snapshot)
+
+### Fix
+
+- **grep**: force filename + ERE in the grep fallback so matches survive
+- **bash**: require a newline terminator when parsing the session exit code
+
+### Refactor
+
+- **host**: detect ssh-config aliases via asyncssh parser (follow Include)
+- **output**: single-source ANSI stripping in safety.strip_ansi
+- **patch**: fold orphan-tmp cleanup into portal_patch; drop the tool
+- **tools**: delete portal_ping; synthesize it with portal_exec
+- **search**: port grep/glob to Claude Code's schema + structured output
+- **tools**: consolidate tunnel into portal_tunnel(action=); narrow audit
+- **exec**: delete portal_playbook; its semantics live in portal_exec
+- **exec**: absorb portal_multi_exec into portal_exec as orthogonal flags
+- **exec**: split portal_bash into portal_shell + portal_exec
+- **schema**: type dispatch params with Literal so enums reach clients
+- **audit**: fold portal_bash_status into portal_audit view="sessions"
+
 ## v3.0.1 (2026-06-08)
 
 ### Fix
