@@ -137,6 +137,14 @@ class HostConfig:
     # alternative source is the per-user credential agent populated
     # out-of-band by ``portal sudo set`` (see sudo_creds.py).
     sudo_password_command: Optional[str] = None
+    # ── Selected ssh_config-style connection options (forwarded to asyncssh
+    # in ``_build_connect_kwargs`` for explicit, non-use_ssh_config hosts) ──
+    # ProxyJump: "user@jump:port" or a bare alias. -> asyncssh ``tunnel``.
+    proxy_jump: Optional[str] = None
+    # ServerAliveInterval equivalent (seconds). -> ``keepalive_interval``.
+    keepalive_interval: Optional[int] = None
+    # ForwardAgent. -> ``agent_forwarding``.
+    forward_agent: Optional[bool] = None
 
 
 @dataclass
@@ -263,6 +271,13 @@ class ConnectionManager:
                 password_command=password_command,
                 passphrase_command=passphrase_command,
                 sudo_password_command=sudo_password_command,
+                proxy_jump=cfg.get("proxy_jump"),
+                keepalive_interval=(int(cfg["keepalive_interval"])
+                                    if cfg.get("keepalive_interval") is not None
+                                    else None),
+                forward_agent=(bool(cfg["forward_agent"])
+                               if cfg.get("forward_agent") is not None
+                               else None),
             )
         logger.info(f"Loaded {len(self._registry)} hosts from registry")
 
@@ -511,6 +526,16 @@ class ConnectionManager:
             connect_timeout=cfg.connect_timeout,
             known_hosts=self._known_hosts_arg(cfg),
         )
+
+        # ── Optional ssh_config-style connection options ──
+        # ProxyJump -> tunnel, ServerAliveInterval -> keepalive_interval,
+        # ForwardAgent -> agent_forwarding. Applied to every auth mode below.
+        if cfg.proxy_jump:
+            kwargs["tunnel"] = cfg.proxy_jump
+        if cfg.keepalive_interval is not None:
+            kwargs["keepalive_interval"] = cfg.keepalive_interval
+        if cfg.forward_agent is not None:
+            kwargs["agent_forwarding"] = cfg.forward_agent
 
         # ── Password auth (opt-in via `auth: password`) ────────────────
         # The side-channel password chain: credential agent (populated by

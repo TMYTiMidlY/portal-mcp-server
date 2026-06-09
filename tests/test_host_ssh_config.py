@@ -121,3 +121,44 @@ def test_register_with_explicit_host_still_works(home, wired):
                           user="postgres")
     assert "10.0.0.5" in out
     assert wired._registry["db"].use_ssh_config is False
+
+
+# ── hosts.yaml ssh_config-style connection fields (W-MAIN.11c) ──────────────
+
+def test_extra_connection_fields_read_from_yaml(home, tmp_path):
+    yml = _hosts_yaml(
+        tmp_path,
+        "hosts:\n"
+        "  web01:\n"
+        "    host: 10.0.0.1\n"
+        "    proxy_jump: 'bastion.example.com'\n"
+        "    keepalive_interval: 30\n"
+        "    forward_agent: true\n")
+    m = cm.ConnectionManager(hosts_yaml=yml)
+    cfg = m._registry["web01"]
+    assert cfg.proxy_jump == "bastion.example.com"
+    assert cfg.keepalive_interval == 30
+    assert cfg.forward_agent is True
+
+
+@pytest.mark.asyncio
+async def test_extra_fields_forwarded_to_asyncssh_kwargs(tmp_path):
+    cfg = cm.HostConfig(
+        name="web01", host="10.0.0.1", key="/tmp/fake_key",
+        proxy_jump="user@bastion:2222", keepalive_interval=15,
+        forward_agent=True)
+    m = cm.ConnectionManager(hosts_yaml=_hosts_yaml(tmp_path, "hosts: {}\n"))
+    kwargs = await m._build_connect_kwargs(cfg)
+    assert kwargs["tunnel"] == "user@bastion:2222"
+    assert kwargs["keepalive_interval"] == 15
+    assert kwargs["agent_forwarding"] is True
+
+
+@pytest.mark.asyncio
+async def test_extra_fields_absent_by_default(tmp_path):
+    cfg = cm.HostConfig(name="web01", host="10.0.0.1", key="/tmp/fake_key")
+    m = cm.ConnectionManager(hosts_yaml=_hosts_yaml(tmp_path, "hosts: {}\n"))
+    kwargs = await m._build_connect_kwargs(cfg)
+    assert "tunnel" not in kwargs
+    assert "keepalive_interval" not in kwargs
+    assert "agent_forwarding" not in kwargs
