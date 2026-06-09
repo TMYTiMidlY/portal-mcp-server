@@ -1,8 +1,7 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 15 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
-shell(+close_shell)/exec core + local_exec + host/transfer/tunnel/ping/
-audit/check.
+Exposes 14 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+shell(+close_shell)/exec core + local_exec + host/transfer/tunnel/audit/check.
 """
 import asyncio
 import json
@@ -517,53 +516,7 @@ async def portal_tunnel(action: Literal["open", "close", "list"],
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 4. HEALTH CHECK  (portal_ping)
-# ═══════════════════════════════════════════════════════════════════
-
-@mcp.tool()
-async def portal_ping(hosts_json: str = "") -> str:
-    """Test SSH connectivity to one or more hosts.
-
-    - hosts_json="" or "[]" (default): ping all registered hosts in parallel.
-    - hosts_json='["web01"]': ping a specific host or set.
-
-    Returns: {"online": N, "total": M, "hosts": [{host, reachable, latency_s, ...}, ...]}
-    """
-    mgr = get_manager()
-    try:
-        hosts = json.loads(hosts_json) if hosts_json.strip() not in ("", "[]") \
-                else list(mgr._registry.keys())
-    except Exception:
-        hosts = list(mgr._registry.keys())
-    if not hosts:
-        return json.dumps({"online": 0, "total": 0, "hosts": [],
-                           "message": "No hosts to ping (registry empty "
-                                      "and no hosts_json provided)."},
-                          indent=2)
-
-    async def _ping(h: str) -> dict:
-        err = _gate(h)
-        if err:
-            return {"host": h, "reachable": False, "error": f"BLOCKED: {err}"}
-        t0 = time.time()
-        try:
-            res = await asyncio.wait_for(
-                ssh_exec(h, "echo pong", timeout=10), timeout=12)
-            return {"host": h,
-                    "reachable": res.get("stdout", "").strip() == "pong",
-                    "latency_s": round(time.time() - t0, 3),
-                    "exit_code": res.get("exit_code")}
-        except Exception as e:
-            return {"host": h, "reachable": False, "error": str(e)}
-
-    results = await asyncio.gather(*[_ping(h) for h in hosts])
-    online = sum(1 for r in results if r.get("reachable"))
-    return json.dumps({"online": online, "total": len(hosts), "hosts": results},
-                      indent=2)
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 6. POLICY DRY-RUN  (portal_check)
+# 5. POLICY DRY-RUN  (portal_check)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
