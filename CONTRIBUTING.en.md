@@ -82,6 +82,19 @@ When adding a new `@mcp.tool()`:
 - For end-to-end verification, use `tests/live_smoke.py` — it needs a
   real SSH host (see the README "Testing" section).
 
+## Code style & lint
+
+- Run `uv run ruff check portal_mcp_server/` before you submit — **product
+  code must be zero-error**; this is the CI gate (all four Python versions
+  run it, see "CI" below).
+- Add `--fix` to let ruff auto-fix the fixable lints (unused imports,
+  placeholder-less f-strings, import ordering, ...):
+  `uv run ruff check --fix portal_mcp_server/`.
+- **CI lints `portal_mcp_server/` only, not `tests/`** — pre-existing lint
+  noise inherited from upstream in the tests tree does not block CI. Still,
+  keep the test files you **add / touch** clean: `uv run ruff check --fix
+  tests/<file>.py` on the single file is enough; don't introduce new lints.
+
 ## Security & privacy
 
 - **Never commit secrets.** Real credentials belong **only** in

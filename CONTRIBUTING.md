@@ -52,6 +52,12 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 - 安全 / 资源生命周期相关的修复，配套测试要进入 `tests/test_pool_leak_regression.py` 或 `tests/test_gate_coverage_fixes.py` 系列
 - 跑端到端验证用 `tests/live_smoke.py`（需要真实 SSH host，详见 README "测试" 节）
 
+## 代码风格 & Lint
+
+- 提交前跑 `uv run ruff check portal_mcp_server/`——**产品代码必须零报错**，这是 CI 闸门（四个 Python 版本都会跑，见下 "CI"）
+- 加 `--fix` 让 ruff 一键自动修可修项（未用 import、无占位符 f-string、import 排序等）：`uv run ruff check --fix portal_mcp_server/`
+- **CI 只 lint `portal_mcp_server/`，不 lint `tests/`**——测试目录里上游遗留的 lint 噪声不阻塞 CI；但你**新增 / 改动**的测试文件也请保持干净，对单个文件 `uv run ruff check --fix tests/<file>.py` 即可，别引入新报错
+
 ## 安全 & 隐私
 
 - **不 commit secret**——真实凭据**只**放 `$XDG_CONFIG_HOME/portal-mcp-server/`（默认 `~/.config/portal-mcp-server/`）
