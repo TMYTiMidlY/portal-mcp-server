@@ -1,6 +1,10 @@
 """
 Audit Logger — structured logging of all agent actions.
-Writes to <log_dir>/audit.jsonl and optionally to stdout.
+Writes JSONL to <log_dir>/audit.jsonl via a size-rotating stdlib logging
+handler (rotates to audit.jsonl.1 .. .N). Tunables:
+
+* ``PORTAL_AUDIT_MAX_BYTES`` — rotate after this many bytes (default 10 MiB).
+* ``PORTAL_AUDIT_BACKUPS``   — how many rotated files to keep (default 5).
 
 Failure-mode policy
 -------------------
@@ -8,7 +12,10 @@ By default a write failure raises a :class:`RuntimeError` which propagates
 back to the caller, **aborting the operation**. This fail-closed default
 matches the cybersecurity positioning advertised in the README ("every
 state-changing operation is recorded") — if the audit log cannot be
-written, we refuse to act.
+written, we refuse to act. Because stdlib logging handlers normally swallow
+write errors, the rotating handler is subclassed to re-raise them
+(:class:`_FailClosedRotatingHandler`) so this guarantee survives the move to
+``logging.handlers``.
 
 Set the environment variable ``PORTAL_AUDIT_FAIL_OPEN=1`` to switch to
 fail-open behaviour (write failure is logged but the operation proceeds).
@@ -17,6 +24,7 @@ durability is not required.
 """
 import json
 import logging
+import logging.handlers
 import os
 import time
 
@@ -41,6 +49,45 @@ def _fail_closed() -> bool:
         "1", "true", "yes", "on",
     )
 
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    try:
+        v = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
+
+class _FailClosedRotatingHandler(logging.handlers.RotatingFileHandler):
+    """RotatingFileHandler that PROPAGATES write/rotate errors instead of
+    swallowing them. The stock handler routes failures to ``handleError``,
+    which prints to stderr and returns; re-raising there is what lets
+    ``audit_log`` keep its fail-closed guarantee — a failed audit write must
+    surface and abort the operation, not vanish.
+    """
+
+    def handleError(self, record):  # noqa: D102 - see class docstring
+        raise
+
+
+# Mature size-based rotation via stdlib logging (audit.jsonl -> .1 .. .N) on a
+# dedicated, non-propagating logger so the JSON lines are written verbatim and
+# the warning ``logger`` above stays a separate stream. Defaults: 10 MiB x 5.
+_AUDIT_MAX_BYTES = _int_env("PORTAL_AUDIT_MAX_BYTES", 10 * 1024 * 1024)
+_AUDIT_BACKUPS = _int_env("PORTAL_AUDIT_BACKUPS", 5)
+
+_audit_writer = logging.getLogger("portal_mcp.audit.jsonl")
+_audit_writer.setLevel(logging.INFO)
+_audit_writer.propagate = False
+if not _audit_writer.handlers:
+    _h = _FailClosedRotatingHandler(
+        _audit_file, maxBytes=_AUDIT_MAX_BYTES, backupCount=_AUDIT_BACKUPS,
+        encoding="utf-8", delay=True,
+    )
+    _h.setFormatter(logging.Formatter("%(message)s"))
+    _audit_writer.addHandler(_h)
+
 # In-memory ring buffer for recent operations (for observability tools)
 _HISTORY_LIMIT = 500
 _history: list[dict] = []
@@ -61,16 +108,12 @@ def audit_log(host: str, command: str, result,
     _history.append(entry)
     if len(_history) > _HISTORY_LIMIT:
         _history.pop(0)
-    # Append to JSONL file.
-    # ADR — why direct JSONL writes, not logging.handlers.*: stdlib logging
-    # handlers SWALLOW write errors (Handler.handleError prints to stderr and
-    # returns), which is incompatible with the fail-closed guarantee above — a
-    # failed audit write must raise and abort the operation. We also keep the
-    # in-memory ring buffer (_history) for portal_audit. Future enhancement:
-    # size-based rotation (RotatingFileHandler-style) for unbounded audit.jsonl.
+    # Append to the JSONL file through a size-rotating, fail-closed logging
+    # handler (_FailClosedRotatingHandler). Rotation is stdlib; re-raising in the
+    # handler's handleError keeps the fail-closed guarantee, so a failed write
+    # surfaces here and aborts the operation unless PORTAL_AUDIT_FAIL_OPEN is set.
     try:
-        with open(_audit_file, "a") as f:
-            f.write(json.dumps(entry) + "\n")
+        _audit_writer.info(json.dumps(entry))
     except Exception as e:
         logger.warning(f"Audit write failed: {e}")
         if _fail_closed():
