@@ -297,8 +297,28 @@ def portal_host(action: Literal["list", "register", "remove"], name: str = "",
         hosts = mgr.list_hosts()
         return json.dumps(hosts, indent=2) if hosts else "No hosts registered."
     if action == "register":
-        if not name or not host:
-            raise ToolError('action="register" requires both `name` and `host`.')
+        if not name:
+            raise ToolError('action="register" requires `name`.')
+        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+        if not host:
+            # (c) Only a name was given. If ~/.ssh/config has a matching Host
+            # alias, register an overlay that takes its connection params from
+            # there; otherwise we have no target, so ask for `host`.
+            if not mgr.has_ssh_config_alias(name):
+                raise ToolError(
+                    f'action="register" needs `host` — no ~/.ssh/config Host '
+                    f'alias matches {name!r}. Either pass host=<ip/hostname> or '
+                    f'add a `Host {name}` stanza to ~/.ssh/config first.')
+            # Gate on the alias name (the actual target lives in ssh config and
+            # is not visible here; tools gate on the alias name anyway).
+            err = _gate(name)
+            if err:
+                raise ToolError(f"BLOCKED: {err}")
+            result = mgr.register_host(name=name, use_ssh_config=True,
+                                       tags=tag_list)
+            audit_log(name, "register:ssh-config", "ok",
+                      operation="host_register")
+            return result
         # Gate against the *target* (the actual host/IP that traffic will
         # reach), not the alias the agent picked. Otherwise an agent can
         # register an arbitrary alias pointing at a non-allowlisted host
@@ -307,7 +327,6 @@ def portal_host(action: Literal["list", "register", "remove"], name: str = "",
         err = _gate(host)
         if err:
             raise ToolError(f"BLOCKED: {err}")
-        tag_list = [t.strip() for t in tags.split(",") if t.strip()]
         result = mgr.register_host(name=name, host=host, user=user, port=port,
                                     key=key_path or None, tags=tag_list)
         audit_log(name, f"register:{user}@{host}:{port}", "ok",

@@ -206,8 +206,10 @@ class ConnectionManager:
         with open(p) as f:
             data = yaml.safe_load(f) or {}
         hosts = data.get("hosts", {})
+        alias_set = self._ssh_config_alias_set()
         for name, cfg in hosts.items():
             warnings: list[str] = []
+            use_ssh_config = bool(cfg.get("use_ssh_config", False))
             if "password" in cfg:
                 msg = (
                     "hosts.yaml has a plaintext 'password' field — it is being "
@@ -241,11 +243,12 @@ class ConnectionManager:
                 logger.error("Host '%s' has %s", name, msg)
                 warnings.append(msg)
                 auth = None
+            warnings.extend(self._overlay_warnings(name, use_ssh_config, alias_set))
             if warnings:
                 self._config_warnings[name] = warnings
             self._registry[name] = HostConfig(
                 name=name,
-                host=cfg["host"],
+                host=cfg.get("host") or name,
                 port=int(cfg.get("port", 22)),
                 user=cfg.get("user", "root"),
                 key=self._resolve_path(cfg.get("key")),
@@ -255,6 +258,7 @@ class ConnectionManager:
                     "strict_host_key_checking", True
                 )),
                 tags=cfg.get("tags", []),
+                use_ssh_config=use_ssh_config,
                 auth=auth,
                 password_command=password_command,
                 passphrase_command=passphrase_command,
@@ -267,23 +271,97 @@ class ConnectionManager:
             return None
         return str(Path(path).expanduser())
 
-    def register_host(self, name: str, host: str, user: str = "root",
+    def _ssh_config_alias_set(self) -> set[str]:
+        """Return the set of non-wildcard ``Host`` aliases in ~/.ssh/config.
+
+        Parsed fresh each call (the file is small and this runs only at
+        registry load / host registration, not on the hot path).
+        """
+        ssh_config = Path("~/.ssh/config").expanduser()
+        if not ssh_config.exists():
+            return set()
+        try:
+            content = ssh_config.read_text()
+        except OSError:
+            return set()
+        aliases: set[str] = set()
+        for line in content.splitlines():
+            s = line.strip()
+            if not s or s.startswith("#"):
+                continue
+            m = re.match(r"^Host\s+(.+)$", s, re.IGNORECASE)
+            if not m:
+                continue
+            for p in m.group(1).split():
+                if p not in ("*", "?"):
+                    aliases.add(p)
+        return aliases
+
+    def has_ssh_config_alias(self, name: str) -> bool:
+        """True if ``name`` is a concrete ``Host`` alias in ~/.ssh/config."""
+        return name in self._ssh_config_alias_set()
+
+    def _overlay_warnings(self, name: str, use_ssh_config: bool,
+                          alias_set: Optional[set[str]] = None) -> list[str]:
+        """Warnings about hosts.yaml <-> ~/.ssh/config interactions.
+
+        Two footguns we surface (never block):
+          * use_ssh_config: true but no matching alias -> asyncssh falls back
+            to default DNS+user+key for ``name`` (probably not intended).
+          * a hosts.yaml host that ALSO exists in ssh config -> hosts.yaml
+            silently wins (ssh config's IdentityFile/ProxyJump/User are
+            ignored); the fix is the use_ssh_config overlay recipe.
+        """
+        aliases = self._ssh_config_alias_set() if alias_set is None else alias_set
+        exists = name in aliases
+        if use_ssh_config and not exists:
+            return [(f"host '{name}' sets use_ssh_config: true but ~/.ssh/config "
+                     "has no matching Host alias; asyncssh will fall back to a "
+                     f"default connection (DNS lookup of '{name}', default user "
+                     "and key), which is probably not what you intended. Add a "
+                     f"`Host {name}` stanza to ~/.ssh/config or set host/user/"
+                     "port explicitly in hosts.yaml.")]
+        if (not use_ssh_config) and exists:
+            return [(f"host '{name}' is defined in BOTH hosts.yaml and "
+                     "~/.ssh/config; hosts.yaml takes precedence and ssh "
+                     "config is ignored for it (no field-level merge). To use "
+                     "ssh config's connection params and only add metadata "
+                     "(tags / sudo_password_command / ...) here, set "
+                     "`use_ssh_config: true` on this host.")]
+        return []
+
+    def register_host(self, name: str, host: str = "", user: str = "root",
                       port: int = 22, key: Optional[str] = None,
                       tags: list = None,
                       known_hosts: Optional[str] = None,
-                      strict_host_key_checking: bool = True) -> str:
+                      strict_host_key_checking: bool = True,
+                      use_ssh_config: bool = False) -> str:
         """Dynamically register a new host into the registry.
 
         Password authentication is intentionally not supported; provide a
         key file via ``key`` or rely on default SSH key locations / agent.
+        With ``use_ssh_config=True`` the connection params come from
+        ~/.ssh/config and ``host`` may be omitted (defaults to ``name``).
         """
         self._registry[name] = HostConfig(
-            name=name, host=host, port=port, user=user,
+            name=name, host=host or name, port=port, user=user,
             key=self._resolve_path(key),
             tags=tags or [],
             known_hosts=known_hosts,
             strict_host_key_checking=strict_host_key_checking,
+            use_ssh_config=use_ssh_config,
         )
+        warns = self._overlay_warnings(name, use_ssh_config)
+        if warns:
+            self._config_warnings[name] = warns
+            for w in warns:
+                logger.warning("Host '%s': %s", name, w)
+        elif name in self._config_warnings:
+            # Re-registering cleanly clears a stale overlay warning.
+            self._config_warnings.pop(name, None)
+        if use_ssh_config:
+            logger.info(f"Registered host: {name} (via ~/.ssh/config)")
+            return f"Host '{name}' registered (connection via ~/.ssh/config)"
         logger.info(f"Registered host: {name} ({user}@{host}:{port})")
         return f"Host '{name}' registered: {user}@{host}:{port}"
 
