@@ -86,6 +86,13 @@ def _isolate_credential_agent(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_job_state(tmp_path, monkeypatch):
+    """Point the background-job persistence file at a per-test tmp path so the
+    JobManager can never read or clobber a developer's real ~/.local/state."""
+    monkeypatch.setenv("PORTAL_JOB_STATE_FILE", str(tmp_path / "jobs.json"))
+
+
+@pytest.fixture(autouse=True)
 def _reset_singletons():
     """Wipe module-level singletons before each test so tests cannot bleed
     state into one another (e.g. via the global ConnectionManager).
@@ -96,6 +103,13 @@ def _reset_singletons():
         from portal_mcp_server import remote_bash as rb
         rb._HOST_SESSIONS.clear()
         rb._HOST_LOCKS.clear()
+    except Exception:
+        pass
+    # Reset the background-job singleton so a persisted/in-memory table from one
+    # test can't leak into the next.
+    try:
+        from portal_mcp_server import job_manager as _jm
+        _jm._job_mgr = None
     except Exception:
         pass
     # Clear the three credential caches (sudo / ssh / named-secret).

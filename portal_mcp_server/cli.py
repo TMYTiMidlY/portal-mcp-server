@@ -1157,11 +1157,12 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
     - action="list": list all known jobs {job_id, host, status, started_at,
         age_s, exit_code?}.
 
-    Limits (L1): job_ids do NOT survive a server restart (the job table is
-    in-memory; the remote process keeps running but becomes detached from your
-    view — recover it manually via `ps` if needed). Finished jobs are swept
-    after a TTL (default 1h) and their tmp files removed. There is a cap on
-    concurrent live jobs (default 50).
+    Limits (L1): job_ids are **best-effort persisted** across a server restart
+    (the table reloads from <state>/jobs.json and a poll re-probes the remote
+    PID); set PORTAL_JOB_PERSIST=0 to disable. It's not a durable queue — a
+    crash mid-write loses the view, but the remote process keeps running and is
+    recoverable via `ps`. Finished jobs are swept after a TTL (default 1h) and
+    their tmp files removed. There is a cap on concurrent live jobs (default 50).
 
     Manual fallback (no portal_job): you can always background a command
     yourself with portal_exec(command="nohup mycmd >/tmp/x.log 2>&1 & echo $!")

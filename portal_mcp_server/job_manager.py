@@ -16,9 +16,12 @@ incremental byte range of ``<out>`` and the exit code from ``<meta>``;
 
 L1 limits (intentional)
 -----------------------
-* The job table is **in-memory** — job_ids do NOT survive a server restart
-  (the remote nohup process keeps running; it just becomes "orphaned" from the
-  agent's view, recoverable manually via ``ps``).
+* The job table is **best-effort persisted** to ``<state>/jobs.json`` so
+  job_ids survive a server restart (the table reloads on startup and a poll
+  re-probes the remote PID). It is NOT a durable queue: the file is rewritten
+  on each state change and a crash mid-write or a disabled
+  (``PORTAL_JOB_PERSIST=0``) store loses the view — the remote nohup process
+  keeps running regardless and is recoverable via ``ps``.
 * ``use_sudo`` / ``secrets`` are NOT supported in the background (sudo -S wants
   stdin; injecting secrets into a backgrounded ``bash -c`` would put them on
   argv, visible in ``ps``). Use portal_exec for those.
@@ -31,14 +34,17 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import json
 import logging
 import os
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
+from .paths import xdg_state_home
 from .safety import quote_shell
 
 logger = logging.getLogger("portal_mcp.jobs")
@@ -50,6 +56,24 @@ _CHUNK_SEP = "\n__CHUNK__\n"
 # backlog all at once — the agent pages through with since=new_offset while the
 # `more` flag is true. The agent can raise/lower it per call via max_bytes.
 DEFAULT_POLL_MAX_BYTES = 64 * 1024
+
+
+def _state_file() -> Optional[Path]:
+    """Resolve the job-table persistence file (best-effort across restarts).
+
+    ``PORTAL_JOB_PERSIST=0`` disables persistence; ``PORTAL_JOB_STATE_FILE``
+    overrides the path (used by tests). Default: ``<state>/jobs.json``.
+    """
+    if os.environ.get("PORTAL_JOB_PERSIST", "").lower() in (
+            "0", "false", "no", "off"):
+        return None
+    raw = os.environ.get("PORTAL_JOB_STATE_FILE")
+    if raw:
+        return Path(raw)
+    try:
+        return xdg_state_home() / "jobs.json"
+    except Exception:  # pragma: no cover - exotic platform
+        return None
 
 
 @dataclass
@@ -72,6 +96,49 @@ class JobManager:
     def __init__(self):
         self._jobs: dict[str, JobRecord] = {}
         self._lock = asyncio.Lock()
+        self._state_file = _state_file()
+        self._load()
+
+    def _load(self) -> None:
+        """Best-effort reload of the job table from disk (survives a restart).
+
+        Records are reloaded verbatim; liveness is NOT probed here (no I/O in
+        __init__) — a subsequent poll re-probes the remote PID, so a reloaded
+        job is immediately pollable/cancellable. Terminal jobs past their TTL
+        are removed on the next sweep.
+        """
+        f = self._state_file
+        if not f or not f.exists():
+            return
+        try:
+            data = json.loads(f.read_text())
+        except Exception:  # pragma: no cover - corrupt/partial state file
+            logger.debug("job state reload failed", exc_info=True)
+            return
+        for d in data.get("jobs", []):
+            try:
+                rec = JobRecord(**d)
+            except (TypeError, ValueError):
+                continue  # schema drift / bad entry — skip it
+            self._jobs[rec.job_id] = rec
+        if self._jobs:
+            logger.info("reloaded %d background job(s) from %s",
+                        len(self._jobs), f)
+
+    def _persist(self) -> None:
+        """Best-effort atomic write of the job table. Never raises into a job
+        operation — persistence is a convenience, not a correctness guarantee."""
+        f = self._state_file
+        if not f:
+            return
+        try:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"jobs": [asdict(r) for r in self._jobs.values()]}
+            tmp = f.with_name(f.name + ".tmp")
+            tmp.write_text(json.dumps(payload))
+            tmp.replace(f)
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("job state persist failed", exc_info=True)
 
     @property
     def _max_live(self) -> int:
@@ -131,6 +198,7 @@ class JobManager:
                         command=command, started_at=time.time())
         async with self._lock:
             self._jobs[job_id] = rec
+            self._persist()
         logger.info("job %s submitted on %s (pid %d)", job_id, host, pid)
         return {"job_id": job_id, "host": host, "remote_pid": pid,
                 "started_at": _iso(rec.started_at), "status": "running"}
@@ -142,8 +210,8 @@ class JobManager:
         rec = self._jobs.get(job_id)
         if rec is None:
             return {"job_id": job_id, "status": "unknown",
-                    "error": "no such job_id (it may have expired, or the "
-                             "server restarted — job tables are in-memory)"}
+                    "error": "no such job_id (it may have expired, been swept "
+                             "after its TTL, or persistence was disabled)"}
         off = max(0, int(since))
         # >= 4 so a single (max 4-byte) UTF-8 char can always fit in one poll.
         cap = max(4, int(max_bytes))
@@ -196,11 +264,16 @@ class JobManager:
 
         status, exit_code = self._classify(rec, meta, alive)
         async with self._lock:
+            newly_terminal = status in _TERMINAL and rec.finished_at is None
             rec.status = status
             rec.exit_code = exit_code
             rec.last_offset = new_offset
-            if status in _TERMINAL and rec.finished_at is None:
+            if newly_terminal:
                 rec.finished_at = time.time()
+            # Persist only on the meaningful transition (not every offset tick)
+            # to avoid churning the state file on a fast poll loop.
+            if newly_terminal:
+                self._persist()
 
         out = {"job_id": job_id, "host": rec.host, "status": status,
                "output_chunk": text, "new_offset": new_offset, "more": more}
@@ -251,6 +324,7 @@ class JobManager:
             if rec.status not in _TERMINAL:
                 rec.status = "cancelled"
                 rec.finished_at = rec.finished_at or time.time()
+            self._persist()
         logger.info("job %s cancelled (SIG%s sent to pid %d)",
                     job_id, sig, rec.remote_pid)
         return {"job_id": job_id, "signal_sent": True, "signal": sig,
@@ -283,6 +357,8 @@ class JobManager:
                         and (now - r.finished_at) > self._ttl:
                     expired.append(r)
                     del self._jobs[jid]
+            if expired:
+                self._persist()
         for r in expired:
             await self._remote_cleanup(r)
 

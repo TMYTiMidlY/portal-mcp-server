@@ -349,3 +349,40 @@ async def test_poll_command_caps_chunk_at_max_bytes(monkeypatch):
     assert "-gt 4096" in poll_cmd
     assert "base64" in poll_cmd
     assert 'head -c "$N"' in poll_cmd
+
+
+# ── best-effort persistence across a restart ─────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_job_table_persists_across_restart(monkeypatch):
+    """A fresh JobManager (simulated restart) reloads the table from the state
+    file so the job stays pollable/cancellable; the reloaded record keeps the
+    remote pid for re-probing."""
+    _install_conn(monkeypatch, lambda c: "777\n" if "echo $!" in c else "")
+    jm1 = job_manager.JobManager()
+    jid = (await jm1.submit("h", "sleep 100"))["job_id"]
+
+    jm2 = job_manager.JobManager()  # "restart": new manager, same state file
+    jobs = await jm2.list_jobs()
+    assert any(j["job_id"] == jid for j in jobs)
+    assert jm2._jobs[jid].remote_pid == 777
+
+
+@pytest.mark.asyncio
+async def test_job_persist_can_be_disabled(monkeypatch):
+    import os
+    monkeypatch.setenv("PORTAL_JOB_PERSIST", "0")
+    _install_conn(monkeypatch, lambda c: "5\n" if "echo $!" in c else "")
+    jm = job_manager.JobManager()
+    assert jm._state_file is None
+    await jm.submit("h", "x")
+    assert not os.path.exists(os.environ["PORTAL_JOB_STATE_FILE"])
+
+
+@pytest.mark.asyncio
+async def test_job_corrupt_state_file_is_ignored(monkeypatch):
+    import os
+    with open(os.environ["PORTAL_JOB_STATE_FILE"], "w") as fh:
+        fh.write("{ this is not valid json")
+    jm = job_manager.JobManager()  # must not raise
+    assert jm._jobs == {}
