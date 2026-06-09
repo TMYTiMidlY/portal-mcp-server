@@ -44,7 +44,12 @@ def _install_conn(monkeypatch, router):
 
 
 def _poll_out(meta, size, alive, chunk):
-    return f"META:{meta}\nSIZE:{size}\nALIVE:{alive}\n__CHUNK__\n{chunk}"
+    """Build a fake poll stdout. `chunk` is plain text/bytes; the real poll
+    command base64-encodes it on the wire, so we do the same here."""
+    import base64
+    raw = chunk.encode("utf-8") if isinstance(chunk, str) else chunk
+    b64 = base64.b64encode(raw).decode("ascii")
+    return f"META:{meta}\nSIZE:{size}\nALIVE:{alive}\n__CHUNK__\n{b64}"
 
 
 # ── submit ──────────────────────────────────────────────────────────────────
@@ -90,7 +95,8 @@ async def test_poll_running_then_done(monkeypatch):
         if "__CHUNK__" in c:
             if phase["v"] == "running":
                 return _poll_out("", 5, "yes", "hello")
-            return _poll_out("__JOB_DONE__:0", 11, "no", "hello world")
+            # done: since=5, the new bytes are " world" (6) -> total size 11.
+            return _poll_out("__JOB_DONE__:0", 11, "no", " world")
         return ""
 
     _install_conn(monkeypatch, router)
@@ -101,13 +107,15 @@ async def test_poll_running_then_done(monkeypatch):
     assert p1["status"] == "running"
     assert p1["output_chunk"] == "hello"
     assert p1["new_offset"] == 5
+    assert p1["more"] is False  # new_offset (5) == size (5)
     assert "exit_code" not in p1
 
     phase["v"] = "done"
     p2 = await jm.poll(jid, since=5)
     assert p2["status"] == "done"
     assert p2["exit_code"] == 0
-    assert p2["new_offset"] == 11
+    assert p2["output_chunk"] == " world"
+    assert p2["new_offset"] == 11  # since(5) + 6 new bytes
     assert "finished_at" in p2
 
 
@@ -258,3 +266,71 @@ async def test_cli_submit_and_list_roundtrip(monkeypatch, permissive):
     assert out["remote_pid"] == 77
     listed = json.loads(await cli.portal_job(action="list"))
     assert any(j["job_id"] == out["job_id"] for j in listed)
+
+
+# ── on-demand paging: max_bytes cap + `more` flag + clean UTF-8 seams ────────
+
+def test_decode_incremental_trims_truncated_multibyte():
+    from portal_mcp_server.job_manager import _decode_incremental
+    # "ab" + a truncated "中" (e4 b8 ad, last byte missing).
+    raw = "ab".encode() + "中".encode()[:2]
+    text, consumed = _decode_incremental(raw)
+    assert text == "ab", "must not emit escape artifacts for the split char"
+    assert consumed == 2, "the 2 incomplete bytes are left for the next poll"
+    assert "\\x" not in text
+
+
+def test_decode_incremental_complete_passthrough():
+    from portal_mcp_server.job_manager import _decode_incremental
+    raw = "héllo 中文".encode("utf-8")
+    text, consumed = _decode_incremental(raw)
+    assert text == "héllo 中文"
+    assert consumed == len(raw)
+
+
+def test_decode_incremental_empty():
+    from portal_mcp_server.job_manager import _decode_incremental
+    assert _decode_incremental(b"") == ("", 0)
+
+
+def test_decode_incremental_nonutf8_is_escaped_not_dropped():
+    from portal_mcp_server.job_manager import _decode_incremental
+    # A genuinely invalid byte mid-stream (e.g. GBK) -> backslashreplace, all
+    # consumed (it won't "complete" on a re-read).
+    raw = b"ok\xff\xfetail"
+    text, consumed = _decode_incremental(raw)
+    assert consumed == len(raw)
+    assert "ok" in text and "tail" in text
+
+
+@pytest.mark.asyncio
+async def test_poll_more_flag_when_backlog_exceeds_chunk(monkeypatch):
+    def router(c):
+        if "echo $!" in c:
+            return "100\n"
+        if "__CHUNK__" in c:
+            # 10 new bytes returned, but the file is 100 bytes total.
+            return _poll_out("", 100, "yes", "0123456789")
+        return ""
+
+    _install_conn(monkeypatch, router)
+    jm = job_manager.JobManager()
+    jid = (await jm.submit("h", "x"))["job_id"]
+    p = await jm.poll(jid, since=0)
+    assert p["output_chunk"] == "0123456789"
+    assert p["new_offset"] == 10
+    assert p["more"] is True  # 10 < 100, keep polling with since=10
+
+
+@pytest.mark.asyncio
+async def test_poll_command_caps_chunk_at_max_bytes(monkeypatch):
+    rec = _install_conn(monkeypatch, lambda c: "100\n" if "echo $!" in c
+                        else _poll_out("", 0, "yes", ""))
+    jm = job_manager.JobManager()
+    jid = (await jm.submit("h", "x"))["job_id"]
+    await jm.poll(jid, since=0, max_bytes=4096)
+    poll_cmd = next(c for c in rec if "__CHUNK__" in c)
+    # the shell caps N at max_bytes and base64-encodes the chunk
+    assert "-gt 4096" in poll_cmd
+    assert "base64" in poll_cmd
+    assert 'head -c "$N"' in poll_cmd

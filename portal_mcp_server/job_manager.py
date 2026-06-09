@@ -29,6 +29,8 @@ L1 limits (intentional)
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 import time
@@ -44,6 +46,10 @@ logger = logging.getLogger("portal_mcp.jobs")
 _TERMINAL = ("done", "failed", "cancelled")
 _DONE_MARKER = "__JOB_DONE__:"
 _CHUNK_SEP = "\n__CHUNK__\n"
+# Default per-poll output cap (bytes). Keeps a single poll from dumping a huge
+# backlog all at once — the agent pages through with since=new_offset while the
+# `more` flag is true. The agent can raise/lower it per call via max_bytes.
+DEFAULT_POLL_MAX_BYTES = 64 * 1024
 
 
 @dataclass
@@ -131,26 +137,34 @@ class JobManager:
 
     # ── poll ────────────────────────────────────────────────────────────────
 
-    async def poll(self, job_id: str, since: int = 0, tail: int = 0) -> dict:
+    async def poll(self, job_id: str, since: int = 0, tail: int = 0,
+                   max_bytes: int = DEFAULT_POLL_MAX_BYTES) -> dict:
         rec = self._jobs.get(job_id)
         if rec is None:
             return {"job_id": job_id, "status": "unknown",
                     "error": "no such job_id (it may have expired, or the "
                              "server restarted — job tables are in-memory)"}
         off = max(0, int(since))
+        # >= 4 so a single (max 4-byte) UTF-8 char can always fit in one poll.
+        cap = max(4, int(max_bytes))
         q_out, q_meta = quote_shell(rec.out_path), quote_shell(rec.meta_path)
-        if tail and tail > 0:
+        is_tail = bool(tail and tail > 0)
+        if is_tail:
             chunk_cmd = f"tail -n {int(tail)} {q_out} 2>/dev/null"
         else:
             chunk_cmd = (f"tail -c +{off + 1} {q_out} 2>/dev/null | "
                          f'head -c "$N"')
+        # The chunk is base64-encoded on the wire so we get the EXACT bytes back
+        # (the SSH channel would otherwise decode/mangle them before we can do a
+        # clean, boundary-aware UTF-8 decode). base64 wrapping is stripped below.
         poll_cmd = (
             f"M=$(cat {q_meta} 2>/dev/null); "
             f"S=$(wc -c < {q_out} 2>/dev/null || echo 0); "
             f"N=$((S-{off})); [ \"$N\" -lt 0 ] && N=0; "
+            f"[ \"$N\" -gt {cap} ] && N={cap}; "
             f"if kill -0 {rec.remote_pid} 2>/dev/null; then A=yes; else A=no; fi; "
             f"printf 'META:%s\\nSIZE:%s\\nALIVE:%s\\n__CHUNK__\\n' \"$M\" \"$S\" \"$A\"; "
-            f"{chunk_cmd}"
+            f"{{ {chunk_cmd} ; }} | base64"
         )
 
         mgr = get_manager()
@@ -169,8 +183,16 @@ class JobManager:
         finally:
             mgr.release_connection(rec.host, conn)
 
-        meta, size, alive, chunk = _parse_poll(result.stdout or "")
-        new_offset = size if size is not None else off
+        meta, size, alive, chunk_b64 = _parse_poll(result.stdout or "")
+        raw = _b64decode_loose(chunk_b64)
+        if is_tail:
+            # A snapshot of the end — no offset tracking; resume from EOF after.
+            text = raw.decode("utf-8", errors="backslashreplace")
+            new_offset = size if size is not None else off
+        else:
+            text, consumed = _decode_incremental(raw)
+            new_offset = off + consumed
+        more = size is not None and new_offset < size
 
         status, exit_code = self._classify(rec, meta, alive)
         async with self._lock:
@@ -181,7 +203,7 @@ class JobManager:
                 rec.finished_at = time.time()
 
         out = {"job_id": job_id, "host": rec.host, "status": status,
-               "output_chunk": chunk, "new_offset": new_offset}
+               "output_chunk": text, "new_offset": new_offset, "more": more}
         if exit_code is not None:
             out["exit_code"] = exit_code
         if rec.finished_at is not None:
@@ -283,7 +305,7 @@ class JobManager:
 
 
 def _parse_poll(stdout: str):
-    """Split a poll command's stdout into (meta, size, alive, chunk)."""
+    """Split a poll command's stdout into (meta, size, alive, chunk_b64)."""
     idx = stdout.find(_CHUNK_SEP)
     if idx == -1:
         header, chunk = stdout, ""
@@ -303,6 +325,41 @@ def _parse_poll(stdout: str):
         elif line.startswith("ALIVE:"):
             alive = line[6:]
     return meta, size, alive, chunk
+
+
+def _b64decode_loose(b64text: str) -> bytes:
+    """Decode base64 that may carry line wrapping (GNU/BSD ``base64`` wrap at
+    76/64 cols). Whitespace is stripped first. Returns ``b""`` on garbage."""
+    cleaned = "".join(b64text.split())
+    if not cleaned:
+        return b""
+    try:
+        return base64.b64decode(cleaned)
+    except (binascii.Error, ValueError):
+        return b""
+
+
+def _decode_incremental(raw: bytes) -> "tuple[str, int]":
+    """Decode UTF-8 ``raw`` -> (text, n_bytes_consumed).
+
+    A trailing *incomplete* multibyte sequence is trimmed and NOT counted in
+    ``n_bytes_consumed``, so the next poll re-reads those bytes once their
+    continuation has arrived — a chunk boundary therefore never splits a
+    character into ``\\xNN`` escape artifacts. ``raw`` is assumed to start on a
+    character boundary (every poll advances new_offset only by whole chars).
+    """
+    if not raw:
+        return "", 0
+    # A truncated tail is at most 3 bytes short of a 4-byte sequence.
+    for trim in range(min(3, len(raw)) + 1):
+        end = len(raw) - trim
+        try:
+            return raw[:end].decode("utf-8"), end
+        except UnicodeDecodeError:
+            continue
+    # Not a clean-tail truncation — genuinely non-UTF-8 bytes (e.g. GBK from a
+    # Windows host). Escape and consume all (they won't "complete" on re-read).
+    return raw.decode("utf-8", errors="backslashreplace"), len(raw)
 
 
 def _iso(ts: float) -> str:

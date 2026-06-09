@@ -1095,7 +1095,7 @@ async def portal_close_shell(host: str) -> str:
 @mcp.tool()
 async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
                      host: str = "", command: str = "", job_id: str = "",
-                     since: int = 0, tail: int = 0,
+                     since: int = 0, tail: int = 0, max_bytes: int = 65536,
                      signal: Literal["TERM", "KILL"] = "TERM") -> str:
     """Run a command in the **background** and get a job_id back immediately, so
     you can keep thinking while it runs, poll for incremental output, and cancel
@@ -1109,11 +1109,14 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
         drops. NOTE: sudo / secret injection are NOT supported in the
         background (sudo -S needs stdin; secrets would land on argv / `ps`) —
         use portal_exec for those.
-    - action="poll": fetch this job's status + new output. Required: job_id.
-        Pass since=<new_offset from the previous poll> to get only the bytes
-        produced since then (avoids re-pulling output); or tail=N to just get
-        the last N lines. Returns {status: running|done|failed|cancelled|
-        unknown, exit_code?, output_chunk, new_offset, finished_at?}.
+    - action="poll": fetch this job's status + new output **on demand, not all
+        at once**. Required: job_id. Pass since=<new_offset from the previous
+        poll> to get only the bytes produced since then; each poll returns at
+        most `max_bytes` (default 64 KiB) so a big backlog doesn't dump in one
+        shot. Keep polling with since=new_offset while the returned `more` is
+        true to drain the rest. Or pass tail=N to just peek the last N lines.
+        Returns {status: running|done|failed|cancelled|
+        unknown, exit_code?, output_chunk, new_offset, more, finished_at?}.
     - action="cancel": signal the job. Required: job_id. signal=TERM (default)
         or KILL. Best-effort — `kill` doesn't guarantee instant death; poll to
         confirm. Returns {job_id, signal_sent, status_after}.
@@ -1152,7 +1155,7 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
     if action == "poll":
         if not job_id:
             raise ToolError('action="poll" requires `job_id`.')
-        res = await jm.poll(job_id, since=since, tail=tail)
+        res = await jm.poll(job_id, since=since, tail=tail, max_bytes=max_bytes)
         return json.dumps(res, indent=2, ensure_ascii=False)
 
     if action == "cancel":
