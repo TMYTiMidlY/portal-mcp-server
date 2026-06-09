@@ -35,15 +35,20 @@ only the first line still chooses correctly.
 |---|---|---|
 | `portal_exec` | `(host="" \| [host…], command="", commands=None, group_tag="", timeout=3600.0, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` | **Default workhorse.** Stateless one-shot over the connection pool; returns immediately with **split** stdout/stderr + exit code. Targets one host, an explicit list, or a `group_tag`. Runs one `command` or a `commands` sequence. Fan-out is parallel by default; `serialize=True` (+`delay_s`) does a rolling rollout. `use_sudo` / `secrets` inject credentials out-of-band (see below). Single host + single command → one dict; otherwise a list (a multi-command host carries `{host, results:[…]}`). |
 | `portal_shell` | `(host, command, timeout=3600.0)` | **Persistent `bash -i` session** for one host — `cwd` and env (`cd` / `export` / venv) survive across calls. Output is the **combined** stream (a PTY merges stdout/stderr). Returns `{host, session_id, command, exit_code, output, duration_s}`. Use only when you need state continuity; otherwise `portal_exec` is faster. |
-| `portal_job` | `(action=submit\|poll\|cancel\|list, host="", command="", job_id="", since=0, tail=0, max_bytes=65536, signal=TERM\|KILL)` | **Background** execution. `submit` returns a `job_id` immediately (the job runs under `nohup` + remote tmp files, surviving a dropped connection); `poll` fetches status + new output **on demand** — `since=<new_offset>` returns only newer bytes, capped at `max_bytes` (default 64 KiB) per call, with a `more` flag so the agent pages through a big backlog instead of getting it all at once (or `tail=N` to peek the last N lines); the chunk is base64-transferred + boundary-aware UTF-8 decoded so chunk seams never split a multibyte char. `cancel` signals it; `list` shows all jobs. L1: in-memory job table (not restart-durable), bounded (`PORTAL_JOB_MAX_LIVE`), TTL-swept (`PORTAL_JOB_TTL`). sudo/secrets are NOT supported in the background — use `portal_exec`. |
+| `portal_job` | `(action=submit\|poll\|cancel\|list, host="", command="", job_id="", since=0, tail=0, max_bytes=65536, signal=TERM\|KILL, use_sudo=False, secrets=None)` | **Background** execution. `submit` returns a `job_id` immediately (the job runs under `nohup` + remote tmp files, surviving a dropped connection); `poll` fetches status + new output **on demand** — `since=<new_offset>` returns only newer bytes, capped at `max_bytes` (default 64 KiB) per call, with a `more` flag so the agent pages through a big backlog instead of getting it all at once (or `tail=N` to peek the last N lines); the chunk is base64-transferred + boundary-aware UTF-8 decoded so chunk seams never split a multibyte char. `cancel` signals it; `list` shows all jobs. Job table is **best-effort persisted** across restarts (`<state>/jobs.json`; `PORTAL_JOB_PERSIST=0` to disable), bounded (`PORTAL_JOB_MAX_LIVE`), TTL-swept (`PORTAL_JOB_TTL`). `use_sudo`/`secrets` are background-unsafe — passing them is **rejected with a redirect** to `portal_exec`. |
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` | Run a command on the **MCP server's own machine** (not over SSH). DISABLED unless the operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` (larger threat surface). For tasks that genuinely belong on the server host (e.g. a local secret); remote work goes through `portal_exec`. |
 | `portal_close_shell` | `(host)` | Close the cached `portal_shell` session for a host (next `portal_shell` reopens). Rarely needed — only to reset a dirtied session. |
 
 > **sudo (`portal_exec(use_sudo=True)`)** — the password is **never** supplied
 > by the agent. It comes from the per-user credential agent populated by
-> `portal sudo set <host>`, or from the host's `sudo_password_command` in
-> `hosts.yaml`. Resolved per host; fed to `sudo -S -k` on stdin (never on the
-> command line). Audited as `exec_sudo`.
+> `portal sudo set <host>` (temporary, no-echo, TTL-cached), or from the host's
+> `sudo_password_command` in `hosts.yaml` (permanent, e.g. a password manager).
+> Resolved per host; fed to `sudo -S -k` on stdin (never on the command line).
+> Audited as `exec_sudo`. The result carries **`"high_risk": true`** + a note so
+> the calling agent reports the privileged action (or does it only with explicit
+> permission). If no password source exists the call is refused with guidance on
+> both options. Whenever the user wants to run something as root, the agent MUST
+> use this rather than embedding bare `sudo` in a command.
 
 > **secrets (`secrets=[…]`)** — for `portal_exec` and `portal_local_exec`, the
 > agent passes secret **names**, never values. Each name resolves (via the
@@ -51,8 +56,9 @@ only the first line still chooses correctly.
 > `secrets.yaml`) to a value exported as the uppercased env var (`github_token`
 > → `$GITHUB_TOKEN`). The value travels via the process environment / SSH stdin
 > (never on argv, so it stays out of `ps` and the audit log) and is redacted to
-> `***` before the result reaches the agent. ⚠️ See the README security section
-> for the rare bash-history caveat on misconfigured remotes.
+> `***` before the result reaches the agent. The result is flagged
+> **`"high_risk": true`** (a stored credential was used). ⚠️ See the README
+> security section for the rare bash-history caveat on misconfigured remotes.
 
 > **Two layers of reuse (don't conflate them).** *Connection reuse* = the
 > asyncssh TCP/channel pool, shared by **every** tool, purely for **speed**
