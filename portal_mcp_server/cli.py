@@ -270,10 +270,11 @@ def portal_host(action: Literal["list", "register", "remove"], name: str = "",
     ## Modes
     - action="list": list all registered hosts.
         Example: portal_host(action="list")
-    - action="register": add a host to the registry.
-        Required: name, host. Optional: user (default root), port (default 22),
-        key_path (else asyncssh falls back to ~/.ssh/id_* or ssh-agent),
-        tags (comma-separated, used by portal_multi_exec mode="group").
+    - action="register": add a host to the registry. Pass `host` (ip/hostname),
+        or just `name` if ~/.ssh/config has a matching Host alias (registers a
+        use_ssh_config overlay). Optional: user (default root), port (default
+        22), key_path (else asyncssh falls back to ~/.ssh/id_* or ssh-agent),
+        tags (comma-separated, used by portal_exec's group_tag).
         Example: portal_host(action="register", name="web01", host="10.0.0.1",
                               user="ubuntu", tags="web,prod")
     - action="remove": remove a host from the registry.
