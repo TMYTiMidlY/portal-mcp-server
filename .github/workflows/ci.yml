@@ -29,7 +29,7 @@ jobs:
           pip install ruff
 
       - name: Lint with ruff
-        run: ruff check portal_mcp_server/
+        run: ruff check portal_mcp_server/ tests/
 
       - name: Check package imports
         run: python -c "import portal_mcp_server; assert portal_mcp_server.main; print('import ok')"

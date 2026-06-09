@@ -138,3 +138,71 @@ class TestRemoteBashPerHostLock:
         ends = [h for ev, h in call_log if ev == "end"]
         assert set(starts) == {"a", "b"}
         assert set(ends) == {"a", "b"}
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  execute_in_session — concurrent calls on ONE session are serialized
+#  (regression for the shared-PTY race: without _read_lock the two reads
+#   interleave on one channel and steal each other's completion sentinel)
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestSessionReadLockSerializes:
+    @pytest.mark.asyncio
+    async def test_concurrent_execute_on_one_session_does_not_overlap(self):
+        import re as _re
+        from portal_mcp_server import session_manager as sm
+
+        depth = {"cur": 0, "max": 0}
+
+        class _FakeStdin:
+            def __init__(self, proc):
+                self.proc = proc
+
+            def write(self, s):
+                # The engine writes "<cmd>\necho <sentinel>:$?\n"; queue the
+                # sentinel line that a real bash would echo back.
+                m = _re.search(r"(__DONE_[0-9a-f]+__):\$\?", s)
+                if m:
+                    self.proc.queue.append(f"{m.group(1)}:0\n")
+
+        class _FakeStdout:
+            def __init__(self, proc):
+                self.proc = proc
+
+            async def read(self, n):
+                depth["cur"] += 1
+                depth["max"] = max(depth["max"], depth["cur"])
+                try:
+                    while not self.proc.queue:
+                        await asyncio.sleep(0.005)
+                    await asyncio.sleep(0.01)  # widen the interleave window
+                    return self.proc.queue.pop(0)
+                finally:
+                    depth["cur"] -= 1
+
+        class _FakeProc:
+            def __init__(self):
+                self.queue: list[str] = []
+                self.stdin = _FakeStdin(self)
+                self.stdout = _FakeStdout(self)
+
+            def close(self):
+                pass
+
+        mgr = sm.SessionManager()
+        sess = sm.ShellSession(session_id="s1", host_name="h",
+                               process=_FakeProc(), conn=object())
+        mgr._sessions["s1"] = sess
+
+        a, b = await asyncio.gather(
+            mgr.execute_in_session("s1", "echo A", timeout=5),
+            mgr.execute_in_session("s1", "echo B", timeout=5),
+        )
+        # The lock means at most one read is ever in flight on the channel.
+        assert depth["max"] == 1, (
+            f"reads overlapped (max={depth['max']}): _read_lock not held during "
+            "execute_in_session — concurrent commands race on the shared PTY"
+        )
+        # Both commands still get their own clean exit code.
+        assert a == ("", 0)
+        assert b == ("", 0)

@@ -15,6 +15,13 @@ straightforward way (notably macOS, where ``LOCAL_PEERCRED`` returns an
 and rely on the underlying filesystem permissions — which is the exact
 behaviour the codebase had before this check existed, so this is no
 regression.
+
+On Windows the agent speaks over a named pipe instead of a Unix socket;
+:func:`is_same_user_named_pipe_peer` resolves the peer process's user SID
+(via ``GetNamedPipe{Client,Server}ProcessId`` → token → SID) and compares it
+to the current user's. It **fails open** (returns ``True``) on any error, so a
+bug in the Win32 plumbing can never break the same-user happy path — it only
+adds a reject when it can positively prove a cross-user peer.
 """
 from __future__ import annotations
 
@@ -57,3 +64,122 @@ def is_same_uid_peer(sock: socket.socket) -> bool:
     if uid is None:
         return True
     return uid == os.getuid()
+
+
+# ── Windows named-pipe peer verification ─────────────────────────────────────
+# The agent uses a named pipe on Windows (no SO_PEERCRED). We resolve the peer
+# process's user SID and compare it to ours. Everything here FAILS OPEN: any
+# Win32 error degrades to "allow", so this can only ever *add* a reject for a
+# provably cross-user peer — it can never break the same-user happy path.
+
+def is_same_user_named_pipe_peer(handle: int, *, role: str) -> bool:
+    """True iff the named pipe's peer runs as the current Windows user.
+
+    ``role="server"`` checks the connected client (``GetNamedPipeClientProcessId``);
+    ``role="client"`` checks the server (``GetNamedPipeServerProcessId``).
+    Non-Windows or any failure → ``True`` (degrade to ACL / name scoping).
+    ``handle`` is the OS pipe HANDLE as an int.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        peer_pid = _win_named_pipe_peer_pid(handle, role)
+        if peer_pid is None:
+            return True
+        peer_sid = _win_process_user_sid(peer_pid)
+        my_sid = _win_process_user_sid(None)  # None => current process
+        if not peer_sid or not my_sid:
+            return True
+        return peer_sid == my_sid
+    except Exception:  # pragma: no cover - win32-only; fail open
+        logger.debug("named-pipe peer check failed; degrading to allow",
+                     exc_info=True)
+        return True
+
+
+def _win_named_pipe_peer_pid(handle: int, role: str):  # pragma: no cover - win32 only
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    fn = (k32.GetNamedPipeClientProcessId if role == "server"
+          else k32.GetNamedPipeServerProcessId)
+    fn.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+    fn.restype = wintypes.BOOL
+    pid = wintypes.DWORD(0)
+    if not fn(wintypes.HANDLE(handle), ctypes.byref(pid)):
+        return None
+    return pid.value
+
+
+def _win_process_user_sid(pid):  # pragma: no cover - win32 only
+    """Return the user SID string for ``pid`` (or the current process if pid is
+    None), or ``None`` on any failure."""
+    import ctypes
+    from ctypes import wintypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    TOKEN_QUERY = 0x0008
+    TokenUser = 1
+
+    k32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    k32.OpenProcess.restype = wintypes.HANDLE
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    advapi.OpenProcessToken.argtypes = [
+        wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    advapi.OpenProcessToken.restype = wintypes.BOOL
+    advapi.GetTokenInformation.argtypes = [
+        wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    advapi.GetTokenInformation.restype = wintypes.BOOL
+
+    if pid is None:
+        hproc = k32.GetCurrentProcess()
+        close_proc = False
+    else:
+        hproc = k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        close_proc = True
+    if not hproc:
+        return None
+    try:
+        htok = wintypes.HANDLE()
+        if not advapi.OpenProcessToken(hproc, TOKEN_QUERY, ctypes.byref(htok)):
+            return None
+        try:
+            length = wintypes.DWORD(0)
+            advapi.GetTokenInformation(htok, TokenUser, None, 0, ctypes.byref(length))
+            if length.value == 0:
+                return None
+            buf = ctypes.create_string_buffer(length.value)
+            if not advapi.GetTokenInformation(
+                    htok, TokenUser, buf, length, ctypes.byref(length)):
+                return None
+            # TOKEN_USER's first member is SID_AND_ATTRIBUTES { PSID Sid; ... };
+            # the PSID is the first pointer in the buffer.
+            psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+            return _win_sid_to_string(psid)
+        finally:
+            k32.CloseHandle(htok)
+    finally:
+        if close_proc:
+            k32.CloseHandle(hproc)
+
+
+def _win_sid_to_string(psid):  # pragma: no cover - win32 only
+    import ctypes
+    from ctypes import wintypes
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi.ConvertSidToStringSidW.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_wchar_p)]
+    advapi.ConvertSidToStringSidW.restype = wintypes.BOOL
+    k32.LocalFree.argtypes = [wintypes.HANDLE]
+    out = ctypes.c_wchar_p()
+    if not advapi.ConvertSidToStringSidW(psid, ctypes.byref(out)):
+        return None
+    try:
+        return out.value
+    finally:
+        k32.LocalFree(out)

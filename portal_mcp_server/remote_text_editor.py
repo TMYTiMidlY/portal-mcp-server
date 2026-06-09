@@ -83,6 +83,26 @@ def _sha256(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _split_keepends_lf(text: str) -> List[str]:
+    """Split on ``\\n`` only, keeping the trailing ``\\n`` on each line.
+
+    Unlike ``str.splitlines(keepends=True)`` — which also breaks on ``\\f``,
+    ``\\v``, lone ``\\r``, ``\\x1c``-``\\x1e``, ``\\x85``, ``\\u2028``, ``\\u2029``
+    — this counts lines exactly like ``rg`` / ``grep`` / ``wc -l``, so
+    ``total_lines`` and the 1-based offsets here line up with the line numbers
+    ``portal_grep`` reports (the toolkit's "grep to find the line, patch that
+    line" workflow). ``\\r\\n`` stays attached to its line; a trailing ``\\n``
+    does not yield an empty final element.
+    """
+    if not text:
+        return []
+    parts = text.split("\n")
+    lines = [p + "\n" for p in parts[:-1]]
+    if parts[-1] != "":
+        lines.append(parts[-1])
+    return lines
+
+
 def _hash_eq(a: str, b: str) -> bool:
     """Constant-time hash comparison via :func:`hmac.compare_digest`.
 
@@ -262,7 +282,7 @@ async def remote_read(host: str, path: str, start: int = 1,
         }
     """
     full = await _read_full(host, path, encoding)
-    lines = full.splitlines(keepends=True)
+    lines = _split_keepends_lf(full)
     total = len(lines)
 
     s_idx = max(0, start - 1)
@@ -326,7 +346,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
             "suggestion": "call portal_read again to get the current hash, then retry",
         }
 
-    lines = full.splitlines(keepends=True)
+    lines = _split_keepends_lf(full)
     total = len(lines)
 
     # 2) Validate patches and convert to 0-based indices
@@ -383,9 +403,10 @@ async def remote_patch(host: str, path: str, file_hash: str,
         # Newline normalization. Two cases trigger a warning / fix:
         #   * ``contents`` is non-empty and lacks a trailing \n
         #   * the slice it replaces *did* end with \n
-        # Without the trailing newline, ``splitlines(keepends=True)`` produces
-        # a final element with no \n, which when joined with the rest of the
-        # file causes the next surviving line to glue onto the patched line.
+        # Without the trailing newline, the split (``_split_keepends_lf``)
+        # produces a final element with no \n, which when joined with the rest
+        # of the file causes the next surviving line to glue onto the patched
+        # line.
         contents = p.contents
         needs_newline = (
             contents

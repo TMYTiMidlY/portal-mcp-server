@@ -574,7 +574,7 @@ All configurable knobs in portal-mcp-server are passed as environment variables,
 |---|---|---|
 | File paths | `PORTAL_HOSTS_YAML` | Host registry YAML |
 | File paths | `PORTAL_POLICIES_YAML` | Security policy YAML |
-| File paths | `PORTAL_SECRETS_YAML` | Named secrets YAML (source for `secrets=` in `portal_shell` / `portal_local_exec`) |
+| File paths | `PORTAL_SECRETS_YAML` | Named secrets YAML (source for `secrets=` in `portal_exec` / `portal_local_exec`) |
 | File paths | `PORTAL_LOG_DIR` | Audit + server log directory |
 | Security & auth | `PORTAL_AUDIT_FAIL_OPEN` | Whether audit-write failure is fail-open |
 | Security & auth | `PORTAL_AUDIT_MAX_BYTES` | `audit.jsonl` rotation threshold in bytes (default 10 MiB) |
@@ -645,7 +645,7 @@ Controls the in-process asyncssh connection pool. Defaults work well for most se
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `PORTAL_BASH_HEARTBEAT_INTERVAL` | How often (seconds) `portal_shell` / `portal_local_exec` emits an MCP progress notification as a keepalive while the command runs, so an output-silent command doesn't trip the client's idle timeout (JSON-RPC `-32001`). Independent of the server-side `timeout` parameter. Non-positive or invalid values fall back to the default | `5` (seconds) |
+| `PORTAL_BASH_HEARTBEAT_INTERVAL` | How often (seconds) `portal_shell` / `portal_exec` / `portal_local_exec` emits an MCP progress notification as a keepalive while the command runs, so an output-silent command doesn't trip the client's idle timeout (JSON-RPC `-32001`). Independent of the server-side `timeout` parameter. Non-positive or invalid values fall back to the default | `5` (seconds) |
 
 ### Background jobs
 
@@ -881,7 +881,7 @@ Two sources (order: agent memory cache → `secrets.yaml`):
 
    The value is pushed over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is 0700, and the socket is 0600 / same-user only. It is never written to disk, never seen by the LLM, and is cleared on TTL expiry.
 
-See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_shell` call.
+See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_exec` call.
 
 #### Wait semantics: fail-fast → `ask_user` → retry
 

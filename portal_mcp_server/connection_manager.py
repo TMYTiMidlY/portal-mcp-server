@@ -203,7 +203,10 @@ class ConnectionManager:
         self._config_warnings: dict[str, list[str]] = {}
         self._pool: dict[str, list[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
-        self._pool_size = pool_size
+        # Clamp to >=1: pool_size 0 would make the overload branch call
+        # min() on an empty list and crash get_connection with an opaque
+        # ValueError (PORTAL_SSH_POOL_SIZE="0" is otherwise accepted).
+        self._pool_size = max(1, pool_size)
         self._max_channels_per_conn = max_channels_per_conn
         self._max_idle_time = max_idle_time
         self._max_conn_age = max_conn_age
@@ -615,10 +618,18 @@ class ConnectionManager:
             if pw is None:
                 raise RuntimeError(
                     f"Host '{cfg.name}' has 'auth: password' but no password "
-                    "source is available. Either configure 'password_command:' "
-                    "in hosts.yaml (a shell command that prints the password) "
-                    f"or run `portal ssh set {cfg.name}` in a "
-                    "separate terminal to push one into the per-user credential agent."
+                    "source is available; the connection was NOT made. Ask the "
+                    "user to provide it out-of-band — never have them paste the "
+                    "password into this conversation. Two ways:\n"
+                    f"  • Temporary (no-echo, TTL-cached): run `portal ssh set "
+                    f"{cfg.name}` in a separate terminal, type the password at "
+                    "the hidden prompt, then retry.\n"
+                    "  • Permanent: add a 'password_command:' to hosts.yaml (a "
+                    "shell command that prints the password to stdout).\n"
+                    "Prefer an interactive input tool (e.g. ask_user) to ask the "
+                    "user to run the first command and confirm when done; if you "
+                    "have no such tool, tell them what to run and end your turn "
+                    "to wait."
                 )
             kwargs["password"] = pw
             # Disable client_keys so asyncssh does not silently fall back to
@@ -810,14 +821,19 @@ class ConnectionManager:
 
     async def close_all(self):
         """Close all pooled connections gracefully."""
-        for name, pool in self._pool.items():
+        # Snapshot and clear under no await first: an in-flight get_connection
+        # for a new host during shutdown would otherwise mutate self._pool mid
+        # iteration ("dictionary changed size during iteration"), aborting
+        # cleanup early.
+        pools = list(self._pool.values())
+        self._pool.clear()
+        for pool in pools:
             for pc in pool:
                 try:
                     pc.conn.close()
                     await pc.conn.wait_closed()
                 except Exception:
                     pass
-        self._pool.clear()
         logger.info("All SSH connections closed")
 
     def pool_status(self) -> list[dict]:

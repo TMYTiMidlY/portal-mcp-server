@@ -91,7 +91,7 @@ hosts:
   #   # password_command: op read "op://Private/legacy-host/password"
   #   tags: [legacy]
 
-  # ── Non-interactive sudo (portal_bash use_sudo=True) ─────────────────────
+  # ── Non-interactive sudo (portal_exec use_sudo=True) ─────────────────────
   # Run sudo on a remote host WITHOUT the password ever becoming a tool
   # parameter or hitting a log. The password is fed over the existing SSH
   # channel to `sudo -S` on stdin. Two ways to provide it:
@@ -106,7 +106,7 @@ hosts:
   #       install --now` once per user session.
   # Lookup order at sudo time: agent cache (b) -> sudo_password_command
   # (a) -> error. NOTE: use_sudo runs a one-shot `sudo -S -k` exec, so it does
-  # NOT inherit the cwd/env of your persistent portal_bash session.
+  # NOT inherit the cwd/env of your persistent portal_shell session.
   # sudo-box:
   #   host: 10.0.0.50
   #   user: deploy

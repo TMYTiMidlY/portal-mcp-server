@@ -240,3 +240,38 @@ class TestGateExec:
         assert err is None
         assert len(policy._rate_counters["safe-01"]) == 1
         assert len(policy._rate_counters["safe-02"]) == 1
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 5. portal_check is a dry-run: it must NOT consume rate-limit quota
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestPortalCheckDryRun:
+    def test_enforce_dry_run_does_not_consume_quota(self, tmp_path):
+        """enforce(commit_rate_limit=False) runs host/command checks but leaves
+        the rate-limit counter untouched, so a pre-flight check never throttles
+        the real operation it is checking for."""
+        from portal_mcp_server import security
+
+        pol = security.SecurityPolicy(policies_yaml=tmp_path / "none.yaml")
+        pol.rate_limit_rps = 2.0
+        # Many dry-runs never block and never touch the counter ...
+        assert all(pol.enforce("h", commit_rate_limit=False) is None
+                   for _ in range(10))
+        assert pol._rate_counters.get("h", []) == []
+        # ... so a subsequent real burst still gets its full 2/s allowance.
+        assert pol.enforce("h") is None
+        assert pol.enforce("h") is None
+        assert pol.enforce("h") is not None  # 3rd real call blocked at 2/s
+
+    def test_portal_check_never_self_throttles(self, monkeypatch, tmp_path):
+        """portal_check called many times in a row must never report a spurious
+        'Rate limit exceeded' (the dry-run path used to consume quota and
+        self-throttle). Regression for the portal_check rate-limit burn."""
+        from portal_mcp_server import security, cli
+
+        pol = security.SecurityPolicy(policies_yaml=tmp_path / "none.yaml")
+        pol.rate_limit_rps = 2.0
+        monkeypatch.setattr(cli, "get_policy", lambda: pol)
+        outs = [cli.portal_check("h") for _ in range(6)]
+        assert all("BLOCKED" not in o for o in outs), outs

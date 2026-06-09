@@ -199,9 +199,12 @@ def default_launchd_credential_agent_socket_path() -> Path:
 def default_namedpipe_credential_agent_address() -> str:
     """Windows default credential-agent address — a per-user named pipe.
 
-    Named pipes live in the global ``\\\\.\\pipe\\`` namespace, so we scope the
-    name by username to avoid cross-user collisions. The pipe's default ACL
-    already restricts access to the creating user's session.
+    Named pipes live in the single machine-global ``\\\\.\\pipe\\`` namespace
+    (NOT per-session), and the name embeds the (non-secret, predictable)
+    username, so the name alone is not an access control. Same-user enforcement
+    comes from the pipe's ACL plus the best-effort peer-SID check in
+    :mod:`._peer_creds` (``is_same_user_named_pipe_peer``), mirroring the
+    SO_PEERCRED defence-in-depth on Unix.
     """
     import getpass
     try:

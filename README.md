@@ -580,7 +580,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 |---|---|---|
 | 文件路径 | `PORTAL_HOSTS_YAML` | 主机注册 YAML |
 | 文件路径 | `PORTAL_POLICIES_YAML` | 安全策略 YAML |
-| 文件路径 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML（`portal_shell` / `portal_exec` / `portal_local_exec` 的 `secrets=` 参数解析源） |
+| 文件路径 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML（`portal_exec` / `portal_local_exec` 的 `secrets=` 参数解析源） |
 | 文件路径 | `PORTAL_LOG_DIR` | audit + server log 目录 |
 | 安全与认证 | `PORTAL_AUDIT_FAIL_OPEN` | audit 写盘失败时是否 fail-open |
 | 安全与认证 | `PORTAL_AUDIT_MAX_BYTES` | `audit.jsonl` 轮转阈值（字节，默认 10 MiB） |
@@ -886,7 +886,7 @@ ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；
 
    值经 systemd --user 管理的本地 unix socket 推进 per-user credential agent 内存缓存：`.socket` unit 监听 `%t/portal-mcp-server/credentials.sock`，安装器在 `agent.json` 记录解析后的绝对路径，目录 0700 / socket 0600，仅本用户可达。值**从不落盘、从不进 LLM**，TTL 到期自动清除。
 
-完整配置见 [`examples/secrets.yaml`](./examples/secrets.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_shell` 调用里互斥。
+完整配置见 [`examples/secrets.yaml`](./examples/secrets.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_exec` 调用里互斥。
 
 #### 等待语义：fail-fast → `ask_user` → 重试
 

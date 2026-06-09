@@ -6,7 +6,6 @@ without any real network I/O.
 """
 from __future__ import annotations
 
-import asyncio
 import time as time_mod
 
 import pytest
@@ -14,7 +13,6 @@ import pytest
 from portal_mcp_server.connection_manager import (
     ConnectionManager,
     PooledConnection,
-    DEFAULT_MAX_CHANNELS_PER_CONN,
 )
 
 
@@ -59,6 +57,15 @@ def _inject_conn(mgr: ConnectionManager, host: str, *,
 
 # ── Pool size enforcement ────────────────────────────────────────────────
 
+class TestPoolSizeClamp:
+    def test_pool_size_zero_is_clamped_to_one(self, tmp_path):
+        """pool_size=0 (e.g. PORTAL_SSH_POOL_SIZE="0") must not leave the
+        overload branch calling min() on an empty pool — an opaque
+        ValueError. The size is clamped to >= 1 at construction. Regression."""
+        mgr = _make_manager(tmp_path, pool_size=0)
+        assert mgr._pool_size == 1
+
+
 class TestPoolSizeEnforcement:
     """pool_size caps the number of TCP connections per host."""
 
@@ -72,7 +79,7 @@ class TestPoolSizeEnforcement:
 
         # Inject 2 connections, both fully loaded
         fc1 = _inject_conn(mgr, "h", in_use=2)
-        fc2 = _inject_conn(mgr, "h", in_use=3)  # more loaded
+        _inject_conn(mgr, "h", in_use=3)  # more loaded (2nd conn, ref unused)
 
         # Prevent real asyncssh.connect from being called
         connect_called = False
@@ -309,7 +316,7 @@ class TestReuseLeastLoaded:
         mgr.register_host("h", "1.2.3.4")
 
         fc1 = _inject_conn(mgr, "h", in_use=3)  # has capacity
-        fc2 = _inject_conn(mgr, "h", in_use=1)  # also has capacity, but comes second
+        _inject_conn(mgr, "h", in_use=1)  # also has capacity, but comes second
         _inject_conn(mgr, "h", in_use=4)
 
         conn = await mgr.get_connection("h")

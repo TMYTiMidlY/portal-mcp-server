@@ -18,7 +18,6 @@ import json
 import os
 import tempfile
 import pytest
-import pytest_asyncio
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -31,7 +30,7 @@ TEST_USER      = os.environ.get("PORTAL_TEST_USER", os.environ.get("USER", "root
 TEST_KEY       = os.environ.get("PORTAL_TEST_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
 
 # ── Bootstrap: register the test host ─────────────────────────────────────
-from portal_mcp_server.connection_manager import get_manager
+from portal_mcp_server.connection_manager import get_manager  # noqa: E402
 get_manager().register_host(
     name=TEST_HOST_NAME,
     host=TEST_HOST,
@@ -134,8 +133,10 @@ class TestFileTransfer:
         finally:
             await ssh_delete_file(TEST_HOST_NAME, remote)
             for p in [local_up, local_down]:
-                try: os.unlink(p)
-                except: pass
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
     @pytest.mark.asyncio
     async def test_write_and_read(self):

@@ -5,6 +5,7 @@ shell(+close_shell)/exec/job core + local_exec + host/transfer/tunnel/audit/
 check. (portal_patch sweeps its own orphan tmp files — no separate tool.)
 """
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -84,9 +85,13 @@ mcp = FastMCP("portal-mcp-server", lifespan=_server_lifespan)
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
-def _gate(host: str, command: str = "") -> str | None:
-    """Returns error string if blocked, None if allowed."""
-    return get_policy().enforce(host, command)
+def _gate(host: str, command: str = "", *, commit_rate_limit: bool = True) -> str | None:
+    """Returns error string if blocked, None if allowed.
+
+    ``commit_rate_limit=False`` runs the host/command checks without consuming
+    a rate-limit token (for the ``portal_check`` dry-run).
+    """
+    return get_policy().enforce(host, command, commit_rate_limit=commit_rate_limit)
 
 
 async def _resolve_secrets(names: "list[str]"):
@@ -134,6 +139,10 @@ def _make_progress_cb(ctx: "Context | None"):
     if ctx is None:
         return None
     state = {"last": 0.0}
+    # Strong refs to in-flight report tasks: the event loop only holds a weak
+    # reference to a bare create_task(), so a suspended progress tick could be
+    # GC'd before it sends, silently dropping a keepalive.
+    pending: set = set()
 
     def cb(done: int, total: int) -> None:
         if not total:
@@ -146,7 +155,9 @@ def _make_progress_cb(ctx: "Context | None"):
             loop = asyncio.get_running_loop()
         except RuntimeError:  # pragma: no cover - no loop, nothing to notify
             return
-        loop.create_task(_safe_report(ctx, done, total))
+        task = loop.create_task(_safe_report(ctx, done, total))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
 
     return cb
 
@@ -268,27 +279,22 @@ def _sudo_missing_message(host: str) -> str:
 
 def _result_failed(r: dict) -> bool:
     """True if a per-host result (single dict or {host, results:[...]}) carries
-    any non-zero / unknown exit code. Used to halt a serialized fan-out."""
+    any failing exit code — non-zero OR unknown (``None``). Used to halt a
+    serialized fan-out, so a command whose status can't be determined still
+    stops the rollout (matching the docstring's "non-zero / unknown")."""
+    def _failed(x: dict) -> bool:
+        # Missing key (no command ran) is not a failure; an explicit None
+        # (channel closed without an exit status) IS, like any non-zero code.
+        return "exit_code" in x and x["exit_code"] != 0
     if "results" in r:
-        return any(
-            x.get("exit_code", 0) not in (0, None)
-            for x in r["results"] if "exit_code" in x
-        )
-    return r.get("exit_code", 0) not in (0, None)
+        return any(_failed(x) for x in r["results"])
+    return _failed(r)
 
 
 def _resolve_group(group_tag: str) -> list[str]:
     """Resolve a group tag to the list of registered host names carrying it."""
     mgr = get_manager()
     return [h.name for h in mgr._registry.values() if group_tag in h.tags]
-
-
-def _parse_env(env_json: str) -> dict:
-    """Parse a JSON env string into a dict. Returns empty dict on any error."""
-    try:
-        return json.loads(env_json) if env_json.strip() not in ("", "{}") else {}
-    except Exception:
-        return {}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -584,6 +590,8 @@ def portal_check(host: str, command: str = "") -> str:
 
     Returns "ALLOWED" or "BLOCKED: <reason>". Does not execute anything.
     Use this before risky multi-host operations to surface policy errors early.
+    Being a dry-run, it does NOT consume a rate-limit token (a pre-flight check
+    never throttles the real operation it is checking for).
 
     ⚠️  Default policy is PERMISSIVE — out of the box `policies.yaml` has an
     empty host_allowlist (any host), empty command_blocklist / allowlist
@@ -595,7 +603,7 @@ def portal_check(host: str, command: str = "") -> str:
     the server actually has loaded. ALLOWED therefore means "no rule
     currently blocks this", not "this is safe to run".
     """
-    err = _gate(host, command)
+    err = _gate(host, command, commit_rate_limit=False)
     if err:
         return f"BLOCKED: {err}"
     if not command:
@@ -1545,12 +1553,16 @@ def _build_agent_subparser(sub):
 
     p = sub.add_parser(
         "agent",
-        help="Manage the per-user credential agent (systemd --user only).",
+        help="Manage the per-user credential agent (systemd / launchd / "
+             "scheduled task).",
         description="Install/run/inspect the per-user credential agent. The "
                     "agent is a long-lived process that holds TTL-cached "
                     "ssh/sudo/secret values in memory and is reached over a "
-                    "Unix socket owned by your uid. Install via systemd "
-                    "--user; the agent is socket-activated on first request.",
+                    "Unix socket (Linux/macOS) or named pipe (Windows) scoped "
+                    "to your user. `install` picks the right per-user service "
+                    "manager for the platform: systemd --user (Linux, "
+                    "socket-activated on first request), launchd (macOS), or a "
+                    "scheduled task (Windows).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     asub = p.add_subparsers(dest="verb", required=True, metavar="<verb>")
@@ -1836,7 +1848,11 @@ def main() -> None:
             if not PORTAL_AUTH_TOKEN:
                 return await call_next(request)
             auth = request.headers.get("Authorization", "")
-            if auth != f"Bearer {PORTAL_AUTH_TOKEN}":
+            # Constant-time compare so a timing side channel can't be used to
+            # recover the token byte-by-byte. Encode to bytes to avoid
+            # compare_digest's TypeError on a non-ASCII token.
+            if not hmac.compare_digest(
+                    auth.encode("utf-8"), f"Bearer {PORTAL_AUTH_TOKEN}".encode("utf-8")):
                 return Response("Unauthorized", status_code=401)
             return await call_next(request)
 

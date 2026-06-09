@@ -39,7 +39,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from ._peer_creds import is_same_uid_peer, peer_uid
+from ._peer_creds import (
+    is_same_uid_peer, is_same_user_named_pipe_peer, peer_uid)
 from .paths import (
     CredentialAgentNotConfigured,
     credential_agent_config_path,
@@ -90,6 +91,18 @@ class CredentialAgent:
                     peer_uid(sock), os.getuid(),
                 )
                 return
+            # Windows named pipe (no SO_PEERCRED): verify the client's user SID
+            # matches ours. get_extra_info("socket") is None for a pipe; the
+            # pipe HANDLE is under "pipe". Fails open inside the check.
+            if sock is None and sys.platform == "win32":
+                pipe = writer.get_extra_info("pipe")
+                ph = _pipe_handle_int(pipe)
+                if ph is not None and not is_same_user_named_pipe_peer(
+                        ph, role="server"):
+                    logger.warning(
+                        "credential agent: rejecting named-pipe client "
+                        "(different Windows user)")
+                    return
 
             # Newline-delimited single-line JSON framing (transport-agnostic:
             # works over a Unix socket AND a Windows named pipe, neither of
@@ -370,11 +383,32 @@ def _request_unix_socket(path: Path, payload: bytes, timeout: float) -> bytes:
         s.close()
 
 
+def _pipe_handle_int(pipe) -> Optional[int]:
+    """Best-effort extraction of an OS pipe HANDLE (int) from asyncio's pipe
+    transport ``get_extra_info("pipe")`` object, for the Windows peer check.
+    Returns ``None`` if it can't (the peer check then degrades to allow)."""
+    if pipe is None:
+        return None
+    for attr in ("handle", "fileno"):
+        try:
+            v = getattr(pipe, attr)
+            v = v() if callable(v) else v
+            if isinstance(v, int):
+                return v
+        except Exception:
+            continue
+    try:
+        return int(pipe)
+    except Exception:
+        return None
+
+
 def _request_named_pipe(pipe_name: str, payload: bytes, timeout: float) -> bytes:
     """Windows transport: a named pipe is openable as a file. Retry briefly if
-    the server is between pipe instances (ERROR_PIPE_BUSY). Same-uid is
-    guaranteed by the pipe's default per-session ACL (no SO_PEERCRED on
-    Windows), matching the filesystem-permission posture on Unix."""
+    the server is between pipe instances (ERROR_PIPE_BUSY). After connecting we
+    verify the pipe SERVER runs as the current user (peer-SID check, fails open)
+    before sending — the named-pipe analogue of the Unix same-uid client check;
+    the pipe's name embeds the username but is not itself an access control."""
     deadline = time.monotonic() + timeout
     f = None
     while f is None:
@@ -385,6 +419,15 @@ def _request_named_pipe(pipe_name: str, payload: bytes, timeout: float) -> bytes
                 raise
             time.sleep(0.05)
     try:
+        try:
+            import msvcrt
+            ph = msvcrt.get_osfhandle(f.fileno())
+        except Exception:
+            ph = None
+        if ph is not None and not is_same_user_named_pipe_peer(ph, role="client"):
+            raise RuntimeError(
+                f"credential agent named pipe {pipe_name} is served by a "
+                f"different Windows user; refusing to send")
         f.write(payload + b"\n")
         f.flush()
         buf = b""

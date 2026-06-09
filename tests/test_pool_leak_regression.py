@@ -164,13 +164,16 @@ class _FakeSshConn:
     def __init__(self, fail: bool = False):
         self._fail = fail
     async def forward_local_port(self, *a, **k):
-        if self._fail: raise RuntimeError("forward_local failed")
+        if self._fail:
+            raise RuntimeError("forward_local failed")
         return _FakeListener()
     async def forward_remote_port(self, *a, **k):
-        if self._fail: raise RuntimeError("forward_remote failed")
+        if self._fail:
+            raise RuntimeError("forward_remote failed")
         return _FakeListener()
     async def forward_socks(self, *a, **k):
-        if self._fail: raise RuntimeError("forward_socks failed")
+        if self._fail:
+            raise RuntimeError("forward_socks failed")
         return _FakeListener()
 
 

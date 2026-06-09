@@ -18,13 +18,15 @@ Two sources, both keeping the value out of the model:
      Same execution model as the existing :attr:`HostConfig.password_command`;
      fetched on demand via :meth:`ConnectionManager.password_command_for`.
 
-:func:`resolve_ssh_password` checks local cache, then the per-user agent, then
+The resolver :meth:`ConnectionManager._resolve_ssh_password` (in
+:mod:`connection_manager`) checks local cache, then the per-user agent, then
 falls back to ``password_command``. Nothing is ever written to disk by this
 module.
 
 Routing into the connection path
 --------------------------------
-The connection manager calls :func:`resolve_ssh_password` in two situations:
+The connection manager calls :meth:`ConnectionManager._resolve_ssh_password`
+in two situations:
 
 * host has ``auth: password`` in hosts.yaml — the side channel is the *only*
   password source (key auth was opted out of); cache → command → friendly error.

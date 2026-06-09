@@ -54,7 +54,12 @@ class _FakeFile:
 
     async def __aexit__(self, *exc):
         if self._mode == "w":
-            self._fs.write(self._path, self._buf)
+            buf = self._buf
+            # Hook for "the write 'succeeded' but landed truncated" tests: the
+            # post-write rehash must catch the mismatch.
+            if getattr(self._fs, "mangle_on_write", False) and buf:
+                buf = buf[:-1]
+            self._fs.write(self._path, buf)
 
     async def read(self, *_a, **_k):
         return self._buf
@@ -137,6 +142,7 @@ class FakeFS:
         self.files: dict[str, str] = {}
         self._meta: dict[str, dict] = {}
         self.fail_on_write = False
+        self.mangle_on_write = False
 
     def write(self, path, data, *, mtime: float | None = None):
         self.files[path] = data
@@ -442,6 +448,27 @@ class TestConnectionRelease:
         for s in sftps:
             assert s.exit_calls >= 1
             assert s.wait_closed_calls >= 1
+
+
+class TestPostWriteRehash:
+    @pytest.mark.asyncio
+    async def test_post_write_rehash_mismatch_is_reported(self, fake_remote):
+        """If the write 'succeeds' but the read-back differs (a partial SFTP
+        write), the post-write rehash must report an error rather than claim
+        success. Drives step 7's mismatch branch (previously untested)."""
+        fs, _, _ = fake_remote
+        original = "alpha\nbeta\n"
+        fs.write("/f", original)
+        from portal_mcp_server.remote_text_editor import remote_patch
+        fs.mangle_on_write = True  # the atomic write lands one byte short
+        res = await remote_patch(
+            "h", "/f", file_hash=_h(original),
+            patches=[{"start": 1, "end": 1, "contents": "ALPHA\n",
+                       "range_hash": _h("alpha\n")}],
+        )
+        assert res["result"] == "error"
+        assert "post-write hash verification" in res["reason"]
+        assert res["expected_file_hash"] != res["actual_file_hash"]
 
 
 # ════════════════════════════════════════════════════════════════════════════

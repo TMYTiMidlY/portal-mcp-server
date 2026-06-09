@@ -7,7 +7,6 @@ structured status dicts are exercised without a live host.
 from __future__ import annotations
 
 import hashlib
-import stat as _stat
 
 import pytest
 
@@ -232,6 +231,30 @@ async def test_sync_checksum_skips_identical_content(patch_manager, tmp_path):
     res = await ssh_sync_directory("h", str(tmp_path), "/remote/dir", checksum=True)
     assert res["skipped"] == 1, res
     assert res["uploaded"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sync_checksum_reuploads_when_sha256sum_unavailable(patch_manager, tmp_path):
+    """checksum=True but the remote has no working sha256sum (run returns rc=1
+    for every path): a size-matching file must be RE-UPLOADED, never silently
+    skipped. Guards the conservative `rhash is None -> re-transfer` branch."""
+    from portal_mcp_server.file_ops import ssh_sync_directory
+
+    f = tmp_path / "a.txt"
+    f.write_text("hello")
+
+    class _NoSha256Conn(FakeConn):
+        async def run(self, cmd, check=False, errors=None):
+            return FakeRun(1, "")  # sha256sum missing / non-zero for any path
+
+    # Same size as local so the only thing that can force a re-transfer is the
+    # (now unavailable) checksum comparison.
+    sftp = FakeSFTP({"/remote/dir/a.txt": {"size": 5, "mtime": 1, "data": b"hello"}})
+    patch_manager["conn"] = _NoSha256Conn(sftp)
+
+    res = await ssh_sync_directory("h", str(tmp_path), "/remote/dir", checksum=True)
+    assert res["uploaded"] == 1, res
+    assert res["skipped"] == 0
 
 
 @pytest.mark.asyncio

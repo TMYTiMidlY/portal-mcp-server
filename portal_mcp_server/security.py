@@ -75,8 +75,15 @@ class SecurityPolicy:
         calls.append(now)
         return None
 
-    def enforce(self, host_name: str, command: str = "") -> Optional[str]:
-        """Run all checks. Returns first error found, or None if all pass."""
+    def enforce(self, host_name: str, command: str = "",
+                *, commit_rate_limit: bool = True) -> Optional[str]:
+        """Run all checks. Returns first error found, or None if all pass.
+
+        ``commit_rate_limit=False`` runs the host + command checks but does NOT
+        consume a rate-limit token — used by the ``portal_check`` dry-run so a
+        pre-flight check never burns the real operation's quota (or
+        self-throttles into a spurious "Rate limit exceeded").
+        """
         err = self.check_host(host_name)
         if err:
             return err
@@ -84,9 +91,10 @@ class SecurityPolicy:
             err = self.check_command(command)
             if err:
                 return err
-        err = self.check_rate_limit(host_name)
-        if err:
-            return err
+        if commit_rate_limit:
+            err = self.check_rate_limit(host_name)
+            if err:
+                return err
         return None
 
 

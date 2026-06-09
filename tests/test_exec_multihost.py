@@ -146,3 +146,24 @@ async def test_multihost_sudo_missing_password_is_per_host_error(permissive, mon
     out = json.loads(await cli.portal_exec(host=["a", "b"], command="id", use_sudo=True))
     assert isinstance(out, list) and len(out) == 2
     assert all("no sudo password" in r.get("error", "") for r in out)
+
+
+# ── parallel fan-out: one host raising is isolated, not fatal ────────────────
+
+@pytest.mark.asyncio
+async def test_parallel_fanout_isolates_one_host_exception(permissive, monkeypatch):
+    """An exception raised for one host in the parallel fan-out is converted to
+    {host, error, exit_code:-1} (via gather(return_exceptions=True)) and must
+    NOT crash the batch — the healthy host's result still comes back."""
+    async def fake_exec(host, command, timeout=60):
+        if host == "bad":
+            raise RuntimeError("boom on bad")
+        return {"host": host, "command": command, "exit_code": 0,
+                "stdout": "ok", "stderr": "", "elapsed_s": 0.0}
+
+    monkeypatch.setattr(cli, "ssh_exec", fake_exec)
+    out = json.loads(await cli.portal_exec(host=["good", "bad"], command="x"))
+    by_host = {r["host"]: r for r in out}
+    assert by_host["good"]["exit_code"] == 0
+    assert by_host["bad"]["exit_code"] == -1
+    assert "boom on bad" in by_host["bad"]["error"]

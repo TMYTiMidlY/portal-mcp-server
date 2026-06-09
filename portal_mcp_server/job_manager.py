@@ -96,6 +96,10 @@ class JobManager:
     def __init__(self):
         self._jobs: dict[str, JobRecord] = {}
         self._lock = asyncio.Lock()
+        # In-flight submits that passed the max-live check but haven't been
+        # inserted yet (their remote spawn runs outside the lock). Counted
+        # against the cap so concurrent submits can't overshoot it.
+        self._pending = 0
         self._state_file = _state_file()
         self._load()
 
@@ -160,11 +164,22 @@ class JobManager:
         await self._sweep_expired()
         async with self._lock:
             live = sum(1 for r in self._jobs.values() if r.status not in _TERMINAL)
-            if live >= self._max_live:
+            # Count reservations: the remote spawn in _spawn_and_record runs
+            # OUTSIDE the lock, so without reserving a slot here N concurrent
+            # submits could all pass a check that should admit only the first
+            # few and overshoot PORTAL_JOB_MAX_LIVE.
+            if live + self._pending >= self._max_live:
                 raise RuntimeError(
                     f"too many live jobs ({live} >= PORTAL_JOB_MAX_LIVE="
                     f"{self._max_live}); poll/cancel some before submitting more.")
+            self._pending += 1
+        try:
+            return await self._spawn_and_record(host, command)
+        finally:
+            async with self._lock:
+                self._pending -= 1
 
+    async def _spawn_and_record(self, host: str, command: str) -> dict:
         token = uuid.uuid4().hex
         out_path = f"/tmp/portal-job-{token}.out"
         meta_path = f"/tmp/portal-job-{token}.meta"
@@ -253,6 +268,7 @@ class JobManager:
 
         meta, size, alive, chunk_b64 = _parse_poll(result.stdout or "")
         raw = _b64decode_loose(chunk_b64)
+        status, exit_code = self._classify(rec, meta, alive)
         if is_tail:
             # A snapshot of the end — no offset tracking; resume from EOF after.
             text = raw.decode("utf-8", errors="backslashreplace")
@@ -260,9 +276,22 @@ class JobManager:
         else:
             text, consumed = _decode_incremental(raw)
             new_offset = off + consumed
+            # Once the job is terminal AND we've read to EOF, no further bytes
+            # will ever arrive to complete a trailing incomplete/invalid UTF-8
+            # sequence. _decode_incremental defers such a tail (consumed <
+            # len(raw)) — correct while the job runs, but it would pin
+            # new_offset below size forever once terminal, so `more` stays True
+            # and an agent's `while more: poll(...)` loop livelocks until the
+            # TTL sweep (and the tail bytes are never delivered). Flush the
+            # remainder with escapes so new_offset reaches size. The at-EOF
+            # guard keeps a multibyte char split at the max_bytes cap deferred,
+            # since the next poll has the continuation bytes.
+            at_eof = size is not None and off + len(raw) >= size
+            if consumed < len(raw) and status in _TERMINAL and at_eof:
+                text = raw.decode("utf-8", errors="backslashreplace")
+                new_offset = off + len(raw)
         more = size is not None and new_offset < size
 
-        status, exit_code = self._classify(rec, meta, alive)
         async with self._lock:
             newly_terminal = status in _TERMINAL and rec.finished_at is None
             rec.status = status

@@ -199,6 +199,6 @@ annotated_tag = true
 # correspond to commands that exit non-zero on failure -- cz aborts on the
 # first non-zero exit.
 pre_bump_hooks = [
-    "uv run ruff check portal_mcp_server/",
+    "uv run ruff check portal_mcp_server/ tests/",
     "uv run pytest tests/ -q",
 ]

@@ -54,9 +54,9 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 
 ## 代码风格 & Lint
 
-- 提交前跑 `uv run ruff check portal_mcp_server/`——**产品代码必须零报错**，这是 CI 闸门（四个 Python 版本都会跑，见下 "CI"）
-- 加 `--fix` 让 ruff 一键自动修可修项（未用 import、无占位符 f-string、import 排序等）：`uv run ruff check --fix portal_mcp_server/`
-- **CI 只 lint `portal_mcp_server/`，不 lint `tests/`**——测试目录里上游遗留的 lint 噪声不阻塞 CI；但你**新增 / 改动**的测试文件也请保持干净，对单个文件 `uv run ruff check --fix tests/<file>.py` 即可，别引入新报错
+- 提交前跑 `uv run ruff check portal_mcp_server/ tests/`——**产品代码和测试都必须零报错**，这是 CI 闸门（四个 Python 版本都会跑，见下 "CI"）
+- 加 `--fix` 让 ruff 一键自动修可修项（未用 import、无占位符 f-string、import 排序等）：`uv run ruff check --fix portal_mcp_server/ tests/`
+- CI 同时 lint `portal_mcp_server/` 和 `tests/`——测试代码也按同一套规则保持干净，别引入新报错
 
 ## 安全 & 隐私
 
@@ -108,7 +108,7 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 每个矩阵 job 做四件事：
 
 1. `pip install -e ".[dev]" && pip install ruff`
-2. `ruff check portal_mcp_server/` —— 只 lint 产品代码，不 lint 测试
+2. `ruff check portal_mcp_server/ tests/` —— 产品代码和测试一起 lint
 3. import smoke：`python -c "import portal_mcp_server; assert portal_mcp_server.main"` + `portal-mcp-server --help`
 4. `pytest tests/ -v --tb=short`（live SSH 测试 fixture 默认 skip，CI 不需要真实 host）
 
@@ -159,7 +159,7 @@ GH environment `pypi` 在仓库 Settings → Environments 里绑到 https://pypi
 **版本号、CHANGELOG、`uv.lock` 全部由 [Commitizen](https://commitizen-tools.github.io/commitizen/) 托管**——`pyproject.toml` 里配了 `version_provider = "uv"`，`cz bump` 会把 `uv.lock` 里的自身版本号一起更新并纳入同一个 bump commit。
 
 1. 确保要发版的 commit 都已 merge 进 `main`，本地在干净的 `main` HEAD 上
-2. （可选 shift-left）本地预跑一遍 hooks：`uv run ruff check portal_mcp_server/ && uv run pytest tests/ -q`——不跑也行，下一步 `cz bump` 配的 `pre_bump_hooks` 会自动跑同样两条；先跑只是为了在 cz 改 `pyproject.toml` / `uv.lock` / `CHANGELOG.md` 之前就发现 lint / 测试问题
+2. （可选 shift-left）本地预跑一遍 hooks：`uv run ruff check portal_mcp_server/ tests/ && uv run pytest tests/ -q`——不跑也行，下一步 `cz bump` 配的 `pre_bump_hooks` 会自动跑同样两条；先跑只是为了在 cz 改 `pyproject.toml` / `uv.lock` / `CHANGELOG.md` 之前就发现 lint / 测试问题
 3. 预览将要发的版本和 CHANGELOG：`uv run cz bump --dry-run`
 4. 正式发版：`uv run cz bump` —— 先跑 `pre_bump_hooks`（ruff + pytest，任一非零退出整个 bump 中止、不留半成品），再按 commit 历史递增 `pyproject.toml` 的 `version`、更新 `uv.lock`、在 `CHANGELOG.md` 顶部生成 `## v<x.y.z> (<日期>)` 段、建 bump commit、打 annotated `v<x.y.z>` tag（`annotated_tag = true`）
 5. 推送触发 release：`git push origin main --follow-tags`

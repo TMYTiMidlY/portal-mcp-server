@@ -8,6 +8,7 @@ marker, cancel uses `kill -`).
 from __future__ import annotations
 
 import json
+import re
 import time
 
 import pytest
@@ -338,7 +339,64 @@ async def test_poll_more_flag_when_backlog_exceeds_chunk(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_poll_command_caps_chunk_at_max_bytes(monkeypatch):
+async def test_poll_terminal_flushes_nonutf8_tail_no_livelock(monkeypatch):
+    """A *terminated* job whose output ends in an undecodable byte must not pin
+    `more=True` forever: poll() flushes the tail (escaped) so new_offset reaches
+    size. Without the terminal-flush, _decode_incremental defers the bad tail,
+    new_offset never reaches size, and an agent's `while more` loop livelocks
+    until the TTL sweep. Regression."""
+    remote = b"hello\xff"  # ends in an invalid (never-completing) UTF-8 byte
+    size = len(remote)
+
+    def router(c):
+        if "echo $!" in c:
+            return "100\n"
+        if "__CHUNK__" in c:
+            off = int(re.search(r"tail -c \+(\d+)", c).group(1)) - 1
+            cap = int(re.search(r"-gt (\d+)", c).group(1))
+            chunk = remote[off:off + cap]
+            # job is DONE (meta carries the done marker) and the process is gone.
+            return _poll_out("__JOB_DONE__:0", size, "no", chunk)
+        return ""
+
+    _install_conn(monkeypatch, router)
+    jm = job_manager.JobManager()
+    jid = (await jm.submit("h", "x"))["job_id"]
+
+    seen, off, p = "", 0, None
+    for _ in range(8):  # follow the documented `while more` paging loop
+        p = await jm.poll(jid, since=off)
+        seen += p["output_chunk"]
+        off = p["new_offset"]
+        if not p["more"]:
+            break
+    else:
+        pytest.fail("poll never drained — livelock (more stayed True forever)")
+
+    assert p["status"] == "done"
+    assert off == size, "new_offset must reach EOF so `more` can go False"
+    assert "hello" in seen and "\\xff" in seen  # tail delivered, escaped
+
+
+@pytest.mark.asyncio
+async def test_poll_tail_reads_last_lines_and_resumes_from_eof(monkeypatch):
+    """tail=N issues a `tail -n N` snapshot and resumes new_offset at EOF (no
+    offset tracking for the snapshot path)."""
+    def router(c):
+        if "echo $!" in c:
+            return "100\n"
+        if "__CHUNK__" in c:
+            return _poll_out("", 42, "yes", "line8\nline9\n")
+        return ""
+
+    rec = _install_conn(monkeypatch, router)
+    jm = job_manager.JobManager()
+    jid = (await jm.submit("h", "x"))["job_id"]
+    p = await jm.poll(jid, tail=2)
+    assert p["output_chunk"] == "line8\nline9\n"
+    assert p["new_offset"] == 42  # resume from EOF (size), not byte-offset paged
+    poll_cmd = next(c for c in rec if "__CHUNK__" in c)
+    assert "tail -n 2" in poll_cmd
     rec = _install_conn(monkeypatch, lambda c: "100\n" if "echo $!" in c
                         else _poll_out("", 0, "yes", ""))
     jm = job_manager.JobManager()

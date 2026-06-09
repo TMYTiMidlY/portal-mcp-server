@@ -84,16 +84,14 @@ When adding a new `@mcp.tool()`:
 
 ## Code style & lint
 
-- Run `uv run ruff check portal_mcp_server/` before you submit — **product
-  code must be zero-error**; this is the CI gate (all four Python versions
-  run it, see "CI" below).
+- Run `uv run ruff check portal_mcp_server/ tests/` before you submit —
+  **product code and tests must both be zero-error**; this is the CI gate
+  (all four Python versions run it, see "CI" below).
 - Add `--fix` to let ruff auto-fix the fixable lints (unused imports,
   placeholder-less f-strings, import ordering, ...):
-  `uv run ruff check --fix portal_mcp_server/`.
-- **CI lints `portal_mcp_server/` only, not `tests/`** — pre-existing lint
-  noise inherited from upstream in the tests tree does not block CI. Still,
-  keep the test files you **add / touch** clean: `uv run ruff check --fix
-  tests/<file>.py` on the single file is enough; don't introduce new lints.
+  `uv run ruff check --fix portal_mcp_server/ tests/`.
+- CI lints `portal_mcp_server/` and `tests/` together — test code is held to
+  the same rules; don't introduce new lints.
 
 ## Security & privacy
 
@@ -160,7 +158,7 @@ Matrix: Python **3.10 / 3.11 / 3.12 / 3.13** (ubuntu-latest).
 Each matrix job does four things:
 
 1. `pip install -e ".[dev]" && pip install ruff`
-2. `ruff check portal_mcp_server/` — lints product code only, not tests
+2. `ruff check portal_mcp_server/ tests/` — lints product code and tests
 3. Import smoke: `python -c "import portal_mcp_server; assert portal_mcp_server.main"` plus `portal-mcp-server --help`
 4. `pytest tests/ -v --tb=short` (live SSH fixtures skip by default, so
    CI never needs a real host)
@@ -235,7 +233,7 @@ manually.**
 1. Make sure everything to ship is merged into `main` and you're on a
    clean `main` HEAD.
 2. (Optional shift-left) Run the hooks once yourself:
-   `uv run ruff check portal_mcp_server/ && uv run pytest tests/ -q`.
+   `uv run ruff check portal_mcp_server/ tests/ && uv run pytest tests/ -q`.
    You can skip this — step 4's `cz bump` is configured with the same
    `pre_bump_hooks`, so running them by hand first is just a way to catch
    lint / test failures before cz touches `pyproject.toml` / `uv.lock` /

@@ -208,3 +208,20 @@ async def test_glob_hard_caps_at_100(monkeypatch):
     assert len(res["filenames"]) == 100
     assert res["num_files"] == 150
     assert res["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_glob_find_fallback_preserves_dotfiles(monkeypatch):
+    """When rg is absent, glob uses `find .` which emits './'-prefixed paths.
+    Stripping the prefix must use removeprefix, NOT lstrip (which greedily ate
+    leading dots: './.github/x' -> 'github/x', './.env' -> 'env'). Regression."""
+    rec = _install(
+        monkeypatch,
+        "./.github/workflows/ci.yml\n./.env\n./src/app.py\n",
+        rg=False,
+    )
+    res = await rs.remote_glob("h", "**/*", ".")
+    assert res["engine"] == "find"
+    assert set(res["filenames"]) == {
+        ".github/workflows/ci.yml", ".env", "src/app.py"}
+    assert "find ." in rec[0]

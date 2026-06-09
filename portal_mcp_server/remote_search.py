@@ -316,7 +316,9 @@ async def remote_glob(host: str, pattern: str, path: str = ".") -> Dict[str, Any
     try:
         if tools["rg"]:
             # --no-ignore: a glob should not be filtered by .gitignore.
-            cmd = (f"cd {_q(base)} && rg --files --no-config --no-ignore "
+            # --hidden: include dotfiles / files under dot-dirs, matching the
+            # find fallback below (which sees them via `find .`).
+            cmd = (f"cd {_q(base)} && rg --files --no-config --no-ignore --hidden "
                    f"--sort modified -g {_q(pattern)} 2>/dev/null || true")
             engine = "rg"
         elif tools["find"]:
@@ -329,7 +331,10 @@ async def remote_glob(host: str, pattern: str, path: str = ".") -> Dict[str, Any
                     "duration_ms": 0, "engine": "none",
                     "error": "neither rg nor find available on host"}
         r = await conn.run(cmd, check=False, errors=DEFAULT_DECODE_ERRORS)
-        files = [ln.strip().lstrip("./") for ln in r.stdout.splitlines()
+        # removeprefix("./"), NOT lstrip("./"): lstrip strips every leading '.'
+        # and '/' char, which mangles dotfiles emitted by the find fallback
+        # (e.g. './.github/x' -> 'github/x', './.env' -> 'env').
+        files = [ln.strip().removeprefix("./") for ln in r.stdout.splitlines()
                  if ln.strip()]
         if engine == "rg":
             files.reverse()  # rg sorts ascending mtime; we want newest first

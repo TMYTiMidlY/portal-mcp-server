@@ -84,15 +84,15 @@ Every state-changing entry point runs the gate; there are no side doors:
   (the actual IP / DNS the connection will reach), so an agent cannot
   launder a non-allowlisted target through an alias whose name happens
   to match `safe-*`. `action="remove"` gates against the alias.
-- `portal_tunnel_open` and `portal_tunnel_close` both gate the
-  originating host — the close path resolves it from the active-tunnel
-  record before tearing the listener down.
-- `portal_bash` and `portal_bash_close` both gate the host (and the
-  bash command, for `portal_bash`) — a persistent shell is **not** a
+- `portal_tunnel(action="open")` and `portal_tunnel(action="close")` both
+  gate the originating host — the close path resolves it from the
+  active-tunnel record before tearing the listener down.
+- `portal_shell` and `portal_close_shell` both gate the host (and the
+  bash command, for `portal_shell`) — a persistent shell is **not** a
   blanket authorisation for arbitrary commands.
-- Multi-host gates (`portal_multi_exec`, `portal_playbook` group path)
-  are **two-phase**: every host is validated first, only then are
-  per-host rate-limit tokens consumed. A single failing host cannot
+- The multi-host path of `portal_exec` (an explicit host list or a
+  `group_tag`) is **two-phase**: every host is validated first, only then
+  are per-host rate-limit tokens consumed. A single failing host cannot
   burn quota on the others.
 
 ### Authentication
@@ -291,7 +291,7 @@ injection points remain separate in the resolver code.
 
 #### Sudo auth — same boundary, credential agent side-channel
 
-`portal_bash(..., use_sudo=True)` runs a command under `sudo` on the
+`portal_exec(..., use_sudo=True)` runs a command under `sudo` on the
 remote. The boundary is identical to SSH password auth: **`use_sudo` is a
 boolean, not a password** — no sudo password (or path to one) is ever an
 MCP tool parameter, so nothing lands in the agent context or tool-call
@@ -347,18 +347,19 @@ Execution detail: sudo runs as a **one-shot** `sudo -S -k -p '' -- bash
 -c <cmd>` via `conn.run(input=<pw>)`, *not* through the persistent
 `bash -i` session (`sudo -S` consumes stdin, which would collide with the
 sentinel-completion protocol). Consequence: a `use_sudo` command does
-**not** inherit `cwd` / env from prior `portal_bash` calls. `-k` forces
+**not** inherit `cwd` / env from prior `portal_shell` calls. `-k` forces
 fresh authentication each time; `-p ''` suppresses the prompt text.
 
 ### Audit log
 
 All state-changing tools write `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`):
 
-- `exec` / `file write` / `patch` / `register` / `tunnel` / `playbook`
+- `exec` / `file write` / `patch` / `register` / `tunnel`
   / multi-host orchestration
 
 Read-only tools — `portal_read`, `portal_grep`, `portal_glob`,
-`portal_audit`, `portal_check`, `portal_tunnel_list` — explicitly do
+`portal_audit`, `portal_check`, and the read actions of `portal_tunnel`
+(`action="list"`) / `portal_job` (`poll`/`list`) — explicitly do
 **not** audit, to keep the log signal-rich.
 
 The audit subsystem is **fail-closed by default**: if writing to disk

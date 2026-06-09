@@ -46,7 +46,10 @@ class ShellSession:
     last_used: float = field(default_factory=time.time)
     output_buffer: list[str] = field(default_factory=list)
     env: dict = field(default_factory=dict)
-    cwd: str = "~"
+    # Serializes execute_in_session on this session's single shared PTY channel:
+    # one ``bash -i`` cannot run two foreground commands at once, and concurrent
+    # readers would otherwise split the byte stream and steal each other's
+    # completion sentinel (wrong exit code / spurious timeout).
     _read_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     def touch(self):
@@ -150,45 +153,50 @@ class SessionManager:
         # yields a truncated exit code — we wait for the terminator.
         full_cmd = f"{command}\necho {sentinel}:$?\n"
         sentinel_re = re.compile(re.escape(sentinel) + r":(\d+)(?=[\r\n])")
-        try:
-            session.process.stdin.write(full_cmd)
-        except (BrokenPipeError, ConnectionResetError, OSError,
-                asyncssh.ChannelOpenError, asyncssh.ConnectionLost) as e:
-            # stdin write failed — channel is gone. Drop the session
-            # from the registry so the next call creates a fresh one,
-            # and surface a typed error so the caller (remote_bash) can
-            # transparently retry.
-            await self._invalidate(session_id)
-            raise SessionDead(session_id, e) from e
-        buf = ""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        # Hold the per-session lock for the whole write+read cycle: the channel
+        # is shared, so two concurrent calls to the same session must not
+        # interleave their sentinels (one would consume the other's and the
+        # victim returns the wrong exit code or a spurious timeout).
+        async with session._read_lock:
             try:
-                chunk = await asyncio.wait_for(
-                    session.process.stdout.read(4096), timeout=0.3
-                )
-            except asyncio.TimeoutError:
-                continue
-            except (asyncssh.ChannelOpenError, asyncssh.ConnectionLost,
-                    UnicodeDecodeError, ConnectionResetError, OSError) as e:
-                # Channel-level failure during read. With
-                # DEFAULT_DECODE_ERRORS='backslashreplace' the UnicodeDecodeError
-                # branch shouldn't fire — keep it as defense-in-depth in case
-                # someone overrides the encoding to a stricter setting.
+                session.process.stdin.write(full_cmd)
+            except (BrokenPipeError, ConnectionResetError, OSError,
+                    asyncssh.ChannelOpenError, asyncssh.ConnectionLost) as e:
+                # stdin write failed — channel is gone. Drop the session
+                # from the registry so the next call creates a fresh one,
+                # and surface a typed error so the caller (remote_bash) can
+                # transparently retry.
                 await self._invalidate(session_id)
                 raise SessionDead(session_id, e) from e
-            if not chunk:
-                # EOF — bash exited or channel half-closed. Session is no
-                # longer usable.
-                await self._invalidate(session_id)
-                raise SessionDead(session_id, EOFError("stdout EOF"))
-            buf += chunk
-            m = sentinel_re.search(buf)
-            if m:
-                exit_code = int(m.group(1))
-                output = strip_ansi(buf[:m.start()]).replace("\r\n", "\n")
-                return output.rstrip("\n"), exit_code
-        return strip_ansi(buf).replace("\r\n", "\n").rstrip("\n") + "\n[timeout]", None
+            buf = ""
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                try:
+                    chunk = await asyncio.wait_for(
+                        session.process.stdout.read(4096), timeout=0.3
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                except (asyncssh.ChannelOpenError, asyncssh.ConnectionLost,
+                        UnicodeDecodeError, ConnectionResetError, OSError) as e:
+                    # Channel-level failure during read. With
+                    # DEFAULT_DECODE_ERRORS='backslashreplace' the UnicodeDecodeError
+                    # branch shouldn't fire — keep it as defense-in-depth in case
+                    # someone overrides the encoding to a stricter setting.
+                    await self._invalidate(session_id)
+                    raise SessionDead(session_id, e) from e
+                if not chunk:
+                    # EOF — bash exited or channel half-closed. Session is no
+                    # longer usable.
+                    await self._invalidate(session_id)
+                    raise SessionDead(session_id, EOFError("stdout EOF"))
+                buf += chunk
+                m = sentinel_re.search(buf)
+                if m:
+                    exit_code = int(m.group(1))
+                    output = strip_ansi(buf[:m.start()]).replace("\r\n", "\n")
+                    return output.rstrip("\n"), exit_code
+            return strip_ansi(buf).replace("\r\n", "\n").rstrip("\n") + "\n[timeout]", None
 
     async def _invalidate(self, session_id: str) -> None:
         """Drop a session from the registry and release its pool slot.
@@ -285,7 +293,6 @@ class SessionManager:
             {
                 "session_id": s.session_id,
                 "host": s.host_name,
-                "cwd": s.cwd,
                 "age_s": round(time.time() - s.created_at, 1),
                 "idle_s": round(time.time() - s.last_used, 1),
                 "buffer_lines": len(s.output_buffer),
