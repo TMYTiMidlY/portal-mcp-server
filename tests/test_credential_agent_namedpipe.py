@@ -28,12 +28,13 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.fixture
-def pipe_agent(monkeypatch):
+def pipe_agent(_isolate_credential_agent, monkeypatch):
     """Start a credential agent on a private per-run named pipe.
 
-    Overrides the ``PORTAL_CREDENTIAL_AGENT_SOCKET`` set by the autouse
-    isolation fixture (test-body setenv wins over fixture setup) so both the
-    server and the client resolve to the same pipe.
+    Declares ``_isolate_credential_agent`` as an explicit dependency (mirroring
+    conftest's ``agent_socket``) so this fixture's ``PORTAL_CREDENTIAL_AGENT_SOCKET``
+    setenv deterministically wins over the autouse isolation fixture's, and both
+    server and client resolve to the same pipe.
     """
     from portal_mcp_server import credential_agent
 
