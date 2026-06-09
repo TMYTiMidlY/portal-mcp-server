@@ -137,11 +137,12 @@ class SessionManager:
         sentinel = f"__DONE_{uuid.uuid4().hex}__"
         # ``echo {sentinel}:$?`` captures the command's exit status right
         # after it runs, so the agent learns whether the command succeeded
-        # instead of guessing from stdout. The regex below only matches once
-        # the digits AND a terminator (newline) have arrived, so a sentinel
-        # line split across read chunks never yields a truncated exit code.
+        # instead of guessing from stdout. The regex requires a newline AFTER
+        # the digits, so a sentinel line split mid-number across read chunks
+        # (e.g. ``:13`` arriving before the trailing ``0`` of ``130``) never
+        # yields a truncated exit code — we wait for the terminator.
         full_cmd = f"{command}\necho {sentinel}:$?\n"
-        sentinel_re = re.compile(re.escape(sentinel) + r":(\d+)\b")
+        sentinel_re = re.compile(re.escape(sentinel) + r":(\d+)(?=[\r\n])")
         try:
             session.process.stdin.write(full_cmd)
         except (BrokenPipeError, ConnectionResetError, OSError,

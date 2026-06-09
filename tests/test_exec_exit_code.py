@@ -87,6 +87,24 @@ async def test_execute_in_session_sentinel_split_across_chunks(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_in_session_multidigit_code_split_mid_number(monkeypatch):
+    """Regression: a chunk boundary falling BETWEEN the digits of a multi-digit
+    exit code (e.g. ``:13`` before the trailing ``0`` of ``130``) must NOT
+    return the truncated value — wait for the newline terminator."""
+    from portal_mcp_server import session_manager
+
+    sentinel = _fixed_sentinel(monkeypatch)
+    # Real exit code is 130 (SIGINT); the buffer briefly holds "...:13".
+    chunks = ["", f"{sentinel}:13", "0\r\n"]
+    _install_fake_conn(monkeypatch, lambda: _FakeProc(chunks))
+
+    sm = session_manager.SessionManager()
+    sid = await sm.create_session("h")
+    out, code = await sm.execute_in_session(sid, "exit 130")
+    assert code == 130, "must not truncate 130 -> 13 on a mid-number chunk split"
+
+
+@pytest.mark.asyncio
 async def test_execute_in_session_timeout_returns_none_code(monkeypatch):
     import asyncio as _aio
     from portal_mcp_server import session_manager
