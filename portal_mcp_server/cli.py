@@ -779,43 +779,79 @@ async def portal_cleanup_tmps(host: str, directory: str,
 
 
 @mcp.tool()
-async def portal_grep(host: str, path: str, pattern: str,
+async def portal_grep(host: str, pattern: str, path: str = ".",
                       glob: str = "", file_type: str = "",
-                      ignore_case: bool = False, max_count: int = 0) -> str:
-    """Search for a regex pattern under a path on a remote host.
-
-    Uses ripgrep when available (fast, structured), else falls back to grep -rn.
+                      output_mode: Literal["files_with_matches", "content",
+                                           "count"] = "files_with_matches",
+                      ignore_case: bool = False,
+                      before_context: int = 0, after_context: int = 0,
+                      context: int = 0, head_limit: int = 250,
+                      offset: int = 0, multiline: bool = False) -> str:
+    """Search file contents with a regex on a remote host (ripgrep, fallback
+    grep). **Prefer this over running raw `rg`/`grep` through portal_exec** —
+    it returns structured JSON and caps output so a broad search can't blow up
+    your context. Pair it with portal_glob to *find files by name*.
 
     Args:
-        host: SSH host alias
-        path: Absolute remote path to search under
-        pattern: Pattern to find (regex by default)
-        glob: Optional glob filter (e.g. "*.py")
-        file_type: Optional rg --type value (e.g. "py", "rust")
-        ignore_case: Case-insensitive match
-        max_count: Stop after N matches (0 = no limit)
+        host: SSH host alias / registered name.
+        pattern: the regex to search for (rg/PCRE-ish syntax).
+        path: file or directory to search under (default: cwd "."). Result
+            paths are returned relative to it.
+        glob: filter files by a glob, e.g. "*.py" or "!*.test.ts".
+        file_type: rg --type filter, e.g. "py", "rust", "js".
+        output_mode:
+            - "files_with_matches" (default): just the matching file paths,
+              NEWEST FIRST. Cheapest; use it to locate, then re-grep with
+              output_mode="content" on the file you care about.
+            - "content": matching lines as {file, line, text} (context lines
+              carry "context": true). `head_limit` caps the TOTAL lines
+              returned and `offset` pages through them.
+            - "count": per-file match counts + a grand total.
+        ignore_case: case-insensitive match.
+        before_context / after_context / context: lines of context to include
+            around each match in "content" mode (context = both sides).
+        head_limit: cap on results (files / content lines / count rows). Default
+            250; a `truncated` flag in the result tells you more were dropped.
+        offset: skip the first `offset` results (pagination).
+        multiline: let `.` and the pattern span line boundaries.
+
+    Respects `.gitignore` (ripgrep's default). Returns JSON whose shape depends
+    on output_mode; every shape includes a `truncated` flag.
     """
     err = _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     res = await _re_grep(
-        host, path, pattern,
+        host, pattern, path,
         glob=glob or None,
-        type=file_type or None,
+        file_type=file_type or None,
+        output_mode=output_mode,
         ignore_case=ignore_case,
-        max_count=max_count if max_count > 0 else None,
+        before_context=before_context,
+        after_context=after_context,
+        context=context,
+        head_limit=head_limit,
+        offset=offset,
+        multiline=multiline,
     )
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
 async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
-    """List files matching a glob pattern on a remote host.
+    """Find files by a glob pattern on a remote host, **newest first**.
+    **Prefer this over running raw `find`/`ls` through portal_exec** — it
+    returns structured JSON, sorts by modification time, and hard-caps at 100
+    files. Use portal_grep when you need to match file *contents* instead.
 
     Args:
-        host: SSH host alias
-        pattern: Glob (e.g. "**/*.py", "*.toml")
-        path: Directory to search under (default: cwd)
+        host: SSH host alias / registered name.
+        pattern: a glob, e.g. "**/*.py", "src/**/*.{ts,tsx}", "*.toml".
+        path: directory to search under (default: cwd "."). Returned filenames
+            are relative to it.
+
+    Returns {filenames:[…newest first], num_files, truncated, duration_ms}.
+    Unlike portal_grep this does NOT respect `.gitignore` (matches CC Glob).
     """
     err = _gate(host)
     if err:

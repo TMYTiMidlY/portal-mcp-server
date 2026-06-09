@@ -21,6 +21,8 @@ _DISPATCH_ENUMS = [
      {"upload", "download", "sync", "mirror", "upload-list", "download-list"}),
     ("portal_tunnel", "action", {"open", "close", "list"}),
     ("portal_tunnel", "kind", {"local", "reverse", "socks"}),
+    ("portal_grep", "output_mode",
+     {"files_with_matches", "content", "count"}),
     ("portal_audit", "view",
      {"snapshot", "server", "sessions", "history", "stats", "policy"}),
 ]
