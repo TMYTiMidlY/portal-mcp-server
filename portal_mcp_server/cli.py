@@ -1,8 +1,8 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 15 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+Exposes 14 portal_* tools covering: read/patch/grep/glob/
 shell(+close_shell)/exec/job core + local_exec + host/transfer/tunnel/audit/
-check.
+check. (portal_patch sweeps its own orphan tmp files — no separate tool.)
 """
 import asyncio
 import json
@@ -27,7 +27,6 @@ from .server_info import server_info, set_transport as _set_server_transport
 from .remote_text_editor import (
     remote_read as _re_read,
     remote_patch as _re_patch,
-    cleanup_orphan_tmps as _re_cleanup_tmps,
 )
 from .remote_search import remote_grep as _re_grep, remote_glob as _re_glob
 from .remote_bash import (
@@ -701,35 +700,6 @@ async def portal_patch(host: str, path: str, file_hash: str,
     audit_log(host, f"patch:{path}",
               res.get("result", "?") if isinstance(res, dict) else "?",
               operation="file_patch")
-    return json.dumps(res, indent=2, ensure_ascii=False)
-
-
-@mcp.tool()
-async def portal_cleanup_tmps(host: str, directory: str,
-                              max_age_s: int = 3600) -> str:
-    """Remove orphan tmp files left by interrupted portal_patch writes.
-
-    portal_patch writes through ``<path>.mcp_tmp.<12hex>`` and renames into
-    place atomically. If the SSH connection dies after the tmp file is
-    created but before the rename, the tmp file is left on disk. This tool
-    finds and removes those orphans.
-
-    Args:
-        host:      registered host alias
-        directory: absolute remote directory to scan (non-recursive)
-        max_age_s: only remove files older than this many seconds (default
-                   3600). Pass 0 to remove every match unconditionally —
-                   useful in tests, dangerous in production.
-
-    Returns JSON: {"scanned": int, "removed": [str], "skipped": [[str, str]]}.
-    """
-    err = _gate(host)
-    if err:
-        raise ToolError(f"BLOCKED: {err}")
-    res = await _re_cleanup_tmps(host, directory, max_age_s=max_age_s)
-    removed = res.get("removed", []) if isinstance(res, dict) else []
-    audit_log(host, f"cleanup_tmps:{directory}",
-              f"removed:{len(removed)}", operation="file_cleanup")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 

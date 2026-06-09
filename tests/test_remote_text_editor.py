@@ -31,7 +31,6 @@ SFTP-specific:
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 
 import pytest
@@ -579,52 +578,98 @@ class TestOrphanTmpCleanup:
             "inline best-effort cleanup should have removed the tmp"
 
     @pytest.mark.asyncio
-    async def test_cleanup_finds_and_removes_old_orphans(self, fake_remote):
-        fs, _, _ = fake_remote
-        # Plant a stale orphan as if a previous edit was killed.
-        fs.write("/dir/realfile.txt", "data\n", mtime=1000.0)
-        fs.write("/dir/realfile.txt.mcp_tmp.aaaaaaaaaaaa", "garbage", mtime=100.0)
-
-        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
-        res = await cleanup_orphan_tmps("h", "/dir", max_age_s=0)
-        assert res["scanned"] == 1
-        assert res["removed"] == ["/dir/realfile.txt.mcp_tmp.aaaaaaaaaaaa"]
-        assert res["skipped"] == []
-        # Real file is untouched.
-        assert "/dir/realfile.txt" in fs.files
-        assert "/dir/realfile.txt.mcp_tmp.aaaaaaaaaaaa" not in fs.files
-
-    @pytest.mark.asyncio
-    async def test_cleanup_respects_max_age(self, fake_remote):
-        fs, _, _ = fake_remote
+    async def test_patch_sweeps_old_orphans(self, fake_remote):
+        """A successful patch opportunistically reclaims stale orphan tmp
+        files in the same directory and reports them under `swept`."""
         import time as time_mod
-        # A "fresh" orphan from a possibly-still-running edit.
-        fresh_mtime = time_mod.time() - 5  # 5 seconds old
-        fs.write("/dir/file.mcp_tmp.bbbbbbbbbbbb", "garbage", mtime=fresh_mtime)
-        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
-        res = await cleanup_orphan_tmps("h", "/dir", max_age_s=3600)
-        assert res["scanned"] == 1
-        assert res["removed"] == []
-        assert res["skipped"] and "younger than" in res["skipped"][0][1]
-
-    @pytest.mark.asyncio
-    async def test_cleanup_does_not_touch_unrelated_files(self, fake_remote):
-        """The 12-hex suffix regex must NOT match user files that look similar."""
         fs, _, _ = fake_remote
-        # Things that LOOK like our pattern but aren't:
-        fs.write("/dir/foo.mcp_tmp.short", "data", mtime=100)         # too short
-        fs.write("/dir/foo.mcp_tmp.GGGGGGGGGGGG", "data", mtime=100)  # not hex
-        fs.write("/dir/foo.tmp.aaaaaaaaaaaa", "data", mtime=100)      # missing .mcp_
-        fs.write("/dir/regular.txt", "data", mtime=100)
-        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
-        res = await cleanup_orphan_tmps("h", "/dir", max_age_s=0)
-        assert res["scanned"] == 0
-        assert res["removed"] == []
-        # Everything still there.
-        assert len(fs.files) == 4
+        fs.write("/dir/f", "x\n", mtime=1000.0)
+        # An orphan from a long-dead edit (older than the 1h age guard).
+        old = time_mod.time() - 99999
+        fs.write("/dir/f.mcp_tmp.aaaaaaaaaaaa", "garbage", mtime=old)
+        from portal_mcp_server.remote_text_editor import remote_patch
+
+        res = await remote_patch(
+            "h", "/dir/f", file_hash=_h("x\n"),
+            patches=[{"start": 1, "end": 1, "contents": "y\n",
+                       "range_hash": _h("x\n")}],
+        )
+        assert res["result"] == "ok"
+        assert res["swept"] == ["/dir/f.mcp_tmp.aaaaaaaaaaaa"]
+        assert "/dir/f.mcp_tmp.aaaaaaaaaaaa" not in fs.files
+        assert fs.read("/dir/f") == "y\n"
 
     @pytest.mark.asyncio
-    async def test_cleanup_path_validation(self, fake_remote):
-        from portal_mcp_server.remote_text_editor import cleanup_orphan_tmps
-        with pytest.raises(ValueError):
-            await cleanup_orphan_tmps("h", "/dir\x00bad", max_age_s=0)
+    async def test_patch_sweep_respects_age_guard(self, fake_remote):
+        """A FRESH orphan (possibly an in-flight concurrent write) must NOT be
+        removed by the sweep."""
+        import time as time_mod
+        fs, _, _ = fake_remote
+        fs.write("/dir/f", "x\n", mtime=1000.0)
+        fresh = time_mod.time() - 5  # 5 seconds old
+        fs.write("/dir/f.mcp_tmp.bbbbbbbbbbbb", "garbage", mtime=fresh)
+        from portal_mcp_server.remote_text_editor import remote_patch
+
+        res = await remote_patch(
+            "h", "/dir/f", file_hash=_h("x\n"),
+            patches=[{"start": 1, "end": 1, "contents": "y\n",
+                       "range_hash": _h("x\n")}],
+        )
+        assert res["result"] == "ok"
+        assert "swept" not in res  # nothing old enough was swept
+        assert "/dir/f.mcp_tmp.bbbbbbbbbbbb" in fs.files
+
+    @pytest.mark.asyncio
+    async def test_patch_sweep_ignores_unrelated_files(self, fake_remote):
+        """The exact 12-hex suffix regex must not match look-alike files."""
+        fs, _, _ = fake_remote
+        fs.write("/dir/f", "x\n", mtime=1000.0)
+        fs.write("/dir/foo.mcp_tmp.short", "data", mtime=100)          # too short
+        fs.write("/dir/foo.mcp_tmp.GGGGGGGGGGGG", "data", mtime=100)   # not hex
+        fs.write("/dir/foo.tmp.aaaaaaaaaaaa", "data", mtime=100)       # missing .mcp_
+        from portal_mcp_server.remote_text_editor import remote_patch
+
+        res = await remote_patch(
+            "h", "/dir/f", file_hash=_h("x\n"),
+            patches=[{"start": 1, "end": 1, "contents": "y\n",
+                       "range_hash": _h("x\n")}],
+        )
+        assert res["result"] == "ok"
+        assert "swept" not in res
+        for look_alike in ("/dir/foo.mcp_tmp.short",
+                           "/dir/foo.mcp_tmp.GGGGGGGGGGGG",
+                           "/dir/foo.tmp.aaaaaaaaaaaa"):
+            assert look_alike in fs.files
+
+    @pytest.mark.asyncio
+    async def test_patch_succeeds_even_if_sweep_raises(self, fake_remote, monkeypatch):
+        """The sweep is a pure bonus after the committed write — if it blows
+        up, the patch result must still be ok (full failure isolation)."""
+        fs, _, _ = fake_remote
+        fs.write("/dir/f", "x\n", mtime=1000.0)
+        from portal_mcp_server import remote_text_editor as rte
+
+        async def boom(*a, **k):
+            raise OSError("sweep exploded")
+
+        monkeypatch.setattr(rte, "_sweep_orphan_tmps_in", boom)
+        res = await rte.remote_patch(
+            "h", "/dir/f", file_hash=_h("x\n"),
+            patches=[{"start": 1, "end": 1, "contents": "y\n",
+                       "range_hash": _h("x\n")}],
+        )
+        assert res["result"] == "ok"
+        assert fs.read("/dir/f") == "y\n"
+
+    @pytest.mark.asyncio
+    async def test_sweep_helper_swallows_readdir_error(self):
+        """_sweep_orphan_tmps_in must never raise (readdir failure -> [])."""
+        from portal_mcp_server.remote_text_editor import _sweep_orphan_tmps_in
+
+        class _BadSftp:
+            async def readdir(self, d):
+                raise OSError("readdir boom")
+
+        removed = await _sweep_orphan_tmps_in(_BadSftp(), "/dir", 3600)
+        assert removed == []
+

@@ -15,8 +15,12 @@ Key design decisions a source reader needs to know
 * **Atomic write** = ``<path>.mcp_tmp.<uuid12>`` opened via SFTP, then
   ``posix_rename`` into place; falls back to ``remove + rename`` for SFTP
   servers that do not advertise the posix-rename extension. Tmp files
-  carry a recognizable suffix so :func:`cleanup_orphan_tmps` can find
-  leftovers without false positives.
+  carry a recognizable suffix so the post-write sweep
+  (:func:`_sweep_orphan_tmps_in`) can reclaim leftovers without false
+  positives. A successful patch opportunistically sweeps stale orphan tmp
+  files (older than :data:`ORPHAN_TMP_MAX_AGE_S`) in the same directory,
+  reusing the write's SFTP session — so callers never need to know the
+  internal tmp naming convention.
 
 * **Three hash checks** all use :func:`_hash_eq` (constant-time
   comparison via :func:`hmac.compare_digest`):
@@ -52,11 +56,16 @@ from .safety import validate_remote_path
 
 logger = logging.getLogger("portal_mcp.remote_editor")
 
-# A stable, recognizable suffix so a janitor can later identify orphans we
-# left behind (e.g. when a connection died after `sftp.open(tmp)` but before
+# A stable, recognizable suffix so we can later identify orphans we left
+# behind (e.g. when a connection died after `sftp.open(tmp)` but before
 # `posix_rename`). The suffix is wide enough (12 hex chars) that there is no
 # practical chance of a real user file matching it.
 _TMP_SUFFIX_RE = re.compile(r"\.mcp_tmp\.[0-9a-f]{12}$")
+
+# Age guard for the opportunistic post-write orphan sweep: only files older
+# than this are removed, so a tmp file from a *concurrent* in-flight write
+# (seconds old) is never touched. One hour is far longer than any real edit.
+ORPHAN_TMP_MAX_AGE_S = 3600
 
 
 def _make_tmp_path(target_path: str) -> str:
@@ -64,8 +73,8 @@ def _make_tmp_path(target_path: str) -> str:
 
     Putting the tmp file beside the target is what makes ``posix_rename``
     atomic on POSIX filesystems (rename is only atomic *within* a single
-    filesystem). Using a recognizable suffix lets :func:`cleanup_orphan_tmps`
-    find leftovers without false positives.
+    filesystem). Using a recognizable suffix lets the post-write sweep
+    (:func:`_sweep_orphan_tmps_in`) reclaim leftovers without false positives.
     """
     return f"{target_path}.mcp_tmp.{uuid.uuid4().hex[:12]}"
 
@@ -121,8 +130,13 @@ async def _read_full(host: str, path: str, encoding: str) -> str:
         mgr.release_connection(host, conn)
 
 
-async def _atomic_write(host: str, path: str, new_content: str, encoding: str) -> None:
+async def _atomic_write(host: str, path: str, new_content: str,
+                        encoding: str) -> List[str]:
     """Write atomically via tmp + rename on the remote host.
+
+    Returns the list of orphan tmp files swept after a successful write (see
+    :func:`_sweep_orphan_tmps_in`) — empty when there were none or the sweep
+    was skipped.
 
     Failure-mode contract
     ---------------------
@@ -134,14 +148,16 @@ async def _atomic_write(host: str, path: str, new_content: str, encoding: str) -
     2. If creation succeeded but anything *after* it raises (including
        :class:`asyncio.CancelledError`), we make a best-effort cleanup and
        re-raise.
-    3. If the connection itself dies mid-cleanup, the orphan tmp will be
-       picked up by :func:`cleanup_orphan_tmps` on the next maintenance run.
+    3. If the connection itself dies mid-cleanup, the orphan tmp is picked up
+       by the opportunistic sweep the next time *any* portal_patch succeeds in
+       that directory.
     """
     validate_remote_path(path)
     tmp_path = _make_tmp_path(path)
     mgr = get_manager()
     conn = await mgr.get_connection(host)
     created = False
+    swept: List[str] = []
     try:
         sftp = await conn.start_sftp_client()
         try:
@@ -159,6 +175,18 @@ async def _atomic_write(host: str, path: str, new_content: str, encoding: str) -
                     await sftp.rename(tmp_path, path)
                 # Rename succeeded — tmp_path no longer exists at its old name.
                 created = False
+                # Opportunistic, fully-isolated sweep: the core write is now
+                # committed, so any failure below must NOT affect the result.
+                # We reuse the SFTP session we already have open (one extra
+                # readdir), age-guarded so concurrent live tmp files survive.
+                try:
+                    swept = await _sweep_orphan_tmps_in(
+                        sftp, str(PurePosixPath(path).parent),
+                        ORPHAN_TMP_MAX_AGE_S)
+                except Exception:  # pragma: no cover - sweep is best-effort
+                    logger.debug("post-write orphan sweep failed on %s",
+                                 host, exc_info=True)
+                    swept = []
             except BaseException:
                 # Best-effort cleanup. We catch BaseException explicitly so a
                 # CancelledError propagating from asyncio.shield-style code
@@ -169,8 +197,8 @@ async def _atomic_write(host: str, path: str, new_content: str, encoding: str) -
                     except Exception:
                         logger.warning(
                             "remote_text_editor: failed to remove orphan tmp "
-                            "%s on %s; cleanup_orphan_tmps will pick it up",
-                            tmp_path, host,
+                            "%s on %s; the next successful patch in this dir "
+                            "will sweep it", tmp_path, host,
                         )
                 raise
         finally:
@@ -181,61 +209,42 @@ async def _atomic_write(host: str, path: str, new_content: str, encoding: str) -
                 pass
     finally:
         mgr.release_connection(host, conn)
+    return swept
 
 
-async def cleanup_orphan_tmps(host: str, directory: str,
-                               max_age_s: int = 3600) -> Dict[str, Any]:
-    """Find and remove orphan tmp files left by a failed :func:`_atomic_write`.
+async def _sweep_orphan_tmps_in(sftp, directory: str, max_age_s: int,
+                                now: Optional[float] = None) -> List[str]:
+    """Remove orphan ``*.mcp_tmp.<12hex>`` files in ``directory`` using an
+    already-open SFTP session. Best-effort and fully isolated: it NEVER raises
+    (so a caller's committed write is unaffected) and is idempotent (a file a
+    concurrent sweep already removed just yields ``SFTPNoSuchFile``, ignored).
 
-    Args:
-        host:        registered host alias.
-        directory:   absolute remote directory to scan (non-recursive).
-        max_age_s:   only remove files older than this many seconds. Defaults
-                     to 1 hour, which is more than enough headroom over any
-                     realistic edit but small enough that a leftover from a
-                     legitimate concurrent edit will *not* be touched. Pass
-                     ``0`` to remove every match unconditionally.
-
-    Returns:
-        ``{"scanned": int, "removed": [str, ...], "skipped": [(str, str), ...]}``
-        — ``skipped`` entries carry a per-file reason (too young / remove
-        failed) so the caller can surface them.
+    Only files older than ``max_age_s`` are removed, so a tmp file from an
+    in-flight concurrent write is never touched. Matching uses the exact
+    :data:`_TMP_SUFFIX_RE` regex, not a loose glob.
     """
-    validate_remote_path(directory)
-    mgr = get_manager()
-    conn = await mgr.get_connection(host)
-    sftp = None
-    removed: list[str] = []
-    skipped: list[tuple[str, str]] = []
-    scanned = 0
+    removed: List[str] = []
     try:
-        sftp = await conn.start_sftp_client()
         entries = await sftp.readdir(directory)
-        now = time.time()
-        for e in entries:
-            name = e.filename
-            if not _TMP_SUFFIX_RE.search(name):
-                continue
-            scanned += 1
-            full = str(PurePosixPath(directory) / name)
-            mtime = getattr(e.attrs, "mtime", None)
-            if max_age_s > 0 and mtime is not None and (now - mtime) < max_age_s:
-                skipped.append((full, f"younger than {max_age_s}s"))
-                continue
-            try:
-                await sftp.remove(full)
-                removed.append(full)
-            except Exception as exc:
-                skipped.append((full, f"remove failed: {exc}"))
-    finally:
-        if sftp is not None:
-            try:
-                sftp.exit()
-                await sftp.wait_closed()
-            except Exception:  # pragma: no cover
-                pass
-        mgr.release_connection(host, conn)
-    return {"scanned": scanned, "removed": removed, "skipped": skipped}
+    except Exception:
+        logger.debug("orphan sweep: readdir(%s) failed", directory, exc_info=True)
+        return removed
+    ref = time.time() if now is None else now
+    for e in entries:
+        name = getattr(e, "filename", "")
+        if not _TMP_SUFFIX_RE.search(name):
+            continue
+        mtime = getattr(getattr(e, "attrs", None), "mtime", None)
+        if max_age_s > 0 and mtime is not None and (ref - mtime) < max_age_s:
+            continue
+        full = str(PurePosixPath(directory) / name)
+        try:
+            await sftp.remove(full)
+            removed.append(full)
+        except Exception:
+            # Idempotent: already gone (SFTPNoSuchFile) or perm error — skip.
+            pass
+    return removed
 
 
 async def remote_read(host: str, path: str, start: int = 1,
@@ -402,8 +411,9 @@ async def remote_patch(host: str, path: str, file_hash: str,
 
     new_full = "".join(new_lines)
 
-    # 6) Atomic write
-    await _atomic_write(host, path, new_full, encoding)
+    # 6) Atomic write (also opportunistically sweeps stale orphan tmp files
+    #    in the same directory, reusing the write's SFTP session).
+    swept = await _atomic_write(host, path, new_full, encoding)
 
     # 7) Read back and re-hash to confirm write integrity
     written = await _read_full(host, path, encoding)
@@ -421,4 +431,6 @@ async def remote_patch(host: str, path: str, file_hash: str,
     out: Dict[str, Any] = {"result": "ok", "file_hash": written_hash}
     if warnings:
         out["warnings"] = warnings
+    if swept:
+        out["swept"] = swept
     return out
