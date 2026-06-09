@@ -387,11 +387,11 @@ portal secret set GITHUB_TOKEN
 >
 > 撞了就用全名 `portal-mcp-server`，或调整 PATH 顺序。`uv tool install` 不会静默覆盖别人的二进制——文件已存在时会报错让你确认。
 
-### 凭据 agent（Linux systemd / macOS launchd）
+### 凭据 agent（Linux systemd / macOS launchd / Windows 计划任务）
 
-> **⚠️ 自动安装平台：Linux + macOS**（Windows 传输可用，走手动 run——见下）。`portal agent install` 按 OS 自动分派：**Linux** 装一对 **systemd 用户级单元**（`.socket` + `.service`，放 `~/.config/systemd/user/`，socket activation 拉起）；**macOS** 装一个 **launchd LaunchAgent**（`~/Library/LaunchAgents/com.tmytimidly.portal-credential-agent.plist`，run-and-keepalive——agent 自己 bind AF_UNIX socket，省掉 `launch_activate_socket` 的 ctypes 复杂度）。**Windows** 的 agent IPC 传输是**命名管道**（没有 AF_UNIX）且已可用——由 `windows-latest` CI job 端到端实测覆盖——可手动 `portal agent run --socket \\.\pipe\portal-mcp-server-credentials-<user>` 拉起（并把同名值写进 `PORTAL_CREDENTIAL_AGENT_SOCKET`）；只是开机自启的 **service** 自动安装还没接，所以 `portal agent install` 仍会打印一条可操作的提示。
+> **⚠️ 自动安装：Linux + macOS + Windows，全是 per-user**。`portal agent install` 按 OS 自动分派，三者都让 agent **以你的身份、在你的会话里**跑：**Linux** 装一对 **systemd 用户级单元**（`.socket` + `.service`，放 `~/.config/systemd/user/`，socket activation 拉起）；**macOS** 装一个 **launchd LaunchAgent**（`~/Library/LaunchAgents/com.tmytimidly.portal-credential-agent.plist`，run-and-keepalive——agent 自己 bind AF_UNIX socket，省掉 `launch_activate_socket` 的 ctypes 复杂度）；**Windows** 装一个 **per-user 登录计划任务**（Task Scheduler，**InteractiveToken** 主体——以你的身份、只在你登录时跑，**绝不以 SYSTEM**、不存密码；XML 里 `ExecutionTimeLimit=PT0S` 防 72h 被杀 + `RestartOnFailure` 近似 KeepAlive），IPC 走**命名管道**（没有 AF_UNIX）。Windows 的命名管道传输 + 计划任务 install 都由 `windows-latest` CI job 真机实测覆盖。
 >
-> 没有 agent 时的替代方案：用 `hosts.yaml` 的 `password_command` / `passphrase_command` / `sudo_password_command`，或 `secrets.yaml` 的 `command:` 字段，从系统密码管理器（Keychain、`pass`、`secret-tool`、`gopass`、1Password CLI 等）按需读取——见下文「[认证](#认证)」。MCP server 本身（`portal_shell` 等所有远端工具）在 Windows / macOS / Linux 都正常工作；只有这个**本机交互式无回显塞密码**的 agent 路径依赖 OS service manager（或 Windows 上手动 `portal agent run` 起命名管道 agent）。
+> 没有 agent（其它平台）时的替代方案：用 `hosts.yaml` 的 `password_command` / `passphrase_command` / `sudo_password_command`，或 `secrets.yaml` 的 `command:` 字段，从系统密码管理器（Keychain、`pass`、`secret-tool`、`gopass`、1Password CLI 等）按需读取——见下文「[认证](#认证)」。MCP server 本身（`portal_shell` 等所有远端工具）在 Windows / macOS / Linux 都正常工作。
 
 `portal ssh set` / `portal sudo set` / `portal secret set` 的无回显交互值不再塞进某个 MCP server 进程自己的内存，而是进入一个 per-user、systemd socket-activated 的**凭据 agent**（credential agent）。使用这些交互凭据命令前，先显式安装并启动用户级 socket：
 
@@ -697,7 +697,7 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 - **A、B、C 的交互入口共用一个 per-user agent socket**，但 agent 内部按 `ssh` / `sudo` / `secret` kind 分开 key 空间：A 的密码进 `asyncssh.connect()` 做 SSH 握手，B 的密码在握手后喂 `sudo -S`，C/D 作为环境变量注入命令。
 - **A 的回落顺序**：`auth: password` 主动登录走 `cache（portal ssh set）→ password_command → 错误`；纯密钥 host 在 asyncssh 抛 `PermissionDenied` 时自动 retry 一次密码路径（同一条 chain），有 cache 或 `password_command` 才 retry，否则原异常透传——免得"配置缺失"的报错盖掉"密钥真不对"的真因。
 - **交互入口（getpass 派）= per-user agent 内存 TTL 缓存**：默认 900 秒、TTL 内可复用、到期自动清、agent 重启即丢、从不落盘。**命令源（密码管理器派）= 每次现取**，无 TTL。
-- **明文永不离开 agent 内存**：CLI 故意没有 `show plaintext` 动词；`portal {ssh,sudo,secret} show <key>` 只回 sha256[:16] 指纹 + 剩余 TTL，`list` 汇总，`confirm` 二次输入比对。明文只交给同 uid 的真消费者（asyncssh / `sudo -S` / `$env` 注入）。完整 rationale 见上文 [凭据 agent](#凭据-agentlinux-systemd--macos-launchd) 段。
+- **明文永不离开 agent 内存**：CLI 故意没有 `show plaintext` 动词；`portal {ssh,sudo,secret} show <key>` 只回 sha256[:16] 指纹 + 剩余 TTL，`list` 汇总，`confirm` 二次输入比对。明文只交给同 uid 的真消费者（asyncssh / `sudo -S` / `$env` 注入）。完整 rationale 见上文 [凭据 agent](#凭据-agentlinux-systemd--macos-launchd--windows-计划任务) 段。
 
 #### 四套凭据机制：实现与为什么
 
