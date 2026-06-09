@@ -1,8 +1,8 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 17 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
-shell(+close_shell)/exec core + local_exec + host/transfer/tunnel(open,close,
-list)/ping/audit/check.
+Exposes 15 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+shell(+close_shell)/exec core + local_exec + host/transfer/tunnel/ping/
+audit/check.
 """
 import asyncio
 import json
@@ -437,80 +437,83 @@ async def portal_transfer(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 3. SSH TUNNELS  (portal_tunnel_open / close / list)
+# 3. SSH TUNNELS  (portal_tunnel — action=open|close|list)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_tunnel_open(mode: Literal["local", "reverse", "socks"], host: str,
-                              local_port: int = 0, local_bind: str = "127.0.0.1",
-                              remote_host: str = "", remote_port: int = 0) -> str:
-    """Open an SSH tunnel through `host`.
+async def portal_tunnel(action: Literal["open", "close", "list"],
+                        kind: Literal["local", "reverse", "socks"] = "local",
+                        host: str = "", tunnel_id: str = "",
+                        local_port: int = 0, local_bind: str = "127.0.0.1",
+                        remote_host: str = "", remote_port: int = 0) -> str:
+    """Manage SSH tunnels — a single entry point (like portal_host) where
+    `action` selects the operation and the other args parameterise it.
 
-    ## Modes
-    - mode="local": forward localhost:local_port → remote_host:remote_port via host.
-        Required: local_port (0 = auto-assign), remote_host, remote_port.
-        Example: portal_tunnel_open(mode="local", host="bastion",
-                                     local_port=5432, remote_host="db.internal",
-                                     remote_port=5432)
-    - mode="reverse": expose local_bind:local_port to host as host:remote_port.
-        Required: remote_port, local_bind, local_port.
-        Example: portal_tunnel_open(mode="reverse", host="bastion",
-                                     remote_port=8080, local_bind="127.0.0.1",
-                                     local_port=3000)
-    - mode="socks": SOCKS5 proxy on localhost:local_port via host.
-        Required: local_port (default 1080).
-        Example: portal_tunnel_open(mode="socks", host="bastion", local_port=1080)
+    ## Actions
+    - action="open": open a tunnel through `host`. `kind` picks the type:
+        - kind="local"  : forward localhost:local_port → remote_host:remote_port
+            via host. Required: remote_host, remote_port (local_port 0 = auto).
+            Example: portal_tunnel(action="open", kind="local", host="bastion",
+                                   local_port=5432, remote_host="db.internal",
+                                   remote_port=5432)
+        - kind="reverse": expose local_bind:local_port to host as host:remote_port.
+            Required: remote_port, local_bind, local_port.
+            Example: portal_tunnel(action="open", kind="reverse", host="bastion",
+                                   remote_port=8080, local_bind="127.0.0.1",
+                                   local_port=3000)
+        - kind="socks"  : SOCKS5 proxy on localhost:local_port via host.
+            Required: local_port (default 1080).
+            Example: portal_tunnel(action="open", kind="socks", host="bastion",
+                                   local_port=1080)
+      Returns {tunnel_id, type, host, local, remote}.
+    - action="close": close a live tunnel. Required: tunnel_id (from open).
+        Example: portal_tunnel(action="close", tunnel_id="ab12cd34")
+    - action="list": list all active tunnels (JSON array).
 
-    Returns: {tunnel_id, type, host, local, remote}. Use portal_tunnel_close
-    with the tunnel_id to close. portal_tunnel_list shows all active tunnels.
-    """
-    err = _gate(host)
-    if err:
-        raise ToolError(f"BLOCKED: {err}")
-    tm = get_tunnel_manager()
-    if mode == "local":
-        result = await tm.open_local_forward(host, local_port,
-                                              remote_host, remote_port, local_bind)
-    elif mode == "reverse":
-        result = await tm.open_remote_forward(host, remote_port,
-                                               local_bind, local_port)
-    elif mode == "socks":
-        result = await tm.open_dynamic_proxy(host,
-                                              local_port or 1080, local_bind)
-    else:
-        raise ToolError(f'unknown mode {mode!r}. Valid: local, reverse, socks.')
-    audit_log(host, f"tunnel:{mode}", "ok", operation="tunnel_open")
-    return json.dumps(result, indent=2)
-
-
-@mcp.tool()
-async def portal_tunnel_close(tunnel_id: str) -> str:
-    """Close an active SSH tunnel by ID.
-
-    Args:
-        tunnel_id: ID returned by portal_tunnel_open.
+    Tunnels are a resource you manage explicitly (open → close), so `list`
+    lives here rather than in portal_audit.
     """
     tm = get_tunnel_manager()
-    # Look up the originating host so we can run it through the security
-    # gate (consistent with portal_tunnel_open). Without this gate an
-    # agent that lost host access could still dismantle live tunnels.
-    host = next((t["host"] for t in tm.list_tunnels()
-                 if t["tunnel_id"] == tunnel_id), None)
-    if host is None:
-        raise ToolError(f"Tunnel '{tunnel_id}' not found")
-    err = _gate(host)
-    if err:
-        raise ToolError(f"BLOCKED: {err}")
-    result = await tm.close_tunnel(tunnel_id)
-    audit_log("tunnel", f"close:{tunnel_id}", "ok", operation="tunnel_close")
-    return result
 
+    if action == "list":
+        tunnels = tm.list_tunnels()
+        return json.dumps(tunnels, indent=2) if tunnels else "No active tunnels."
 
-@mcp.tool()
-def portal_tunnel_list() -> str:
-    """List all currently active SSH tunnels (returns JSON array)."""
-    tunnels = get_tunnel_manager().list_tunnels()
-    return json.dumps(tunnels, indent=2) if tunnels else "No active tunnels."
+    if action == "open":
+        if not host:
+            raise ToolError('action="open" requires `host`.')
+        err = _gate(host)
+        if err:
+            raise ToolError(f"BLOCKED: {err}")
+        if kind == "local":
+            result = await tm.open_local_forward(host, local_port,
+                                                 remote_host, remote_port, local_bind)
+        elif kind == "reverse":
+            result = await tm.open_remote_forward(host, remote_port,
+                                                  local_bind, local_port)
+        else:  # socks (Literal guarantees one of the three)
+            result = await tm.open_dynamic_proxy(host, local_port or 1080, local_bind)
+        audit_log(host, f"tunnel:{kind}", "ok", operation="tunnel_open")
+        return json.dumps(result, indent=2)
+
+    if action == "close":
+        if not tunnel_id:
+            raise ToolError('action="close" requires `tunnel_id`.')
+        # Look up the originating host so we can run it through the security
+        # gate (consistent with action="open"). Without this gate an agent
+        # that lost host access could still dismantle live tunnels.
+        owner = next((t["host"] for t in tm.list_tunnels()
+                      if t["tunnel_id"] == tunnel_id), None)
+        if owner is None:
+            raise ToolError(f"Tunnel '{tunnel_id}' not found")
+        err = _gate(owner)
+        if err:
+            raise ToolError(f"BLOCKED: {err}")
+        result = await tm.close_tunnel(tunnel_id)
+        audit_log("tunnel", f"close:{tunnel_id}", "ok", operation="tunnel_close")
+        return result
+
+    raise ToolError(f'unknown action {action!r}. Valid: open, close, list.')
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -603,20 +606,29 @@ def portal_check(host: str, command: str = "") -> str:
 def portal_audit(view: Literal["snapshot", "server", "sessions",
                                "history", "stats", "policy"] = "snapshot",
                   limit: int = 50, host_filter: str = "") -> str:
-    """Inspect MCP server internal state and audit log.
+    """Inspect MCP server internal state and the audit log — the read-only
+    introspection hub for *plumbing* (the connection pool, persistent bash
+    sessions) and *history* (audit log, stats, policy).
+
+    Note the "resource vs plumbing" split: things the agent manages explicitly
+    (registered hosts, open tunnels) are listed by their own resource tools —
+    portal_host(action="list") and portal_tunnel(action="list") — NOT here.
+    portal_audit only surfaces server-internal plumbing the agent never
+    explicitly creates.
 
     ## Views
-    - view="snapshot" (default): full state — registered hosts, connection pool,
-        bash sessions, active tunnels, audit aggregate stats, security policy
-        summary, AND a `server` block (version, pid, uptime, transport,
-        resolved config paths). Use this when you want everything at once.
+    - view="snapshot" (default): server metadata + connection pool + bash
+        sessions + audit stats + security policy summary. Use this for an
+        all-at-once diagnostic. (Hosts and tunnels are intentionally absent —
+        see the note above.)
     - view="server": just the server-level metadata (version, python_version,
         pid, started_at, uptime_s, transport, resolved config paths). Cheap;
         use this when you only need to know "which version am I talking to?"
         without pulling the full snapshot.
     - view="sessions": the `host → session_id` map of cached persistent bash
-        sessions (what portal_shell reuses per host). Cheap; use it to see which
-        hosts currently have a warm `bash -i` whose cwd/env survive across calls.
+        sessions (what portal_shell reuses per host). This is plumbing
+        diagnostics — the sessions are implicit, which is why they live in
+        portal_audit rather than carrying their own list like tunnels/hosts.
     - view="history": last `limit` audit log entries (default 50). Optional `host_filter`.
         Example: portal_audit(view="history", limit=20, host_filter="web01")
     - view="stats": aggregate audit stats (counts by operation, error rate, etc.).
@@ -646,13 +658,13 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
         }, indent=2)
     if view == "snapshot":
         mgr = get_manager()
+        # Resource lists (hosts, tunnels) live in their own tools
+        # (portal_host / portal_tunnel action="list"); the snapshot carries
+        # only server-internal plumbing + audit/policy state.
         snap = {
             "server": server_info(),
-            "registered_hosts": len(mgr._registry),
-            "hosts": mgr.list_hosts(),
             "connection_pool": mgr.pool_status(),
             "bash_sessions": _re_bash_status(),
-            "active_tunnels": get_tunnel_manager().list_tunnels(),
             "audit_stats": get_audit_stats(),
             "security": {
                 "host_allowlist_count": len(get_policy().host_allowlist),

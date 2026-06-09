@@ -100,7 +100,7 @@ def _make_hostconfig(name: str):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 2. portal_tunnel_close now goes through _gate
+# 2. portal_tunnel(action="close") now goes through _gate
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestPortalTunnelCloseGate:
@@ -129,7 +129,7 @@ class TestPortalTunnelCloseGate:
         )
 
         with pytest.raises(ToolError, match="BLOCKED:"):
-            await cli.portal_tunnel_close("t1")
+            await cli.portal_tunnel(action="close", tunnel_id="t1")
         # Tunnel still alive after blocked close.
         assert "t1" in tm._tunnels
 
