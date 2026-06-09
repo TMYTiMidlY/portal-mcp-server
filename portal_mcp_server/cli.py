@@ -246,19 +246,23 @@ def _gate_many(hosts: list[str], command: str = "") -> str | None:
 
 
 def _sudo_missing_message(host: str) -> str:
-    """Friendly error when no sudo password is available for ``host``."""
+    """Friendly error when no sudo password is available for ``host``.
+
+    Names BOTH ways to provide one so the agent can guide the user precisely.
+    """
     return (
-        "No sudo password available for this host; the command "
-        "was NOT run. Ask the user to provide it out-of-band: "
-        "prefer an interactive input/choice tool (e.g. ask_user) "
-        "to request that they run "
-        f"`portal sudo set {host}` in a separate "
-        "terminal and confirm when done, then retry this call. If "
-        "you have no such tool, tell the user what to run and end "
-        "your turn to wait for their next message. (Alternatively "
-        "an operator can set `sudo_password_command` for the host "
-        "in hosts.yaml.) Never ask the user to paste the password "
-        "into this conversation."
+        f"No sudo password available for host '{host}'; the command was NOT "
+        "run. Ask the user to provide it out-of-band — never have them paste a "
+        "password into this conversation. Two ways:\n"
+        f"  • Temporary (no-echo, cached with a TTL): run `portal sudo set "
+        f"{host}` in a separate terminal, type the password at the hidden "
+        "prompt, then retry this call.\n"
+        f"  • Permanent (from a password manager): set `sudo_password_command` "
+        f"for '{host}' in hosts.yaml to a command that prints the password "
+        f"(e.g. `pass show sudo/{host}`).\n"
+        "Prefer an interactive input tool (e.g. ask_user) to ask the user to "
+        "run the first command and confirm when done; if you have no such "
+        "tool, tell them what to run and end your turn to wait."
     )
 
 
@@ -893,6 +897,12 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     Need cwd/export to persist across calls? Use portal_shell instead (single
     host, stateful). Got a long task to background and poll? Use portal_job.
 
+    ★ sudo / privileged execution: whenever the user wants to run ANYTHING as
+    root / with sudo on a remote host, you MUST use this tool with
+    use_sudo=True — do NOT put a bare `sudo ...` in a plain command or in
+    portal_shell (there is no TTY and the password can't be fed). For a
+    privileged command on the server's OWN machine, use portal_local_exec.
+
     Targets (pick one):
       - host="web01"               : a single host.
       - host=["web01","web02"]     : an explicit list of hosts.
@@ -917,11 +927,14 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     request window alive (JSON-RPC -32001), independent of `timeout`.
 
     use_sudo: run via `sudo -S`, feeding a password obtained out-of-band (NEVER
-        passed by the agent) — from the per-user credential agent populated by
-        `portal sudo set <host>`, or the host's `sudo_password_command` in
-        hosts.yaml. Resolved per host. The command's own stdin is consumed by
-        the password (curl/CLI flag-reading tools are unaffected; tools that
-        read stdin themselves are not supported under sudo).
+        passed by the agent). Sources, in order: the per-user credential agent
+        populated by `portal sudo set <host>` (temporary, no-echo, cached with a
+        TTL), or the host's `sudo_password_command` in hosts.yaml (permanent,
+        e.g. from a password manager). Resolved per host. If none is available
+        the command is refused with guidance on both options. The command's own
+        stdin is consumed by the password (curl/CLI flag-reading tools are
+        unaffected; tools that read stdin themselves are not supported under
+        sudo).
 
     secrets: a list of named secrets (e.g. ["github_token"]) injected as env
         vars for the run. You pass the NAME, never the value: the server
@@ -933,6 +946,11 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
         forces history in non-interactive bash, a secret could land in
         ~/.bash_history — the same caveat applies to ssh/ansible/CI; see the
         README security section.)
+
+    ★ High-risk reporting: when use_sudo or secrets is used the result carries
+    "high_risk": true and a "high_risk_note". This is a privileged / credentialed
+    action — briefly tell the user you ran it with their stored sudo password /
+    secret, or only do so with their explicit prior permission.
     """
     # ── Resolve target hosts (host str | host list | group_tag) ──
     if group_tag:
@@ -991,6 +1009,13 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
             res = await _re_exec_env(h, cmd, secret_env, timeout=timeout)
             res["stdout"] = secrets_store.redact(res.get("stdout", ""), secret_values)
             res["stderr"] = secrets_store.redact(res.get("stderr", ""), secret_values)
+            res["high_risk"] = True
+            res["high_risk_note"] = (
+                f"Injected stored/cached secret(s) [{','.join(secrets)}] into a "
+                f"command on {h!r}. Briefly tell the user you ran a command with "
+                "their configured credential (or only do so with their explicit "
+                "permission)."
+            )
             audit_log(h, cmd + secret_label, res.get("exit_code", "?"),
                       operation="exec_secrets")
             return res
@@ -1003,6 +1028,12 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
                             "error": "no sudo password available"}
                 raise ToolError(_sudo_missing_message(h))
             res = await _re_sudo_exec(h, cmd, password, timeout=timeout)
+            res["high_risk"] = True
+            res["high_risk_note"] = (
+                f"Ran a privileged sudo command on {h!r} using the user's "
+                "stored/cached sudo password. Briefly tell the user you did this "
+                "(or only do so with their explicit permission)."
+            )
             audit_log(h, "sudo: " + cmd, res.get("exit_code", "?"),
                       operation="exec_sudo")
             return res
@@ -1078,6 +1109,11 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
 
     Use this to run a local command/script that needs an API token without the
     token ever entering this conversation or being sent to the model backend.
+
+    ★ High-risk reporting: when secrets is used the result carries
+    "high_risk": true and a "high_risk_note" — briefly tell the user you ran a
+    local command with their stored credential, or only do so with their
+    explicit prior permission.
     """
     if os.environ.get("PORTAL_ALLOW_LOCAL_EXEC", "").lower() not in (
         "1", "true", "yes", "on",
@@ -1098,6 +1134,13 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     res = await _await_with_heartbeat(
         _local_exec_env(command, env, timeout=timeout), ctx)
     res["output"] = secrets_store.redact(res.get("output", ""), values)
+    if secrets:
+        res["high_risk"] = True
+        res["high_risk_note"] = (
+            f"Ran a LOCAL command on the server using stored/cached secret(s) "
+            f"[{','.join(secrets)}]. Briefly tell the user you did this (or only "
+            "do so with their explicit permission)."
+        )
     suffix = f"  [secrets: {','.join(secrets)}]" if secrets else ""
     audit_log("<local>", command + suffix, res.get("exit_code", "?"),
               operation="local_exec")
@@ -1292,6 +1335,45 @@ def _agent_path_or_exit(path_func):
     sys.exit(1)
 
 
+def _ensure_agent_for_write(path_func):
+    """Resolve the agent socket for a credential WRITE (set / confirm).
+
+    Unlike _agent_path_or_exit (which bails), if the agent isn't installed/
+    running yet this AUTO-INSTALLS it (equivalent to `portal agent install
+    --now`), prints what it did (the full install output), and continues — so
+    the user only ever runs `portal sudo set <host>` once. The password prompt
+    happens after this returns.
+    """
+    try:
+        path = path_func()
+    except RuntimeError as e:
+        # Can't even resolve a socket path (e.g. unsupported platform).
+        print(f"{e}\n\n{_agent_missing_message()}", file=sys.stderr)
+        sys.exit(1)
+    if path.exists():
+        return path
+    print("Credential agent is not running yet — installing and starting it "
+          "now (this is the same as `portal agent install --now`):\n")
+    from .credential_agent import install_agent
+    from .paths import credential_agent_platform
+    try:
+        res = install_agent(socket_path=None, enable_now=True)
+    except RuntimeError as e:        # unsupported platform
+        print(f"Auto-install not possible: {e}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"Auto-install failed: {e}\n\n{_agent_missing_message()}",
+              file=sys.stderr)
+        sys.exit(1)
+    _print_install_result(credential_agent_platform(), res, enable_now=True)
+    path = path_func()
+    if not path.exists():
+        print("\nNote: the agent was installed but its socket isn't visible "
+              "yet; if the next step fails, retry in a moment.", file=sys.stderr)
+    print()  # blank line before the (hidden) password prompt
+    return path
+
+
 def _kind_key_noun(kind: str) -> str:
     """User-facing label for the credential kind's key argument."""
     return {"ssh": "host", "sudo": "host", "secret": "name"}[kind]
@@ -1323,8 +1405,40 @@ def _format_ttl(seconds: int) -> str:
 
 # ── portal agent ─────────────────────────────────────────────────────
 
+def _print_install_result(backend: str, res: dict, *, enable_now: bool) -> None:
+    """Print what ``install_agent`` did. Shared by ``portal agent install`` and
+    the auto-install triggered on the first ``portal <kind> set``."""
+    from .credential_agent import SOCKET_UNIT, LAUNCHD_LABEL
+    if backend == "systemd":
+        print("Installed portal credential agent user units:")
+        print(f"  socket unit:   {res['socket_unit']}")
+        print(f"  service unit:  {res['service_unit']}")
+        print(f"  config:        {res['config_path']}")
+        print(f"  recorded path: {res['socket_path']}")
+        if not enable_now:
+            print(f"Enable it with: systemctl --user enable --now {SOCKET_UNIT}")
+    elif backend == "launchd":
+        print("Installed portal credential agent LaunchAgent:")
+        print(f"  plist:         {res['plist']}")
+        print(f"  config:        {res['config_path']}")
+        print(f"  recorded path: {res['socket_path']}")
+        if not enable_now:
+            print(f"Load it with: launchctl load -w "
+                  f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
+    else:  # schtasks (Windows per-user logon task)
+        print("Installed portal credential agent scheduled task (per-user):")
+        print(f"  task name:     {res['task_name']}")
+        print(f"  task xml:      {res['task_xml']}")
+        print(f"  config:        {res['config_path']}")
+        print(f"  recorded pipe: {res['socket_path']}")
+        print("  (runs as you, in your session, at logon — never as SYSTEM)")
+        if not enable_now:
+            print(f"Start it now with: schtasks /Run /TN {res['task_name']}"
+                  f"  (or just log out and back in)")
+
+
 def _agent_install_cli(args) -> int:
-    from .credential_agent import install_agent, SOCKET_UNIT, LAUNCHD_LABEL
+    from .credential_agent import install_agent
     from .paths import credential_agent_platform
     backend = credential_agent_platform()
     try:
@@ -1336,32 +1450,7 @@ def _agent_install_cli(args) -> int:
     except Exception as e:
         print(f"Failed to install credential agent: {e}", file=sys.stderr)
         return 1
-    if backend == "systemd":
-        print("Installed portal credential agent user units:")
-        print(f"  socket unit:   {res['socket_unit']}")
-        print(f"  service unit:  {res['service_unit']}")
-        print(f"  config:        {res['config_path']}")
-        print(f"  recorded path: {res['socket_path']}")
-        if not args.now:
-            print(f"Enable it with: systemctl --user enable --now {SOCKET_UNIT}")
-    elif backend == "launchd":
-        print("Installed portal credential agent LaunchAgent:")
-        print(f"  plist:         {res['plist']}")
-        print(f"  config:        {res['config_path']}")
-        print(f"  recorded path: {res['socket_path']}")
-        if not args.now:
-            print(f"Load it with: launchctl load -w "
-                  f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
-    else:  # schtasks (Windows per-user logon task)
-        print("Installed portal credential agent scheduled task (per-user):")
-        print(f"  task name:     {res['task_name']}")
-        print(f"  task xml:      {res['task_xml']}")
-        print(f"  config:        {res['config_path']}")
-        print(f"  recorded pipe: {res['socket_path']}")
-        print("  (runs as you, in your session, at logon — never as SYSTEM)")
-        if not args.now:
-            print(f"Start it now with: schtasks /Run /TN {res['task_name']}"
-                  f"  (or just log out and back in)")
+    _print_install_result(backend, res, enable_now=args.now)
     return 0
 
 
@@ -1508,7 +1597,7 @@ def _kind_set_cli(args) -> int:
     import getpass
     from . import credential_agent
     from .paths import credential_agent_socket_path
-    _agent_path_or_exit(credential_agent_socket_path)
+    _ensure_agent_for_write(credential_agent_socket_path)
     prompt = _kind_prompt(args.kind, args.key)
     value = getpass.getpass(prompt)
     if not value:
@@ -1531,7 +1620,7 @@ def _kind_confirm_cli(args) -> int:
     import getpass
     from . import credential_agent
     from .paths import credential_agent_socket_path
-    _agent_path_or_exit(credential_agent_socket_path)
+    _ensure_agent_for_write(credential_agent_socket_path)
     prompt = _kind_prompt(args.kind, args.key)
     first = getpass.getpass(prompt)
     if not first:
