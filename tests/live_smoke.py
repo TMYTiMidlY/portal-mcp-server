@@ -137,7 +137,7 @@ async def main() -> int:
             if not arr or arr[0].get("exit_code") != 0:
                 failures.append(f"portal_exec uptime did not succeed: {out}")
             else:
-                print(f"  ✓ portal_exec uptime OK on live-smoke")
+                print("  ✓ portal_exec uptime OK on live-smoke")
         except json.JSONDecodeError:
             failures.append(f"portal_exec output not JSON: {out}")
 
@@ -176,7 +176,7 @@ async def main() -> int:
         if "session-ok" not in out:
             failures.append(f"portal_shell allowed cmd failed: {out}")
         else:
-            print(f"  ✓ portal_shell allowed cmd ran in persistent session")
+            print("  ✓ portal_shell allowed cmd ran in persistent session")
         await cli.portal_close_shell("live-smoke")
 
         # Reset policy back to permissive defaults so step 4 isn't blocked.
@@ -233,7 +233,7 @@ async def main() -> int:
         if "LINE-2-PATCHED" not in body:
             failures.append(f"patched content not visible: body={body!r}")
         else:
-            print(f"  ✓ patched content visible via portal_shell")
+            print("  ✓ patched content visible via portal_shell")
 
         # 4e. patch with stale hash MUST be refused (hash conflict path)
         out = await cli.portal_patch("live-smoke", target,
