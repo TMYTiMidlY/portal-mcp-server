@@ -65,7 +65,7 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 - **Same speed on Windows**: no dependency on OpenSSH `ControlMaster`; the pool is plain Python objects, so the three major OSes get identical reuse performance.
 - **Persistent bash sessions**: `portal_shell` keeps a `bash -i` per host with cwd / env preserved across calls — the agent doesn't have to rebuild context every command.
 - **Hash-protected remote edits**: `portal_read` + `portal_patch` use whole-file SHA-256 plus per-range hashes, write through tmp + `posix_rename` (atomic), then re-hash on disk to refuse stale or concurrent overwrites.
-- **Agent-first tool budget**: 14 tools instead of the upstream's 57; the tool-list context drops from ~7.5k tokens to ~2.5k, and `mode` parameters collapse semantically overlapping entries.
+- **Agent-first tool budget**: 14 tools instead of the upstream's 57, with `mode` parameters collapsing semantically overlapping entries so the agent has fewer look-alike tools to choose between. The 14 tools' schemas (name + description + inputSchema) currently total **~8k tokens** (≈ **4%** of a 200k context window; `tiktoken o200k_base` estimate).
 - **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default.
 - **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
 - **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
@@ -281,7 +281,7 @@ The upstream `ssh-shell-mcp` exposes one tool per ergonomic — `ssh_run` / `ssh
 | **New** | `portal_job` (background submit/poll/cancel/list, giving the agent the ability to think + interrupt mid-task) |
 | **Deleted / absorbed** | `multi_exec`→`portal_exec` flags; `playbook`→`portal_exec(commands=[…])`; `ping`→`portal_exec(host=[…], command="echo pong")`; `cleanup_tmps`→folded into `portal_patch`; the upstream exec-family 5 / multi-session 6 / sysinfo 7 / process-management 5 / tmux 4 are all covered by `portal_shell`/`portal_exec` |
 
-Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no longer has to disambiguate between semantically overlapping tools. All dispatch parameters (`action`/`view`/`output_mode`/...) are annotated with `typing.Literal`, so the schema carries `enum` and clients can validate.
+Result: the agent no longer has to disambiguate between semantically overlapping tools. All dispatch parameters (`action`/`view`/`output_mode`/...) are annotated with `typing.Literal`, so the schema carries `enum` and clients can validate. **Tool-schema context footprint**: the 14 tools' name + description + inputSchema total **~8k tokens** (`tiktoken o200k_base` estimate, ≈ **4%** of a 200k context window; the descriptions carry sudo / secrets / safety-convention guardrail prose, so they run thick).
 
 ### In-process connection pool
 

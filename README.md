@@ -59,7 +59,7 @@
 - **Windows 上同样快**：不依赖 OpenSSH `ControlMaster`，连接池是纯 Python 对象，三大平台获得一致的复用性能。
 - **持久 bash 会话**：`portal_shell` 为每台 host 维护一个 `bash -i`，cwd / env 跨调用保留；agent 不需要每条命令重建上下文。
 - **hash 保护的远端编辑**：`portal_read` + `portal_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
-- **agent-first 工具数量**：把上游 57 个工具收敛到 14 个，tool-list context 从 ~7.5k tokens 降到 ~2.5k；`mode` 字段合并语义重复的入口。
+- **agent-first 工具数量**：把上游 57 个工具收敛到 14 个，`mode` 字段合并语义重复的入口，减少 agent 选工具的歧义。当前 14 个工具的 schema（name + description + inputSchema）约占 **~8k tokens**（≈ 200k 上下文窗口的 **~4%**；`tiktoken o200k_base` 估算）。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
@@ -273,7 +273,7 @@ Anthropic 的 [_Writing Tools for Agents_](https://www.anthropic.com/engineering
 | **新增** | — | `portal_job`（后台 submit/poll/cancel/list，给 agent 中途思考+中断的能力） |
 | **删/吸收** | — | `multi_exec`→`portal_exec` flag；`playbook`→`portal_exec(commands=[…])`；`ping`→`portal_exec(host=[…], command="echo pong")`；`cleanup_tmps`→折进 `portal_patch`；上游命令执行族 5 / 多 session 族 6 / 系统检查族 7 / 进程管理 5 / tmux 4 全由 `portal_shell`/`portal_exec` 覆盖 |
 
-收益：context 从 ~7.5k tokens 降到 ~2.5k；agent 不再需要在多个语义重复的工具里选择。所有派发参数（`action`/`view`/`output_mode`/...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验。
+收益：agent 不再需要在多个语义重复的工具里选择。所有派发参数（`action`/`view`/`output_mode`/...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验。**工具 schema 上下文占用**：14 个工具的 name + description + inputSchema 合计约 **~8k tokens**（`tiktoken o200k_base` 估算，约为 200k 上下文窗口的 **4%**；descriptions 含 sudo / secrets / 安全约定等护栏文案，故偏厚）。
 
 
 ### 进程内连接池

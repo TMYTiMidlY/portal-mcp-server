@@ -174,8 +174,8 @@ async def _await_with_heartbeat(coro, ctx: "Context | None",
 
     Unlike portal_transfer, a remote command produces no output until it
     finishes, so a slow command would leave the client hearing nothing. Many
-    clients abort a silent request after a fixed idle window (JSON-RPC
-    ``-32001`` request timeout) even though the server-side ``timeout`` is far
+    clients abort a silent request after a fixed idle window even though the
+    server-side ``timeout`` is far
     higher — and the remote command keeps running, so the result is simply
     lost. Each progress notification resets that window; the value is just a
     monotonic liveness tick (``total`` left indeterminate). No-op when ``ctx``
@@ -429,8 +429,7 @@ async def portal_transfer(
         paths_json: JSON array of {"local": ..., "remote": ...} objects, required
             by the upload-list / download-list modes (ignored otherwise).
 
-    Progress is reported to the MCP client during transfers, which also keeps
-    the connection alive so large files don't trip client idle timeouts.
+    Progress is reported to the MCP client during transfers.
 
     Returns a JSON status dict. Single-file: {status, direction, host, bytes,
     duration_s, ...}. sync/mirror/upload-list/download-list: {status,
@@ -860,10 +859,8 @@ async def portal_shell(host: str, command: str, timeout: float = 3600.0,
       - Output is the combined stdout/stderr stream (a PTY merges them — use
         portal_exec when you need them split). Returns {host, session_id,
         command, exit_code, output, duration_s}.
-      - While the command runs, periodic MCP progress notifications are emitted
-        as a keepalive so long, output-silent commands don't trip the client's
-        request-timeout window (JSON-RPC -32001). The server-side `timeout`
-        below is independent of that client window.
+      - Long, silent commands are fine: the call is held open until the command
+        exits or `timeout` (below) elapses.
       - sudo / secret injection are NOT available here (both are one-shot by
         nature) — use portal_exec(use_sudo=True / secrets=[...]).
 
@@ -935,8 +932,8 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     per host (a multi-command host carries {host, results:[...]}). stdout and
     stderr are kept SEPARATE (unlike portal_shell, whose PTY merges them).
 
-    While commands run, periodic MCP progress notifications keep the client's
-    request window alive (JSON-RPC -32001), independent of `timeout`.
+    Long, silent commands are fine: the call is held open until the command
+    finishes or `timeout` elapses.
 
     use_sudo: run via `sudo -S`, feeding a password obtained out-of-band (NEVER
         passed by the agent). Sources, in order: the per-user credential agent
@@ -1106,26 +1103,21 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     only for tasks that genuinely belong on this host (e.g. a local script that
     needs a local secret); anything on a remote host goes through portal_exec.
 
-    secrets: a list of named secrets (e.g. ["github_token"]). You pass the NAME,
-        never the value: the server resolves each from secrets.yaml or the
-        `portal secret set` cache and exports it as the uppercased env var (github_token
-        → $GITHUB_TOKEN) into the child process environment (never on argv/audit).
-        Reference it in `command` as `$GITHUB_TOKEN`. Any echo of the value in the
-        output is redacted to ***.
+    secrets: same name-not-value semantics as portal_exec (pass the NAME only,
+        resolved from secrets.yaml / the `portal secret set` cache, never on
+        argv/audit, output redacted to ***) — but injected into the LOCAL child
+        process env. Reference it in `command` as `$GITHUB_TOKEN` (github_token
+        → $GITHUB_TOKEN).
 
-    timeout: seconds before the local command is killed (server-side). Like
-        portal_exec, this is independent of the client's request-timeout
-        window; periodic MCP progress notifications are emitted while the
-        command runs as a keepalive so long, output-silent commands don't trip
-        that window (JSON-RPC -32001).
+    timeout: seconds before the local command is killed (server-side); the call
+        is held open until the command exits or this elapses.
 
     Use this to run a local command/script that needs an API token without the
     token ever entering this conversation or being sent to the model backend.
 
-    ★ High-risk reporting: when secrets is used the result carries
-    "high_risk": true and a "high_risk_note" — briefly tell the user you ran a
-    local command with their stored credential, or only do so with their
-    explicit prior permission.
+    ★ High-risk reporting: same as portal_exec — secrets makes the result carry
+    "high_risk": true; tell the user you ran a local command with their stored
+    credential, or only do so with their explicit prior permission.
     """
     if os.environ.get("PORTAL_ALLOW_LOCAL_EXEC", "").lower() not in (
         "1", "true", "yes", "on",
