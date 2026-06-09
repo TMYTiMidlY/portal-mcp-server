@@ -33,11 +33,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 import time
 from typing import Dict
 
 from .session_manager import SessionDead, get_session_manager
+from .safety import strip_ansi
 
 logger = logging.getLogger("portal_mcp.remote_bash")
 
@@ -51,22 +51,15 @@ _HOST_LOCKS: Dict[str, asyncio.Lock] = {}
 def _lock_for(host: str) -> asyncio.Lock:
     return _HOST_LOCKS.setdefault(host, asyncio.Lock())
 
-# ADR — why hand-rolled ANSI stripping (no asyncssh/stdlib helper): the stdlib
-# has no ANSI/CSI stripper, and the persistent session must run `bash -i` under
-# a PTY (interactive semantics) which emits CSI/OSC + bracketed-paste markers
-# even with `stty -echo`. The one-shot exec path (portal_exec) uses conn.run
-# WITHOUT a PTY and needs none of this. NOTE: session_manager._strip_ansi does a
-# first, narrower pass (CSI ending in mGKHF only); this is the broader catch-all
-# (any CSI + OSC, incl. ?2004 bracketed-paste). Folding the two into one shared
-# stripper is a worthwhile future cleanup — kept separate for now to avoid
-# disturbing the interactive-output parsing.
-# Match all CSI escape sequences (covers bracketed-paste ?2004l/h, colors, cursor moves)
-_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_ANSI_OSC = re.compile(r"\x1b\][^\x07]*\x07")
+# ANSI / CSI / OSC stripping lives in safety.strip_ansi (single source of truth,
+# shared with session_manager so the two passes can't drift apart). It is needed
+# because the persistent session runs `bash -i` under a PTY which emits CSI/OSC +
+# bracketed-paste markers even with `stty -echo`; the one-shot exec path uses
+# conn.run WITHOUT a PTY and needs none of this.
 
 
 def _clean(output: str) -> str:
-    text = _ANSI_OSC.sub("", _ANSI_CSI.sub("", output))
+    text = strip_ansi(output)
     # Drop leading/trailing blank lines; collapse runs of >1 blank line in the middle
     lines = text.splitlines()
     while lines and not lines[0].strip():

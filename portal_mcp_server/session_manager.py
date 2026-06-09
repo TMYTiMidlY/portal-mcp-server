@@ -12,7 +12,7 @@ from typing import Optional
 
 import asyncssh
 from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
-from .safety import quote_shell, validate_env_dict, validate_env_key
+from .safety import quote_shell, strip_ansi, validate_env_dict, validate_env_key
 
 logger = logging.getLogger("portal_mcp.sessions")
 OUTPUT_BUFFER_LINES = 10000
@@ -186,9 +186,9 @@ class SessionManager:
             m = sentinel_re.search(buf)
             if m:
                 exit_code = int(m.group(1))
-                output = self._strip_ansi(buf[:m.start()]).replace("\r\n", "\n")
+                output = strip_ansi(buf[:m.start()]).replace("\r\n", "\n")
                 return output.rstrip("\n"), exit_code
-        return self._strip_ansi(buf).replace("\r\n", "\n").rstrip("\n") + "\n[timeout]", None
+        return strip_ansi(buf).replace("\r\n", "\n").rstrip("\n") + "\n[timeout]", None
 
     async def _invalidate(self, session_id: str) -> None:
         """Drop a session from the registry and release its pool slot.
@@ -212,7 +212,10 @@ class SessionManager:
         logger.info(f"Session {session_id} invalidated (channel dead)")
 
     def _strip_ansi(self, text: str) -> str:
-        return re.sub(r'\x1b\[[0-9;]*[mGKHF]', '', text)
+        # Back-compat shim: delegates to the shared stripper. Kept so any
+        # external caller of this private method still works; new code should
+        # call safety.strip_ansi directly.
+        return strip_ansi(text)
 
     def read_buffer(self, session_id: str, lines: int = 100) -> str:
         """Read recent output from session buffer."""

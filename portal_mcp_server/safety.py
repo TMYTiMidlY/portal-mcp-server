@@ -112,6 +112,25 @@ def quote_shell(value: str) -> str:
     return shlex.quote(value)
 
 
+# ─── Terminal output cleanup ────────────────────────────────────────────────
+# Single source of truth for stripping terminal control sequences from output
+# captured over a PTY (the persistent `bash -i` session emits these even with
+# `stty -echo`). The stdlib has no ANSI stripper, so we keep two narrow regexes:
+#   - CSI:  ESC [ ... <final byte A-Za-z>  (covers colours, cursor moves, and
+#           bracketed-paste ?2004l/h since `?` is allowed in the parameter run)
+#   - OSC:  ESC ] ... BEL
+# The one-shot exec path (portal_exec) runs without a PTY and needs none of
+# this. Both remote_bash and session_manager call through here so the coverage
+# can never drift apart again.
+_ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI_OSC = re.compile(r"\x1b\][^\x07]*\x07")
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI CSI + OSC escape sequences from terminal output."""
+    return _ANSI_OSC.sub("", _ANSI_CSI.sub("", text))
+
+
 def validate_env_key(key: str) -> str:
     """Validate a POSIX environment-variable name.
 

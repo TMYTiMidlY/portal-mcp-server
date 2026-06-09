@@ -18,6 +18,7 @@ import pytest
 from portal_mcp_server.safety import (
     build_cwd_prefix,
     quote_shell,
+    strip_ansi,
     validate_env_dict,
     validate_env_key,
     validate_interpreter,
@@ -212,3 +213,29 @@ class TestPidValidation:
     def test_rejects_too_large(self):
         with pytest.raises(ValueError):
             validate_pid(10**12)
+
+
+class TestStripAnsi:
+    """The shared stripper must catch what the old narrow session_manager pass
+    (CSI ending in mGKHF only) missed — notably bracketed-paste ?2004l/h — so
+    folding the two callers onto it cannot regress the persistent-session output.
+    """
+
+    def test_strips_colours_and_cursor(self):
+        assert strip_ansi("\x1b[31mred\x1b[0m\x1b[2K") == "red"
+
+    def test_strips_bracketed_paste(self):
+        # \x1b[?2004l / ?2004h — the marker the narrow stripper let through.
+        assert strip_ansi("\x1b[?2004lhi\x1b[?2004h") == "hi"
+
+    def test_strips_osc(self):
+        assert strip_ansi("\x1b]0;title\x07body") == "body"
+
+    def test_plain_text_untouched(self):
+        assert strip_ansi("no escapes here") == "no escapes here"
+
+    def test_shared_by_both_callers(self):
+        # remote_bash._clean and session_manager delegate to the same function.
+        from portal_mcp_server import remote_bash, session_manager
+        assert session_manager.strip_ansi is strip_ansi
+        assert remote_bash.strip_ansi is strip_ansi
