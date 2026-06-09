@@ -6,6 +6,8 @@ import sys
 
 import pytest
 
+from portal_mcp_server.paths import credential_agent_config_path
+
 
 @pytest.fixture(autouse=True)
 def _isolate_xdg(monkeypatch):
@@ -37,8 +39,7 @@ def test_install_user_units_uses_systemd_percent_t(monkeypatch, tmp_path):
                    / credential_agent.SOCKET_UNIT).read_text()
     service_unit = (home / ".config/systemd/user"
                     / credential_agent.SERVICE_UNIT).read_text()
-    agent_config = json.loads((home / ".config/portal-mcp-server"
-                               / "agent.json").read_text())
+    agent_config = json.loads(credential_agent_config_path().read_text())
 
     assert "ListenStream=%t/portal-mcp-server/credentials.sock" in socket_unit
     assert "SocketMode=0600" in socket_unit
@@ -111,7 +112,7 @@ def test_uninstall_user_units_removes_units_and_config(monkeypatch, tmp_path):
     assert res["errors"] == []
     assert not (home / ".config/systemd/user" / credential_agent.SOCKET_UNIT).exists()
     assert not (home / ".config/systemd/user" / credential_agent.SERVICE_UNIT).exists()
-    assert not (home / ".config/portal-mcp-server/agent.json").exists()
+    assert not credential_agent_config_path().exists()
 
 
 def test_uninstall_user_units_can_keep_config(monkeypatch, tmp_path):
@@ -128,7 +129,7 @@ def test_uninstall_user_units_can_keep_config(monkeypatch, tmp_path):
     assert res["config_removed"] is False
     assert not (home / ".config/systemd/user" / credential_agent.SOCKET_UNIT).exists()
     assert not (home / ".config/systemd/user" / credential_agent.SERVICE_UNIT).exists()
-    assert (home / ".config/portal-mcp-server/agent.json").exists()
+    assert credential_agent_config_path().exists()
 
 
 def test_cli_exits_when_agent_is_unconfigured(monkeypatch, capsys):

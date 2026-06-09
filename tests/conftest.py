@@ -13,9 +13,12 @@ Goals
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -64,7 +67,13 @@ def agent_socket(_isolate_credential_agent, tmp_path, monkeypatch):
         )
     from portal_mcp_server import credential_agent
 
-    sock = tmp_path / "agent.sock"
+    # macOS AF_UNIX sun_path is 104 bytes, and pytest's tmp_path (under
+    # $TMPDIR=/var/folders/...) overflows it → bind() raises "AF_UNIX path too
+    # long" and the socket never appears. Bind under a short base instead so the
+    # path fits on every POSIX platform (Linux's /tmp is short too).
+    base = "/tmp" if os.path.isdir("/tmp") else tempfile.gettempdir()
+    sock_dir = tempfile.mkdtemp(prefix="pmcp-", dir=base)
+    sock = Path(sock_dir) / "a.sock"
     monkeypatch.setenv("PORTAL_CREDENTIAL_AGENT_SOCKET", str(sock))
     thread = threading.Thread(
         target=credential_agent.serve_forever,
@@ -76,7 +85,10 @@ def agent_socket(_isolate_credential_agent, tmp_path, monkeypatch):
     while not sock.exists() and time.monotonic() < deadline:
         time.sleep(0.02)
     assert sock.exists(), "credential agent socket never appeared"
-    return sock
+    try:
+        yield sock
+    finally:
+        shutil.rmtree(sock_dir, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)

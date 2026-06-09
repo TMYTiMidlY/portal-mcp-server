@@ -110,8 +110,7 @@ def test_install_launchd_writes_plist_and_config(monkeypatch, tmp_path):
              / f"{credential_agent.LAUNCHD_LABEL}.plist")
     assert plist.exists()
     assert credential_agent.LAUNCHD_LABEL in plist.read_text()
-    cfg = json.loads((home / ".config" / "portal-mcp-server"
-                      / "agent.json").read_text())
+    cfg = json.loads(paths.credential_agent_config_path().read_text())
     assert cfg["socket_path"].endswith("portal-mcp-server/credentials.sock")
     # enable_now=True -> launchctl load -w <plist>
     assert any("launchctl" in c[0] and "load" in c for c in calls)
