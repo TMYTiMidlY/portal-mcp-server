@@ -18,6 +18,12 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 </div>
 
+> ℹ️ **The Chinese [`README.md`](./README.md) is canonical.** This English
+> translation may lag behind it for the latest tool-surface changes; for the
+> authoritative 14-tool reference see [`README.md`](./README.md) and
+> [`docs/tools.md`](docs/tools.md). (Tool count and signatures here are current;
+> some narrative prose may still describe pre-refactor tool names.)
+
 ---
 
 <details>
@@ -57,9 +63,9 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 
 - **Cross-tool connection reuse**: every `portal_*` tool shares the same in-process asyncssh pool; one TCP per host gets reused indefinitely, individual calls amortise to channel creation (~10–30 ms).
 - **Same speed on Windows**: no dependency on OpenSSH `ControlMaster`; the pool is plain Python objects, so the three major OSes get identical reuse performance.
-- **Persistent bash sessions**: `portal_bash` keeps a `bash -i` per host with cwd / env preserved across calls — the agent doesn't have to rebuild context every command.
+- **Persistent bash sessions**: `portal_shell` keeps a `bash -i` per host with cwd / env preserved across calls — the agent doesn't have to rebuild context every command.
 - **Hash-protected remote edits**: `portal_read` + `portal_patch` use whole-file SHA-256 plus per-range hashes, write through tmp + `posix_rename` (atomic), then re-hash on disk to refuse stale or concurrent overwrites.
-- **Agent-first tool budget**: 18 tools instead of the upstream's 57; the tool-list context drops from ~7.5k tokens to ~2.5k, and `mode` parameters collapse semantically overlapping entries.
+- **Agent-first tool budget**: 14 tools instead of the upstream's 57; the tool-list context drops from ~7.5k tokens to ~2.5k, and `mode` parameters collapse semantically overlapping entries.
 - **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default.
 - **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
 - **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
@@ -74,10 +80,10 @@ The naive way to give an agent remote access is to let it shell out to `ssh` / `
 | **SSH reuse · Windows** | ❌ **Doesn't work** — Microsoft's Win32-OpenSSH port has had `ControlMaster` broken since v0.0.3.0 (`muxclient socket(): Unknown error`), [issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) open since 2017 (the implementation needs Unix-domain-socket fd sharing, which Windows lacks) | ✅ **Identical to Linux** — the pool is a plain Python dict; asyncssh needs no OS-level socket sharing |
 | **First connect / subsequent latency** | First ~200–500ms; **without reuse every command is a fresh TCP+auth, ~300ms each** (the default on Windows); with ControlMaster, ~10–30ms after the first | First ~200–500ms, **then ~10–30ms (same on all three OSes)** — just channel creation |
 | **Cross-"tool" reuse** | `ssh` and `scp` only reuse a master if `ControlPath` matches exactly; in practice each binary opens its own connection | ✅ Every `portal_*` tool (bash / read / patch / transfer / tunnel …) naturally shares the same TCP |
-| **Persistent shell state** | Every `ssh host cmd` is a new shell; `cd` / `export` / venv activation **all reset**; the agent has to prepend `cd /path && source venv/bin/activate && ...` to every command | ✅ `portal_bash` keeps a sticky `bash -i`; cwd / env / venv survive across calls |
+| **Persistent shell state** | Every `ssh host cmd` is a new shell; `cd` / `export` / venv activation **all reset**; the agent has to prepend `cd /path && source venv/bin/activate && ...` to every command | ✅ `portal_shell` keeps a sticky `bash -i`; cwd / env / venv survive across calls |
 | **Remote file editing (safe edit)** | All three options are unsafe: ① `scp` down → edit → `scp` up (no concurrency check, concurrent writer's changes silently lost, non-atomic); ② `ssh host "sed -i ..."` (no dry-run, no rollback, line numbers brittle); ③ `ssh host "cat > file"` (concurrent overwrite, half-written file if the connection drops mid-write) | ✅ `portal_read` returns SHA-256 + per-range hashes; `portal_patch` checks the hashes → writes to `*.mcp_tmp.*` → atomic `posix_rename` → re-hashes after write. **Concurrent edits / interrupted writes / line-number drift all fail instead of silently corrupting** |
 | **File / directory transfer** | `scp` has no incremental skip and a single failure kills the batch; `rsync` is better but forks a new process per invocation, and **its progress never reaches the agent** — MCP clients drop the connection on idle timeout during long transfers | ✅ `portal_transfer` does size+mtime (or sha256) incremental skipping, **emits MCP progress as a keepalive against idle timeout**, lands per-file failures in `failed[]` without aborting the batch, and `paths_json` supports arbitrary local↔remote pair batches |
-| **sudo password ergonomics** | All options are bad: ① `ssh -t host sudo cmd` **prompts every time** — the agent can't drive it; ② `echo $PASS \| ssh host "sudo -S cmd"` — **password lands in the LLM context**; ③ `sshpass -p $PASS ssh ...` — **password ends up in `ps` argv and the LLM**; ④ NOPASSWD sudoers — give up on auth entirely | ✅ `portal_bash(use_sudo=True)`: password source is either ① `sudo_password_command` (pulled from `pass` / `op` / `bw` on demand, fully automatic) or ② `portal sudo set <host>` (user types it once in another terminal via `getpass`, stored in the systemd `--user` credential agent's in-memory TTL cache). **Password never reaches the LLM, never appears in `ps` argv, never hits disk** |
+| **sudo password ergonomics** | All options are bad: ① `ssh -t host sudo cmd` **prompts every time** — the agent can't drive it; ② `echo $PASS \| ssh host "sudo -S cmd"` — **password lands in the LLM context**; ③ `sshpass -p $PASS ssh ...` — **password ends up in `ps` argv and the LLM**; ④ NOPASSWD sudoers — give up on auth entirely | ✅ `portal_exec(use_sudo=True)`: password source is either ① `sudo_password_command` (pulled from `pass` / `op` / `bw` on demand, fully automatic) or ② `portal sudo set <host>` (user types it once in another terminal via `getpass`, stored in the systemd `--user` credential agent's in-memory TTL cache). **Password never reaches the LLM, never appears in `ps` argv, never hits disk** |
 | **Multi-host parallel execution** | `for h in $hosts; do ssh $h cmd; done` — **serial** startup (one fork+auth per host), no policy gate, a single failure depends on `set -e` or hand-rolled error handling | ✅ `portal_multi_exec(mode=parallel\|rolling\|broadcast)` runs in true parallel with a two-phase safety gate (check every host *first*, then execute), plus `portal_playbook` for multi-step + `on_error` |
 | **SSH tunnel lifecycle** | `ssh -L 8080:db:5432 host -fN` runs unsupervised — **no one tracks when to close it**, who opened it, or whether it's still alive; you need `pgrep` to find it | ✅ `portal_tunnel_open` returns a `tunnel_id`, `portal_tunnel_list` enumerates live tunnels, `portal_tunnel_close` shuts one down; everything is auditable |
 | **Command audit** | None — you'd have to wrap shell history with `script(1)` or a custom logger; agent calls are invisible | ✅ State-changing tools first pass the `_gate` policy check (blocked → not executed, not logged), then write a structured line to `audit.jsonl` (host, operation, command, result, timestamp); audit-write failure is fail-closed by default (operation aborts), relax with `PORTAL_AUDIT_FAIL_OPEN=1` |
@@ -97,7 +103,7 @@ claude mcp add portal -- uvx portal-mcp-server@latest
 
 # 3. Use it in an agent conversation
 #    "Show me the last 50 lines of /var/log/syslog on myhost"
-#    → agent calls portal_bash("myhost", "tail -50 /var/log/syslog")
+#    → agent calls portal_shell("myhost", "tail -50 /var/log/syslog")
 ```
 
 No clone, no venv — `uvx` pulls and runs automatically. For developer setup see [Install](#install).
@@ -109,7 +115,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 │  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
 │ (Claude Code │                    │                                     │
 │  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
-│  Cursor ...) │                    │  │ 18 tools │──►│ security gate  │  │
+│  Cursor ...) │                    │  │ 14 tools │──►│ security gate  │  │
 └──────────────┘                    │  └──────────┘   │ + audit log    │  │
                                     │                  └───────┬────────┘  │
                                     │                          │           │
@@ -134,7 +140,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 |---|---|
 | `portal_read` / `portal_patch` | Read remote file with SHA-256 of file + range; patch checks `file_hash` + per-range hash to prevent concurrent overwrite; writes via tmp + `posix_rename` (atomic) and re-hash after write |
 | `portal_grep` / `portal_glob` | Remote `rg --json` / `find` with structured output; first-call probe is cached |
-| `portal_bash` / `_close` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; emits MCP progress while the command runs as a keepalive so long, output-silent commands don't trip the client's idle timeout (JSON-RPC `-32001`); `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user credential agent / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--portal-sudo-set)). The host→session_id map lives in `portal_audit(view="sessions")` |
+| `portal_shell` / `_close` | One sticky `bash -i` per host; cwd / env survive across calls; PTY echo + bracketed-paste disabled so sentinel parsing is reliable; emits MCP progress while the command runs as a keepalive so long, output-silent commands don't trip the client's idle timeout (JSON-RPC `-32001`); `use_sudo=True` runs a one-shot `sudo -S` (password resolved from the per-user credential agent / `sudo_password_command`, never via the LLM — see [Authentication](#non-interactive-sudo-use_sudo--portal-sudo-set)). The host→session_id map lives in `portal_audit(view="sessions")` |
 | `portal_cleanup_tmps` | Garbage-collects orphan `*.mcp_tmp.*` files left by interrupted patches |
 
 ### 10 high-level tools (mode-switched)
@@ -150,11 +156,11 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `portal_audit` | `view=snapshot\|server\|sessions\|history\|stats\|policy` | Audit log + server introspection (`server` view returns just version/pid/uptime/config-paths for cheap diagnostics; `sessions` view returns the host→session_id sticky-bash map, replacing the old `portal_bash_status`) |
 | `portal_check` | `host`, optional `command` | Security policy dry-run |
 
-### Specific tools vs `portal_bash`: which to use
+### Specific tools vs `portal_shell`: which to use
 
-`portal_bash` can run anything, but **don't reach for it when a purpose-built tool exists** — the specific tools either carry a safety guarantee or return structured output, which makes them more reliable for an agent:
+`portal_shell` can run anything, but **don't reach for it when a purpose-built tool exists** — the specific tools either carry a safety guarantee or return structured output, which makes them more reliable for an agent:
 
-| What you want to do | Use this (**not** a raw `portal_bash` command) | Why |
+| What you want to do | Use this (**not** a raw `portal_shell` command) | Why |
 |---|---|---|
 | Read / edit a remote file | `portal_read` → `portal_patch` | SHA-256 + per-range hash against concurrent overwrite, atomic rename, post-write rehash; raw `cat`/`>` has none of that |
 | Search content / find files | `portal_grep` / `portal_glob` | `rg --json` / `find` structured output — the agent doesn't parse raw text |
@@ -162,7 +168,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | Run on many hosts | `portal_multi_exec` / `portal_playbook` | parallel / rolling / broadcast + two-phase gating; a bash `for h in …; ssh $h` loop has no gate |
 | Open a tunnel | `portal_tunnel_*` | managed lifecycle, visible in `portal_audit`; a bash `ssh -L` runs away unsupervised |
 
-**Everything else** (running processes, tailing logs, systemctl, docker, one-off commands…) is `portal_bash`'s territory — one persistent `bash -i` session covers the 27 tools the upstream project split out. Rule of thumb: **don't mix `portal_*` and bash `ssh`/`scp` in the same task**, or you bypass hash checking or break the sudo flow.
+**Everything else** (running processes, tailing logs, systemctl, docker, one-off commands…) is `portal_shell`'s territory — one persistent `bash -i` session covers the 27 tools the upstream project split out. Rule of thumb: **don't mix `portal_*` and bash `ssh`/`scp` in the same task**, or you bypass hash checking or break the sudo flow.
 
 ### Agent-side conventions
 
@@ -173,7 +179,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 - **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
 - **Don't mix tools within one task** — pick `portal_*` (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
 - **Use the multi-host tools** — `portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`, not a bash loop of `ssh host1; ssh host2; …`.
-- **Sudo, three ways** — when sudo is needed: ① prefer a host-level `sudo_password_command` (pulled from a password manager, fully automatic); ② or have the user pre-seed the password with `portal sudo set <host>` into the per-user credential agent from another terminal, then `portal_bash(..., use_sudo=True)`; ③ for genuinely interactive prompts (password change, first-time TTY check), have the user run `ssh -t host sudo …`. `use_sudo` runs a one-shot exec and does **not** inherit `cwd` / env from prior `portal_bash` calls.
+- **Sudo, three ways** — when sudo is needed: ① prefer a host-level `sudo_password_command` (pulled from a password manager, fully automatic); ② or have the user pre-seed the password with `portal sudo set <host>` into the per-user credential agent from another terminal, then `portal_exec(..., use_sudo=True)`; ③ for genuinely interactive prompts (password change, first-time TTY check), have the user run `ssh -t host sudo …`. `use_sudo` runs a one-shot exec and does **not** inherit `cwd` / env from prior `portal_shell` calls.
 
 <details>
 <summary>📋 Full signatures & source map</summary>
@@ -189,8 +195,8 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `portal_cleanup_tmps` | `(host, directory, max_age_s=3600)` |
 | `portal_grep` | `(host, path, pattern, glob='', file_type='', ignore_case=False, max_count=0)` |
 | `portal_glob` | `(host, pattern, path='.')` |
-| `portal_bash` | `(host, command, timeout=3600.0, use_sudo=False)` |
-| `portal_bash_close` | `(host)` |
+| `portal_shell` | `(host, command, timeout=3600.0, use_sudo=False)` |
+| `portal_close_shell` | `(host)` |
 | `portal_host` | `(action, name='', host='', user='root', port=22, key_path='', tags='')` |
 | `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False, paths_json='')` |
 | `portal_tunnel_open` | `(mode, host, local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
@@ -209,7 +215,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `connection_manager.py` | connection pool shared by every tool |
 | `remote_text_editor.py` | `portal_read`, `portal_patch`, `portal_cleanup_tmps` |
 | `remote_search.py` | `portal_grep`, `portal_glob` |
-| `remote_bash.py` | `portal_bash`, `portal_bash_close` |
+| `remote_bash.py` | `portal_shell`, `portal_close_shell` |
 | `file_ops.py` | `portal_transfer` |
 | `network_tools.py` | `portal_tunnel_*` |
 | `orchestrator.py` | `portal_multi_exec`, `portal_playbook` |
@@ -220,30 +226,30 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 
 ## Design notes
 
-### Tool consolidation: 18 vs. 57
+### Tool consolidation: 14 vs. 57
 
 Anthropic's [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) is explicit:
 
 > "More tools don't always lead to better outcomes... Tools that merely wrap existing software functionality is a common error... Too many tools or overlapping tools can also distract agents from pursuing efficient strategies."
 
-The upstream `ssh-shell-mcp` exposes one tool per ergonomic — `ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` … — **57 tools total**. Most are one-line bash wrappers that **`portal_bash` (a persistent bash session) replaces by itself**.
+The upstream `ssh-shell-mcp` exposes one tool per ergonomic — `ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` … — **57 tools total**. Most are one-line bash wrappers that **`portal_shell` (a persistent bash session) replaces by itself**.
 
 | Bucket | Count | What we did |
 |---|---:|---|
-| **Kept and redesigned** | 7 | `portal_read` + `portal_patch` use SHA-256 hashes to fix the concurrency hole in raw cat/write; `portal_grep` / `portal_glob` give structured search output; `portal_bash`(`_close`) provides a persistent shell; `portal_cleanup_tmps` handles interrupted writes |
+| **Kept and redesigned** | 7 | `portal_read` + `portal_patch` use SHA-256 hashes to fix the concurrency hole in raw cat/write; `portal_grep` / `portal_glob` give structured search output; `portal_shell`(`_close`) provides a persistent shell; `portal_cleanup_tmps` handles interrupted writes |
 | **Mode-flag merged** | 10 | `portal_tunnel_open(mode=local\|reverse\|socks)` replaces 3 upstream tools; `portal_multi_exec(mode=parallel\|rolling\|broadcast)` replaces 4; `portal_audit(view=...)` collapses the sessions/history/stats/policy introspection endpoints (the `sessions` view is the former `portal_bash_status`) |
-| **Removed entirely** | 27 | All trivially expressible as `portal_bash` invocations: 5 exec-family, 6 multi-session-family, 7 sysinfo (ps/df/free/journalctl/info/netstat/service), 5 process-management, 4 tmux |
+| **Removed entirely** | 27 | All trivially expressible as `portal_shell` invocations: 5 exec-family, 6 multi-session-family, 7 sysinfo (ps/df/free/journalctl/info/netstat/service), 5 process-management, 4 tmux |
 
 Result: tool-list context drops from ~7.5k tokens to ~2.5k, and the agent no longer has to disambiguate between semantically overlapping tools.
 
 ### In-process connection pool
 
-portal-mcp-server runs an asyncssh connection pool inside its own server process. Every tool invocation (`portal_bash`, `portal_read`, `portal_transfer`, …) shares the same TCP. **Everything except the first connect amortises down to channel creation (~10–30 ms).** The full comparison against `ControlMaster` / Windows OpenSSH / `ssh`↔`scp` reuse / persistent shell / cross-platform behaviour is already laid out in [§ Why portal-mcp-server vs. plain SSH](#why-portal-mcp-server-vs-plain-ssh) above; below are just the mechanism-level details:
+portal-mcp-server runs an asyncssh connection pool inside its own server process. Every tool invocation (`portal_shell`, `portal_read`, `portal_transfer`, …) shares the same TCP. **Everything except the first connect amortises down to channel creation (~10–30 ms).** The full comparison against `ControlMaster` / Windows OpenSSH / `ssh`↔`scp` reuse / persistent shell / cross-platform behaviour is already laid out in [§ Why portal-mcp-server vs. plain SSH](#why-portal-mcp-server-vs-plain-ssh) above; below are just the mechanism-level details:
 
 - **Pool shape**: `PORTAL_SSH_POOL_SIZE` caps TCP connections per host (default 5); `PORTAL_SSH_MAX_CHANNELS_PER_CONN` caps channels per TCP (default 5). When all connections hit the channel ceiling, the least-loaded one is reused with a warning. asyncio gives **true multi-channel parallelism over a single TCP**, unlike plain ssh where each parallel command requires a separate ssh process (fork + auth per channel).
 - **Idle / age**: `PORTAL_SSH_MAX_IDLE_TIME` defaults to 600 s, `PORTAL_SSH_MAX_CONN_AGE` defaults to 3600 s — idle-expired or aged-out connections close once they have no active channels, guarding against silent NAT / firewall drops.
 - **Long-session stability**: pool connections live as long as the MCP server (typically hours), not the 10-minute `ControlPersist` default — fewer reconnect spikes inside long sessions.
-- **Anonymised microbenchmark**: same LAN (< 1 ms RTT), 100× `echo pong`. Plain ssh + ControlMaster averaged 23 ms/call; portal-mcp-server through `portal_bash` averaged 18 ms/call (no ssh client process startup). First connect ~280 ms on both (auth dominated).
+- **Anonymised microbenchmark**: same LAN (< 1 ms RTT), 100× `echo pong`. Plain ssh + ControlMaster averaged 23 ms/call; portal-mcp-server through `portal_shell` averaged 18 ms/call (no ssh client process startup). First connect ~280 ms on both (auth dominated).
 - **What this looks like on Windows**: plain ssh pays ~300 ms × N (no reuse — and the experimental named-pipe fallback is also unreliable); portal-mcp-server is ~280 ms for the first call and ~20 ms thereafter, dropping to the channel-creation floor — because asyncssh is pure Python and the pool lives in the MCP server's own memory with zero OS-level socket-sharing dependency (which is exactly where Windows OpenSSH's ControlMaster falls over).
 
 ### Stack choice: asyncssh, not subprocess-wrapped OpenSSH
@@ -351,7 +357,7 @@ The `uvx portal-mcp-server xxx` form still requires the full name (`uvx` does no
 
 > **⚠️ Platform support: Linux only.** `portal agent install` ships a pair of **systemd user units** — `.socket` + `.service` — into `~/.config/systemd/user/`, supervised by the **systemd user instance** (`systemd --user`, aka the systemd user manager) and lazily started via **socket activation**. That whole stack is Linux-specific: macOS launchd and Windows Service have no shipped equivalent, so `portal agent install` / `portal agent uninstall` and the three no-echo interactive CLIs that depend on the credential agent (`portal ssh set` / `portal sudo set` / `portal secret set`) currently **only work on Linux**.
 >
-> macOS / Windows workaround: use the `password_command` / `sudo_password_command` fields in `hosts.yaml`, or the `command:` field in `secrets.yaml`, to pull credentials on demand from the system password manager (Keychain, `pass`, `secret-tool`, `gopass`, 1Password CLI, etc.) — see [Authentication](#authentication) below. The MCP server itself (`portal_bash` and every remote tool) runs fine on Windows / macOS / Linux; only this **local interactive no-echo password-staging** agent path is Linux-only.
+> macOS / Windows workaround: use the `password_command` / `sudo_password_command` fields in `hosts.yaml`, or the `command:` field in `secrets.yaml`, to pull credentials on demand from the system password manager (Keychain, `pass`, `secret-tool`, `gopass`, 1Password CLI, etc.) — see [Authentication](#authentication) below. The MCP server itself (`portal_shell` and every remote tool) runs fine on Windows / macOS / Linux; only this **local interactive no-echo password-staging** agent path is Linux-only.
 
 No-echo interactive values from `portal ssh set` / `portal sudo set` / `portal secret set` no longer live in one MCP server process. They go into a per-user, systemd socket-activated **credential agent**. Before using those interactive credential commands, explicitly install and start the user socket:
 
@@ -527,7 +533,7 @@ All configurable knobs in portal-mcp-server are passed as environment variables,
 |---|---|---|
 | File paths | `PORTAL_HOSTS_YAML` | Host registry YAML |
 | File paths | `PORTAL_POLICIES_YAML` | Security policy YAML |
-| File paths | `PORTAL_SECRETS_YAML` | Named secrets YAML (source for `secrets=` in `portal_bash` / `portal_local_exec`) |
+| File paths | `PORTAL_SECRETS_YAML` | Named secrets YAML (source for `secrets=` in `portal_shell` / `portal_local_exec`) |
 | File paths | `PORTAL_LOG_DIR` | Audit + server log directory |
 | Security & auth | `PORTAL_AUDIT_FAIL_OPEN` | Whether audit-write failure is fail-open |
 | Security & auth | `PORTAL_AUTH_TOKEN` | Bearer token for HTTP transport |
@@ -535,7 +541,7 @@ All configurable knobs in portal-mcp-server are passed as environment variables,
 | Connection pool | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels per TCP connection |
 | Connection pool | `PORTAL_SSH_MAX_IDLE_TIME` | Idle-close timeout in seconds |
 | Connection pool | `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds |
-| Reliability | `PORTAL_BASH_HEARTBEAT_INTERVAL` | Keepalive heartbeat interval (s) while `portal_bash` runs |
+| Reliability | `PORTAL_BASH_HEARTBEAT_INTERVAL` | Keepalive heartbeat interval (s) while `portal_shell` runs |
 | Testing (dev only) | `PORTAL_TEST_LIVE` | Gate for live SSH integration tests |
 | Testing (dev only) | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | Live test target |
 
@@ -590,7 +596,7 @@ Controls the in-process asyncssh connection pool. Defaults work well for most se
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `PORTAL_BASH_HEARTBEAT_INTERVAL` | How often (seconds) `portal_bash` / `portal_local_exec` emits an MCP progress notification as a keepalive while the command runs, so an output-silent command doesn't trip the client's idle timeout (JSON-RPC `-32001`). Independent of the server-side `timeout` parameter. Non-positive or invalid values fall back to the default | `5` (seconds) |
+| `PORTAL_BASH_HEARTBEAT_INTERVAL` | How often (seconds) `portal_shell` / `portal_local_exec` emits an MCP progress notification as a keepalive while the command runs, so an output-silent command doesn't trip the client's idle timeout (JSON-RPC `-32001`). Independent of the server-side `timeout` parameter. Non-positive or invalid values fall back to the default | `5` (seconds) |
 
 ### Testing (dev only)
 
@@ -634,8 +640,8 @@ There are four credential flows, each with a "password-manager style" (command s
 | Credential flow | Command source (password-manager style) | No-echo interactive entry (getpass style) | Cache key | Cache semantics | Trigger |
 |---|---|---|---|---|---|
 | **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `portal ssh set <host>` | host | agent in-memory TTL (default 900s, interactive entry only; command source fetched per connection) | on connect for `auth: password` / auto fallback when key auth refused |
-| **B. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent in-memory TTL (default 900s) | `portal_bash(use_sudo=True)` |
-| **C. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `portal secret set <name>` | name | agent in-memory TTL (default 900s, `--ttl` configurable) | `portal_bash(secrets=[…])` |
+| **B. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent in-memory TTL (default 900s) | `portal_exec(use_sudo=True)` |
+| **C. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `portal secret set <name>` | name | agent in-memory TTL (default 900s, `--ttl` configurable) | `portal_exec(secrets=[…])` |
 | **D. Secret injection · local** | same as C (shares `secrets.yaml`) | same as C (shares `portal secret set`) | same as C | same as C | `portal_local_exec(secrets=[…])` |
 
 Things to know:
@@ -729,7 +735,7 @@ Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphra
 
 ### Non-interactive sudo: `use_sudo` + `portal sudo set`
 
-`portal_bash(host, cmd, use_sudo=True)` lets the agent run root commands, but **the sudo password never reaches the LLM** — `portal_bash` has no password parameter; the password is resolved server-side. Two sources (same philosophy as the SSH password):
+`portal_exec(host, cmd, use_sudo=True)` lets the agent run root commands, but **the sudo password never reaches the LLM** — `portal_shell` has no password parameter; the password is resolved server-side. Two sources (same philosophy as the SSH password):
 
 1. **Password manager (automatic)** — set `sudo_password_command` on the host in `hosts.yaml`, fully symmetric with `password_command`:
 
@@ -755,7 +761,7 @@ Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphra
 
 Resolution order: **agent memory cache (2) → `sudo_password_command` (1) → error** (telling you to run `portal sudo set` or configure `sudo_password_command`).
 
-Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` executing `sudo -S -k -p '' -- bash -c <cmd>`; it does **not** reuse the persistent `bash -i` session (`sudo -S` reads stdin, which collides with the sentinel protocol). Consequently a sudo command does **not** inherit `cd` / `export` state from prior `portal_bash` calls — bake any `cd … && …` into the same command. `-k` forces fresh auth each time; `-p ''` suppresses the prompt. Genuinely interactive sudo (needs a TTY, or a password change) still can't go through `portal_bash` — have the user run `ssh -t host sudo …`.
+Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` executing `sudo -S -k -p '' -- bash -c <cmd>`; it does **not** reuse the persistent `bash -i` session (`sudo -S` reads stdin, which collides with the sentinel protocol). Consequently a sudo command does **not** inherit `cd` / `export` state from prior `portal_shell` calls — bake any `cd … && …` into the same command. `-k` forces fresh auth each time; `-p ''` suppresses the prompt. Genuinely interactive sudo (needs a TTY, or a password change) still can't go through `portal_shell` — have the user run `ssh -t host sudo …`.
 
 ### Named-secret injection: `secrets=[…]` + `portal secret set`
 
@@ -763,7 +769,7 @@ Use this to hand a command an API token (a GitHub token, a deploy key, …) **wi
 
 > **Why not just `export`?** The pain point: a throwaway `export TOKEN=…` never reaches the agent's execution context — it only affects the new terminal *you* opened, while the agent runs commands in the MCP server process's environment, which can't see it. The only way to make the agent use it was to `vim` a `.env` / secrets file for it to source — which puts the secret back on disk and is easy to forget to delete. This design turns "hand over a key once" into a **native no-echo CLI prompt** (`portal secret set` uses `getpass`, just like typing a password), with the value living only in per-user credential agent memory and auto-expiring on a TTL — never on disk, never to the LLM.
 
-- Remote: `portal_bash(host, cmd, secrets=["github_token"])`, referencing `$GITHUB_TOKEN` (the uppercased name) in `cmd`.
+- Remote: `portal_exec(host, cmd, secrets=["github_token"])`, referencing `$GITHUB_TOKEN` (the uppercased name) in `cmd`.
 - Local: `portal_local_exec(cmd, secrets=["github_token"])` runs on the **MCP server host** (not over SSH). Local execution is a larger threat surface, so it is **disabled** unless the server process has `PORTAL_ALLOW_LOCAL_EXEC=1`.
 
 Two sources (order: agent memory cache → `secrets.yaml`):
@@ -788,7 +794,7 @@ Two sources (order: agent memory cache → `secrets.yaml`):
 
    The value is pushed over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is 0700, and the socket is 0600 / same-user only. It is never written to disk, never seen by the LLM, and is cleared on TTL expiry.
 
-See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_bash` call.
+See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` and `use_sudo` are mutually exclusive in a single `portal_shell` call.
 
 #### Wait semantics: fail-fast → `ask_user` → retry
 
@@ -826,7 +832,7 @@ Coverage: command-injection regression, safety validators, hash-protected editor
 
 ### End-to-end live smoke
 
-`tests/live_smoke.py` imports the local working tree and drives a series of real SSH actions: stale `password:` field handling in `hosts.yaml`, basic `ssh_exec`, `portal_multi_exec(mode="parallel", group_tag=...)` against real hosts (verifying both blocked-command and not-in-allowlist hosts get rejected), per-command gating in `portal_bash`, a `portal_bash` + `portal_patch` round-trip in remote `/tmp/` (including the stale-hash rejection path), and audit.jsonl ingestion of the new operation tags.
+`tests/live_smoke.py` imports the local working tree and drives a series of real SSH actions: stale `password:` field handling in `hosts.yaml`, basic `ssh_exec`, `portal_multi_exec(mode="parallel", group_tag=...)` against real hosts (verifying both blocked-command and not-in-allowlist hosts get rejected), per-command gating in `portal_shell`, a `portal_shell` + `portal_patch` round-trip in remote `/tmp/` (including the stale-hash rejection path), and audit.jsonl ingestion of the new operation tags.
 
 ```bash
 PORTAL_AUDIT_FAIL_OPEN=1 \

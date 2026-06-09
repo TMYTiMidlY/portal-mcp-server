@@ -45,7 +45,7 @@
 
 ## 简介
 
-`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 18 个面向 agent 的 `portal_*` 工具：
+`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 14 个面向 agent 的 `portal_*` 工具：
 
 - **2 个** hash-protected 的远端文件编辑工具（`portal_read` / `portal_patch`），算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT），针对 SFTP 重写
 - **6 个** 核心 IO / 搜索 / 持久 bash 工具
@@ -57,9 +57,9 @@
 
 - **跨工具连接复用**：所有 `portal_*` 工具共享同一进程内的 asyncssh 连接池；一次握手长期复用，单次调用摊销到 channel 创建（~10–30 ms）。
 - **Windows 上同样快**：不依赖 OpenSSH `ControlMaster`，连接池是纯 Python 对象，三大平台获得一致的复用性能。
-- **持久 bash 会话**：`portal_bash` 为每台 host 维护一个 `bash -i`，cwd / env 跨调用保留；agent 不需要每条命令重建上下文。
+- **持久 bash 会话**：`portal_shell` 为每台 host 维护一个 `bash -i`，cwd / env 跨调用保留；agent 不需要每条命令重建上下文。
 - **hash 保护的远端编辑**：`portal_read` + `portal_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
-- **agent-first 工具数量**：把上游 57 个工具收敛到 18 个，tool-list context 从 ~7.5k tokens 降到 ~2.5k；`mode` 字段合并语义重复的入口。
+- **agent-first 工具数量**：把上游 57 个工具收敛到 14 个，tool-list context 从 ~7.5k tokens 降到 ~2.5k；`mode` 字段合并语义重复的入口。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
@@ -74,12 +74,12 @@
 | **SSH 复用 · Windows** | ❌ **不工作**——微软移植的 Win32-OpenSSH 自 v0.0.3.0 起 `ControlMaster` 失败（`muxclient socket(): Unknown error`），[issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) 自 2017 年起 open 至今（依赖 Unix domain socket fd 共享，Win 没有等价原语） | ✅ **和 Linux 同等性能**——连接池是纯 Python dict，asyncssh 不需要任何 OS 级 socket 共享 |
 | **首次连接 / 后续命令延迟** | 首次 ~200–500ms；**无复用时每条命令都是新 TCP+auth ~300ms**（Win 默认场景）；有 ControlMaster 时后续 ~10–30ms | 首次 ~200–500ms，**后续 ~10–30ms（三平台一致）**——只开 channel |
 | **跨"工具"复用** | `ssh` 和 `scp` 复用要求两边 `ControlPath` 完全一致；实际多数项目各开各的，scp 和 ssh 并不共享 master | ✅ 所有 `portal_*` 工具（bash / read / patch / transfer / tunnel ...）天然共享同一条 TCP |
-| **持久 shell 状态** | 每次 `ssh host cmd` 是新 shell，`cd` / `export` / venv 激活 **全部丢失**；agent 必须每条命令重复 `cd /path && source venv/bin/activate && ...` | ✅ `portal_bash` 维护粘性 `bash -i`，cwd / env / venv 跨调用保留 |
+| **持久 shell 状态** | 每次 `ssh host cmd` 是新 shell，`cd` / `export` / venv 激活 **全部丢失**；agent 必须每条命令重复 `cd /path && source venv/bin/activate && ...` | ✅ `portal_shell` 维护粘性 `bash -i`，cwd / env / venv 跨调用保留 |
 | **远端文件编辑（safe edit）** | 三种都不安全：① `scp` 拉到本地→改→`scp` 推回（无并发检测，并发改 silently 丢；非原子）；② `ssh host "sed -i ..."`（无 dry-run、无 rollback、行号易错）；③ `ssh host "cat > file"`（并发覆盖、写一半连接断就半截文件） | ✅ `portal_read` 返回 SHA-256 + 行范围 hash；`portal_patch` 校验 hash → 写入 `*.mcp_tmp.*` → `posix_rename` 原子替换 → 写后再 rehash。**并发改 / 中途断连 / 行号漂移全部失败而非污染** |
 | **文件 / 目录传输** | `scp` 无增量、单文件失败整批挂；`rsync` 较好但每次 fork 新进程，**进度无法回传给 agent**，大文件传输期间 MCP client idle 超时会断 | ✅ `portal_transfer` 增量短路（size+mtime 或 sha256）、**MCP progress 心跳防 idle 超时**、单文件失败进 `failed[]` 不中断批量、`paths_json` 支持任意 local↔remote 文件对批传 |
-| **sudo 密码输入便利性** | 全是坑：① `ssh -t host sudo cmd` **每次弹密码**，agent 跑不了；② `echo $PASS \| ssh host "sudo -S cmd"`——**密码进 LLM 上下文**；③ `sshpass -p $PASS ssh ...`——**密码进 `ps` argv 和 LLM**；④ NOPASSWD sudoers——彻底放弃认证 | ✅ `portal_bash(use_sudo=True)`：密码源 = ① `sudo_password_command`（从密码管理器 `pass` / `op` / `bw` 现取，全自动）或 ② `portal sudo set <host>`（用户在另一终端 `getpass` 无回显输入一次，进 systemd `--user` 凭据 agent 内存 TTL）。**密码全程不进 LLM、不进 ps argv、不落盘** |
-| **多机并发执行** | `for h in $hosts; do ssh $h cmd; done`——**串行**启动（每次 fork + auth），无 policy gate，一台失败靠 `set -e` 或脚本自己处理 | ✅ `portal_multi_exec(mode=parallel\|rolling\|broadcast)` 真并发 + 两阶段安全 gate（先 check 所有 host 再执行），`portal_playbook` 多步骤 + `on_error` |
-| **SSH 隧道生命周期** | `ssh -L 8080:db:5432 host -fN` 后台跑飞，**没人管它什么时候关**、谁开的、是否还活着；要靠 `pgrep` 自己找 | ✅ `portal_tunnel_open` 返回 `tunnel_id`，`portal_tunnel_list` 看所有活跃隧道，`portal_tunnel_close` 显式关；audit 可追溯 |
+| **sudo 密码输入便利性** | 全是坑：① `ssh -t host sudo cmd` **每次弹密码**，agent 跑不了；② `echo $PASS \| ssh host "sudo -S cmd"`——**密码进 LLM 上下文**；③ `sshpass -p $PASS ssh ...`——**密码进 `ps` argv 和 LLM**；④ NOPASSWD sudoers——彻底放弃认证 | ✅ `portal_exec(use_sudo=True)`：密码源 = ① `sudo_password_command`（从密码管理器 `pass` / `op` / `bw` 现取，全自动）或 ② `portal sudo set <host>`（用户在另一终端 `getpass` 无回显输入一次，进 systemd `--user` 凭据 agent 内存 TTL）。**密码全程不进 LLM、不进 ps argv、不落盘** |
+| **多机并发执行** | `for h in $hosts; do ssh $h cmd; done`——**串行**启动（每次 fork + auth），无 policy gate，一台失败靠 `set -e` 或脚本自己处理 | ✅ `portal_exec(host=[…])` 真并发 + 两阶段安全 gate（先 check 所有 host 再执行），`serialize=True`+`delay_s` 走滚动，`commands=[…]` 跑多步序列 |
+| **SSH 隧道生命周期** | `ssh -L 8080:db:5432 host -fN` 后台跑飞，**没人管它什么时候关**、谁开的、是否还活着；要靠 `pgrep` 自己找 | ✅ `portal_tunnel(action=open)` 返回 `tunnel_id`，`portal_tunnel(action=list)` 看所有活跃隧道，`portal_tunnel(action=close)` 显式关；audit 可追溯 |
 | **命令审计** | 无——要审计得自己用 `script(1)` / shell history wrapper 包一遍，agent 调用不可见 | ✅ 状态变更工具先过策略门禁 `_gate`（拒则不执行、不留痕），通过后结构化写 `audit.jsonl`（host、operation、command、result、timestamp）；审计写失败默认 fail-closed（中止操作），可设 `PORTAL_AUDIT_FAIL_OPEN=1` 放宽 |
 | **结构化搜索** | `ssh host "grep -rn ... \| head"` 返回 **raw text，agent 自己 parse**；远端没装 rg 就降级 | ✅ `portal_grep` / `portal_glob` 优先 `rg --json`，自动 fallback `grep -rn` / `find`；返回 `{file, line, text}` 结构化 |
 
@@ -97,7 +97,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 # 3. 在 agent 对话中使用
 #    "帮我看看 myhost 上 /var/log/syslog 最后 50 行"
-#    agent 会调用 portal_bash("myhost", "tail -50 /var/log/syslog")
+#    agent 会调用 portal_exec("myhost", "tail -50 /var/log/syslog")
 ```
 
 不需要 clone 仓库、不需要 venv——`uvx` 会自动拉取并运行。开发者安装见 [安装](#安装)。
@@ -109,7 +109,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 │  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
 │ (Claude Code │                    │                                     │
 │  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
-│  Cursor ...) │                    │  │ 18 tools │──►│ security gate  │  │
+│  Cursor ...) │                    │  │ 14 tools │──►│ security gate  │  │
 └──────────────┘                    │  └──────────┘   │ + audit log    │  │
                                     │                  └───────┬────────┘  │
                                     │                          │           │
@@ -128,77 +128,88 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 ## 工具列表
 
-### 8 个核心工具（首选入口）
+14 个工具。去留判据：**只保留 agent 自己合成不出来的保证**（并发、原子/hash 防冲突、凭据不泄漏、安全 gate、真结构化输出）；"只是把一段脚本/状态打包"的（playbook、ping、rolling-as-tool、独立 tmp 清理）一律删掉或折进原语。
+
+### 跑命令：exec 家族（按"有状态 / 本地 / 同步 vs 异步"选）
+
+| 工具 | 什么时候用 |
+|---|---|
+| `portal_exec` | **默认主力**。无状态一次性，立刻拿结果（**分离的** stdout/stderr + exit code）。`host` 可单机 / 列表 / `group_tag`；`command` 单条或 `commands` 序列；多机默认并行，`serialize=True`(+`delay_s`) 走滚动；`use_sudo` / `secrets` 带外注入凭据。复用连接池，快。 |
+| `portal_shell` | 需要 **cwd/env 跨调用保留**（`cd`/`export`/venv）时才用——每 host 一个粘性 `bash -i`。输出是**合并**流（PTY 把 stdout/stderr 并了）。否则用 `portal_exec`（更快、可多机）。 |
+| `portal_job` | **后台**长任务。`submit` 秒回 `job_id`（远端 `nohup`+tmp 文件，**连接断了也接着跑**），`poll` 取增量输出 / 状态，`cancel` 杀，`list` 列。job 表内存态、有上限、TTL 清理；后台**不支持** sudo/secrets（用 `portal_exec`）。 |
+| `portal_local_exec` | 在 **MCP server 自己机器**上跑（不走 SSH）。威胁面更大，默认禁用，须 operator 设 `PORTAL_ALLOW_LOCAL_EXEC=1`。仅用于确属本机的任务。 |
+| `portal_close_shell` | 关掉某 host 的粘性 `portal_shell` 会话（下次 `portal_shell` 自动重开）。罕用，仅用于重置脏会话。 |
+
+> **★ 两层"复用"别搞混**：**连接复用**=asyncssh 的 TCP/channel 池，**所有**工具共享，纯为**速度**（首连 ~280ms，之后每 call ~10-30ms）；**会话复用**=只有 `portal_shell` 用的那个每 host 一个粘性 `bash -i`，为**状态连续**。bash 会话骑在池化 channel 上，两者正交。也正因为会话是隐式 plumbing，它的状态表归 `portal_audit(view="sessions")`，而不像 tunnel/host/job 那样自带 `list`。
+
+### 文件编辑 / 搜索 / 传输
 
 | 工具 | 给 agent 的能力 |
 |---|---|
-| `portal_read` / `portal_patch` | 读远端文件并拿 SHA-256；patch 用 `file_hash` + per-range hash 防并发覆盖，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验 |
-| `portal_grep` / `portal_glob` | 远端 `rg --json` / `find` 结构化输出，首次连接探测一次缓存 |
-| `portal_bash` / `portal_bash_close` | 每个 host 一个粘性 `bash -i`，cwd / env 跨调用保留；PTY echo + bracketed-paste 关闭以让 sentinel 正确工作；命令执行期间发 MCP progress 当 keepalive，避免长时间无输出的命令撞客户端 idle 超时（JSON-RPC `-32001`）；`use_sudo=True` 走一次性 `sudo -S`（密码从 per-user credential agent / `sudo_password_command` 取，不进 LLM，见[认证](#非交互-sudouse_sudo--portal-sudo-set)）。会话表（host→session_id）见 `portal_audit(view="sessions")` |
-| `portal_cleanup_tmps` | 清理 patch 中断后留下的孤儿 `*.mcp_tmp.*` |
+| `portal_read` / `portal_patch` | 读远端文件并拿 SHA-256；patch 用 `file_hash` + per-range hash 防并发覆盖，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验。**patch 成功后顺手扫掉同目录里 >1h 的孤儿 `*.mcp_tmp.*`**（白嫖已开的 SFTP 会话，异常完全隔离，绝不影响 patch 结果）——所以没有独立的 cleanup 工具。 |
+| `portal_grep` | 忠实移植 Claude Code 的 Grep：`output_mode=files_with_matches`(默认，路径按 mtime 倒序) / `content`(匹配行+可选上下文，`head_limit` 封顶**总行数**、`offset` 分页) / `count`。清晰参数名（`before_context`/`after_context`/`context`/`ignore_case` 取代 CC 的 `-B`/`-A`/`-C`/`-i`），尊重 `.gitignore`，每个结果带 `truncated` 标志。**别用 `portal_exec` 跑裸 `rg`**。 |
+| `portal_glob` | 忠实移植 CC 的 Glob：`rg --files --no-ignore --sort modified -g`，**按 mtime 倒序**、硬上限 100、带 `truncated`，返回 `{filenames, num_files, truncated, duration_ms}`。不尊重 `.gitignore`（CC Glob 默认）。**别用 `portal_exec` 跑裸 `find`**。 |
+| `portal_transfer` | `direction=upload\|download\|sync\|mirror\|upload-list\|download-list`。SFTP 二进制安全；`sync` 推目录、`mirror` 拉目录、`*-list` 传 `paths_json` 给定的一批任意 local↔remote 文件对，默认 size+mtime 增量短路（`checksum=True` 改用 sha256）；单文件失败进 `failed[]` 不中断整批；大文件传输用 MCP progress 心跳防 client idle 超时。 |
 
-### 10 个高层工具（mode 切换）
+### 资源（agent 显式管理，所以 `list` 跟工具走）
 
-| 工具 | mode / 参数 | 用途 |
+| 工具 | action / 参数 | 用途 |
 |---|---|---|
-| `portal_host` | `action=list\|register\|remove` | 主机注册（用于 tag 分组；`~/.ssh/config` 别名自动解析无需登记） |
-| `portal_transfer` | `direction=upload\|download\|sync\|mirror\|upload-list\|download-list` | SFTP 文件传输（二进制安全）；`sync` 推目录、`mirror` 拉目录、`upload-list` / `download-list` 传 `paths_json` 给定的一批任意 local↔remote 文件对，默认按 size+mtime 增量短路（传输用 `preserve=True` 保留源 mtime，做 rclone 式精确相等比较，不会误跳 out-of-band 改动），`checksum=True` 改用 sha256 比对；返回结构化 JSON（传输字节数 / 跳过数 / 失败列表 / 耗时），单个文件失败进 `failed[]` 不中断整批，大文件传输期间用 MCP progress 心跳防 client idle 超时 |
-| `portal_tunnel_open` / `_close` / `_list` | `mode=local\|reverse\|socks` | SSH 隧道（端口转发 / 反向 / SOCKS5） |
-| `portal_multi_exec` | `mode=parallel\|rolling\|broadcast`，`hosts_json\|group_tag` | 多机命令编排 |
-| `portal_playbook` | `host\|group_tag` | 多步骤剧本 |
-| `portal_ping` | optional `hosts_json` | 健康检查（单机或全 fleet） |
-| `portal_audit` | `view=snapshot\|server\|sessions\|history\|stats\|policy` | 审计日志 + 服务器内部状态 introspection（`server` view 只回版本/pid/uptime/config 路径；`sessions` view 回 host→session_id 粘性 bash 会话表，取代旧 `portal_bash_status`） |
-| `portal_check` | `host`，optional `command` | 安全策略 dry-run |
+| `portal_host` | `action=list\|register\|remove` | 主机注册。`register` 要 `name`+`host`——或只给 `name`（若 `~/.ssh/config` 有同名 Host 别名，自动登记 `use_ssh_config` 叠加）。`tags` 喂 `portal_exec` 的 `group_tag`。`list` 可能带 per-host `warnings`（如 hosts.yaml↔ssh config 冲突），要转告用户。**无 password 参数**。 |
+| `portal_tunnel` | `action=open\|close\|list`，`kind=local\|reverse\|socks` | 单入口 SSH 隧道（仿 `portal_host`）。`action` 选操作、`kind` 选隧道种类。`open` 走 host gate，`close` 按 `tunnel_id`（gate 在源 host）。 |
 
-### 专用工具 vs `portal_bash`：怎么选
+### introspection / 策略
 
-`portal_bash` 能跑任意命令，但**能用专用工具就别用 `portal_bash` 替代**——专用工具要么有安全保证，要么有结构化输出，agent 用起来更可靠：
-
-| 你要做的事 | 用这个（**不要** 用 `portal_bash` 裸命令） | 为什么 |
+| 工具 | view / 参数 | 用途 |
 |---|---|---|
-| 读 / 改远端文件 | `portal_read` → `portal_patch` | SHA-256 + per-range hash 防并发覆盖，atomic rename，写后 rehash；裸 `cat`/`>` 没有这些 |
-| 搜文件内容 / 找文件 | `portal_grep` / `portal_glob` | `rg --json` / `find` 结构化输出，agent 不用解析 raw 文本 |
-| 传文件 / 同步目录 | `portal_transfer` | SFTP 二进制安全 + 增量短路 + progress 心跳；`scp` 在循环里既无增量也会断 idle |
-| 多机执行 | `portal_multi_exec` / `portal_playbook` | 并发 / 滚动 / 广播 + 两阶段 gate；bash 里 `for h in ...; ssh $h` 没有 gate |
-| 开隧道 | `portal_tunnel_*` | 受管生命周期，`portal_audit` 可见；bash 里 `ssh -L` 跑飞了没人收 |
+| `portal_check` | `host`，optional `command` | 安全策略 dry-run，不执行。返回 `ALLOWED` / `BLOCKED: <reason>`。⚠️ 默认策略**宽松**——`ALLOWED` 只表示"当前没规则拦它"，不代表安全。 |
+| `portal_audit` | `view=snapshot\|server\|sessions\|history\|stats\|policy` | 只读内省**中枢**：server 元数据 + 连接池 + bash 会话 + 审计 stats + 策略。**hosts/tunnels 不在这里**——它们是资源，分别由 `portal_host(action=list)` / `portal_tunnel(action=list)` 列出。`sessions` view 是 plumbing 诊断（host→session_id 粘性会话表）。 |
 
-**剩下的一切**（跑进程、看日志、systemctl、docker、临时一行命令…）才是 `portal_bash` 的地盘——一个持久 `bash -i` 会话覆盖上游 27 个被砍掉的工具。原则：**同一任务里别把 `portal_*` 和 bash 里的 `ssh`/`scp` 混用**，否则会绕过 hash 校验或打断 sudo 流。
+### 怎么选：专用工具 vs `portal_exec`/`portal_shell`
+
+`portal_exec` 能跑任意命令，但**能用专用工具就别用裸命令替代**——专用工具要么有安全保证，要么有结构化输出：
+
+| 你要做的事 | 用这个（**不要**裸命令） | 为什么 |
+|---|---|---|
+| 读 / 改远端文件 | `portal_read` → `portal_patch` | SHA-256 + per-range hash 防并发覆盖，atomic rename，写后 rehash |
+| 搜文件内容 / 找文件 | `portal_grep` / `portal_glob` | 结构化 JSON + token 护栏；别用 `portal_exec` 跑裸 `rg`/`find` |
+| 传文件 / 同步目录 | `portal_transfer` | SFTP 二进制安全 + 增量短路 + progress 心跳 |
+| 多机执行 | `portal_exec(host=[...])` / `group_tag=` | 并发 / 滚动 + 两阶段 gate；bash 里 `for h; ssh $h` 没 gate |
+| 开隧道 | `portal_tunnel` | 受管生命周期、可 list；bash 里 `ssh -L` 跑飞了没人收 |
+| 长任务丢后台 | `portal_job` | 暴露状态 + 交还控制，可 poll/cancel；裸 `nohup &` 失联无回路 |
 
 ### 给 agent 的使用约定
 
-`portal-mcp-server` 只提供工具，并不强制 agent 怎么用。如果你希望 agent 在这套工具上行为可预期、不爆炸，建议在 `AGENTS.md` / `CLAUDE.md` 或系统 prompt 里加上以下规约：
+`portal-mcp-server` 只提供工具，不强制怎么用。建议在 `AGENTS.md` / 系统 prompt 加：
 
-- **优先确认 host 别名**——目标主机如果不在 `~/.ssh/config` 或 `hosts.yaml`，先问用户，不要随便注册一个新 host
-- **写文件走 read → patch**——先 `portal_read` 拿 `file_hash` 和 `range_hash`，再用同一组 hash 调 `portal_patch`；冲突时 patch 会返回新 hash，重读重改即可
-- **默认沙箱 `/tmp/`**——写操作默认落在远端 `/tmp/` 下；改 `$HOME` 或项目源码前必须先确认
-- **不混用工具**——一次任务里要么走 `portal_*`（hash 保护、连接池复用），要么走 bash 里的 `ssh`/`scp`，不要混用——混用会绕过 hash 校验或打断 sudo 流
-- **多机用专用工具**——`portal_multi_exec(mode="parallel")` / `portal_playbook(group_tag=...)`，不要在 bash 里循环 `ssh host1; ssh host2; ...`
-- **sudo 三选一**——需要 sudo 时：① 优先让 host 配 `sudo_password_command`（密码管理器拉，全自动）；② 或用户在另一终端 `portal sudo set <host>` 预先塞密码进 per-user credential agent，再 `portal_bash(..., use_sudo=True)`；③ 真正需要交互式 prompt（改密码、首次 TTY 校验）的，让用户 `ssh -t host sudo ...`。`use_sudo` 走一次性 exec，**不继承** 之前 `portal_bash` 的 cwd / env
+- **优先确认 host 别名**——不在 `~/.ssh/config` / `hosts.yaml` 的主机先问用户
+- **写文件走 read → patch**——冲突时 patch 返回新 hash，重读重改
+- **默认沙箱 `/tmp/`**——改 `$HOME` 或源码前先确认
+- **不混用工具**——一次任务要么走 `portal_*`，要么走 bash 里的 `ssh`/`scp`，混用会绕过 hash 校验或打断 sudo 流
+- **多机用 `portal_exec(host=[...])`**，不要在 bash 里循环 `ssh`
+- **sudo 三选一**——① host 配 `sudo_password_command`（密码管理器拉，全自动）；② 用户 `portal sudo set <host>` 预塞密码再 `portal_exec(..., use_sudo=True)`；③ 真要交互式 prompt 的让用户 `ssh -t host sudo ...`
 
 <details>
 <summary>📋 完整签名与源码位置</summary>
 
-> 下面是所有工具对大模型可见的签名（`ctx` 由 FastMCP 注入，不出现在 schema 里），以及各工具实现所在的模块。
+> 所有工具对大模型可见的签名（`ctx` 由 FastMCP 注入，不出现在 schema 里）。
 
 ### 工具签名
 
 | 工具 | 签名 |
 | --- | --- |
+| `portal_shell` | `(host, command, timeout=3600.0)` |
+| `portal_exec` | `(host='', command='', commands=None, group_tag='', timeout=3600.0, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` |
+| `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, signal='TERM')` |
+| `portal_local_exec` | `(command, secrets=None, timeout=600.0)` |
+| `portal_close_shell` | `(host)` |
 | `portal_read` | `(host, path, start=1, end=None, encoding='utf-8')` |
 | `portal_patch` | `(host, path, file_hash, patches_json, encoding='utf-8', auto_newline=False)` |
-| `portal_cleanup_tmps` | `(host, directory, max_age_s=3600)` |
-| `portal_grep` | `(host, path, pattern, glob='', file_type='', ignore_case=False, max_count=0)` |
+| `portal_grep` | `(host, pattern, path='.', glob='', file_type='', output_mode='files_with_matches', ignore_case=False, before_context=0, after_context=0, context=0, head_limit=250, offset=0, multiline=False)` |
 | `portal_glob` | `(host, pattern, path='.')` |
-| `portal_bash` | `(host, command, timeout=3600.0, use_sudo=False)` |
-| `portal_bash_close` | `(host)` |
 | `portal_host` | `(action, name='', host='', user='root', port=22, key_path='', tags='')` |
 | `portal_transfer` | `(direction, host, local_path, remote_path, checksum=False, paths_json='')` |
-| `portal_tunnel_open` | `(mode, host, local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
-| `portal_tunnel_close` | `(tunnel_id)` |
-| `portal_tunnel_list` | `()` |
-| `portal_multi_exec` | `(mode, command='', commands_json='', hosts_json='', group_tag='', timeout=3600, delay_s=2.0, stop_on_error=True)` |
-| `portal_playbook` | `(playbook_json, host='', group_tag='')` |
-| `portal_ping` | `(hosts_json='')` |
+| `portal_tunnel` | `(action, kind='local', host='', tunnel_id='', local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` |
 | `portal_check` | `(host, command='')` |
 | `portal_audit` | `(view='snapshot', limit=50, host_filter='')` |
 
@@ -206,44 +217,73 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 | 模块 | 负责的工具 / 职责 |
 | --- | --- |
-| `connection_manager.py` | 所有工具共用的连接池 |
-| `remote_text_editor.py` | `portal_read`、`portal_patch`、`portal_cleanup_tmps` |
+| `connection_manager.py` | 所有工具共用的连接池 + host 注册表 |
+| `shell_engine.py` | `portal_exec`（一次性 `ssh_exec`） |
+| `remote_bash.py` | `portal_shell` / `portal_close_shell` + sudo/secrets 一次性路径 |
+| `session_manager.py` | 持久 `bash -i` 会话（cwd/env、exit code） |
+| `job_manager.py` | `portal_job`（后台 submit/poll/cancel/list） |
+| `local_exec.py` | `portal_local_exec` |
+| `remote_text_editor.py` | `portal_read`、`portal_patch`（+ 孤儿 tmp 清扫） |
 | `remote_search.py` | `portal_grep`、`portal_glob` |
-| `remote_bash.py` | `portal_bash`、`portal_bash_close` |
 | `file_ops.py` | `portal_transfer` |
-| `network_tools.py` | `portal_tunnel_*` |
-| `orchestrator.py` | `portal_multi_exec`、`portal_playbook` |
-| `security.py` | `_gate()` / `_gate_many()` / `_gate_playbook()` 策略闸门 |
+| `network_tools.py` | `portal_tunnel` |
+| `security.py` | `_gate()` / `_gate_exec()` 策略闸门 |
 | `audit.py` | `audit_log()` 写入 + `portal_audit` introspection |
+
+完整逐工具参考见 [`docs/tools.md`](docs/tools.md)。
+
+</details>
+
+<details>
+<summary>🔀 从旧工具名迁移</summary>
+
+> 这轮重构改了名 / 合并 / 删除了一批工具（破坏性，但 commit 故意不标 `!`，版本号手控）。对照：
+
+| 旧 | 新 |
+|---|---|
+| `portal_bash(host, cmd)` | `portal_shell(host, cmd)`（持久会话）或 `portal_exec(host, cmd)`（一次性，更快） |
+| `portal_bash(..., use_sudo=True / secrets=[…])` | `portal_exec(..., use_sudo=True / secrets=[…])` |
+| `portal_bash_close` | `portal_close_shell` |
+| `portal_multi_exec(mode=parallel, hosts_json=…)` | `portal_exec(host=[…])` |
+| `portal_multi_exec(mode=rolling, …)` | `portal_exec(host=[…], serialize=True, delay_s=N)` |
+| `portal_multi_exec(mode=broadcast, commands_json=…)` | `portal_exec(host=[…], commands=[…])` |
+| `portal_playbook(host=…/group_tag=…)` | `portal_exec(host=…/group_tag=…, commands=[…])` |
+| `portal_ping(hosts_json=…)` | `portal_exec(host=[…], command="echo pong")` |
+| `portal_tunnel_open/_close/_list` | `portal_tunnel(action=open\|close\|list, kind=…)` |
+| `portal_cleanup_tmps` | 删除——`portal_patch` 成功后自动清扫同目录孤儿 tmp |
+| `portal_bash_status` | `portal_audit(view="sessions")` |
+| — | **新增** `portal_job(action=submit\|poll\|cancel\|list)` 后台任务 |
 
 </details>
 
 ## 设计理念
 
-### 工具精简：18 vs. 57
+### 工具精简：14 vs. 57
 
 Anthropic 的 [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) 明确说：
 
 > "More tools don't always lead to better outcomes... Tools that merely wrap existing software functionality is a common error... Too many tools or overlapping tools can also distract agents from pursuing efficient strategies."
 
-上游 `ssh-shell-mcp` 把每种 ergonomic 都做成单独 tool（`ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` ...），共 **57 个**。这些工具大部分是 bash 一行命令的包装，**`portal_bash`（持久 bash 会话）一个工具就能覆盖**。
+上游 `ssh-shell-mcp` 把每种 ergonomic 都做成单独 tool（`ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` ...），共 **57 个**。这些大部分是 bash 一行命令的包装，**`portal_shell`（持久 bash 会话）+ `portal_exec`（一次性，含多机/sudo/secrets）两个工具就能覆盖**。
 
 | 类别 | 数量 | 处理方式 |
 |---|---:|---|
-| **保留并重新设计** | 7 | `portal_read` + `portal_patch` 用 SHA-256 hash 保护取代裸 cat/write 的并发漏洞；`portal_grep` / `portal_glob` 提供结构化搜索结果；`portal_bash`(`_close`) 持久 shell；`portal_cleanup_tmps` 处理中断遗留 |
-| **mode-flag 合并** | 10 | `portal_tunnel_open(mode=local\|reverse\|socks)` 取代上游 3 个独立 tool；`portal_multi_exec(mode=parallel\|rolling\|broadcast)` 取代 4 个；`portal_audit(view=...)` 合并 sessions/history/stats/policy 等 introspection 接口（`sessions` view 即原 `portal_bash_status`） |
-| **完全砍掉** | 27 | 全部能由 `portal_bash` 直接覆盖：命令执行族 5、多 session 族 6、系统检查族（ps/df/free/journalctl/info/netstat/service）7、进程管理族 5、tmux 族 4 |
+| **保留并重新设计** | — | `portal_read`+`portal_patch`（SHA-256 hash 保护取代裸 cat/write 的并发漏洞）；`portal_grep`/`portal_glob`（忠实移植 CC schema 的结构化搜索）；`portal_shell`(`_close`) 持久 shell + exit code；`portal_exec` 一次性 + 多机 fanout + sudo/secrets；`portal_transfer` SFTP |
+| **action/mode 合并** | — | `portal_tunnel(action=open\|close\|list, kind=...)` 取代上游 3 个隧道 tool；`portal_host(action=...)`、`portal_audit(view=...)` 合并 introspection（`sessions` view 即原 `portal_bash_status`） |
+| **新增** | — | `portal_job`（后台 submit/poll/cancel/list，给 agent 中途思考+中断的能力） |
+| **删/吸收** | — | `multi_exec`→`portal_exec` flag；`playbook`→`portal_exec(commands=[…])`；`ping`→`portal_exec(host=[…], command="echo pong")`；`cleanup_tmps`→折进 `portal_patch`；上游命令执行族 5 / 多 session 族 6 / 系统检查族 7 / 进程管理 5 / tmux 4 全由 `portal_shell`/`portal_exec` 覆盖 |
 
-收益：context 从 ~7.5k tokens 降到 ~2.5k；agent 不再需要在多个语义重复的工具里选择。
+收益：context 从 ~7.5k tokens 降到 ~2.5k；agent 不再需要在多个语义重复的工具里选择。所有派发参数（`action`/`view`/`output_mode`/...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验。
+
 
 ### 进程内连接池
 
-portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有工具调用（`portal_bash`、`portal_read`、`portal_transfer` ...）共享同一条 TCP。**除第一次连接外全部摊销到 channel 创建（~10–30 ms）**，覆盖维度（vs OpenSSH `ControlMaster` / Win OpenSSH 无复用 / `ssh-scp` 跨工具复用 / persistent shell / 跨平台）已在上文 [§ 为什么用 portal-mcp-server](#为什么用-portal-mcp-server和传统方案的对比) 一次性对比过；下面只补几条机制层面的实现细节：
+portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有工具调用（`portal_shell`、`portal_read`、`portal_transfer` ...）共享同一条 TCP。**除第一次连接外全部摊销到 channel 创建（~10–30 ms）**，覆盖维度（vs OpenSSH `ControlMaster` / Win OpenSSH 无复用 / `ssh-scp` 跨工具复用 / persistent shell / 跨平台）已在上文 [§ 为什么用 portal-mcp-server](#为什么用-portal-mcp-server和传统方案的对比) 一次性对比过；下面只补几条机制层面的实现细节：
 
 - **池形态**：`PORTAL_SSH_POOL_SIZE` 控制每 host 最多 TCP 连接数（默认 5），`PORTAL_SSH_MAX_CHANNELS_PER_CONN` 控制单条 TCP 上 channel 上限（默认 5）；超出后新建 TCP，再超出则按"最空闲"复用并 warning。asyncio 在同一条 TCP 上支持多 channel **真并发**，不像 plain ssh 必须串行启动多个 ssh 进程（每个 channel 一个 fork+auth）。
 - **空闲与老化**：`PORTAL_SSH_MAX_IDLE_TIME` 默认 600 秒、`PORTAL_SSH_MAX_CONN_AGE` 默认 3600 秒；空闲到期或超龄且无活跃 channel 即关闭，防止 NAT/防火墙静默断连。
 - **长连接稳定性**：池连接随 MCP server 进程持续（小时级），相对 `ControlMaster` 默认 10 分钟 `ControlPersist`，长会话里的 reconnect 抖动也省了。
-- **微基准（脱敏）**：同 LAN（< 1ms RTT）跑 100 次 `echo pong`，plain ssh + ControlMaster 平均 23 ms；portal-mcp-server 通过 `portal_bash` 平均 18 ms（省了 ssh 子进程启动）。首次两边都 ~280 ms（auth 占大头）。
+- **微基准（脱敏）**：同 LAN（< 1ms RTT）跑 100 次 `echo pong`，plain ssh + ControlMaster 平均 23 ms；portal-mcp-server 通过 `portal_shell` 平均 18 ms（省了 ssh 子进程启动）。首次两边都 ~280 ms（auth 占大头）。
 - **Windows 上的具体表现**：plain ssh 每条命令 ~300 ms × N（无复用，连实验性的 named-pipe fallback 也常出问题），portal-mcp-server 首次 ~280 ms、后续 ~20 ms 直降到 channel 创建极限——asyncssh 是纯 Python，连接池放在自己进程内存，不依赖任何 OS 级 socket 共享（这正是 Win OpenSSH 的 ControlMaster 挂掉的地方）。
 
 ### 技术选型：asyncssh 而非 subprocess
@@ -351,7 +391,7 @@ portal secret set GITHUB_TOKEN
 
 > **⚠️ 平台支持：仅 Linux**。`portal agent install` 安装的是一对 **systemd 用户级单元（user units）**——`.socket` + `.service`，放在 `~/.config/systemd/user/`，由 **systemd 用户实例（`systemd --user`，又称 systemd user manager）** 用 **socket activation**（socket 激活）拉起。这套机制是 Linux 独有的；macOS 的 launchd、Windows Service 没有对等的封装实现，所以 `portal agent install` / `portal agent uninstall` 以及依赖 agent 的三个无回显输入命令（`portal ssh set` / `portal sudo set` / `portal secret set`）目前**只在 Linux 上可用**。
 >
-> macOS / Windows 上的替代方案：用 `hosts.yaml` 的 `password_command` / `sudo_password_command`，或 `secrets.yaml` 的 `command:` 字段，从系统密码管理器（Keychain、`pass`、`secret-tool`、`gopass`、1Password CLI 等）按需读取——见下文「[认证](#认证)」。MCP server 本身（`portal_bash` 等所有远端工具）在 Windows / macOS / Linux 都正常工作；只有这个**本机交互式无回显塞密码**的 agent 路径是 Linux 限定。
+> macOS / Windows 上的替代方案：用 `hosts.yaml` 的 `password_command` / `sudo_password_command`，或 `secrets.yaml` 的 `command:` 字段，从系统密码管理器（Keychain、`pass`、`secret-tool`、`gopass`、1Password CLI 等）按需读取——见下文「[认证](#认证)」。MCP server 本身（`portal_shell` 等所有远端工具）在 Windows / macOS / Linux 都正常工作；只有这个**本机交互式无回显塞密码**的 agent 路径是 Linux 限定。
 
 `portal ssh set` / `portal sudo set` / `portal secret set` 的无回显交互值不再塞进某个 MCP server 进程自己的内存，而是进入一个 per-user、systemd socket-activated 的**凭据 agent**（credential agent）。使用这些交互凭据命令前，先显式安装并启动用户级 socket：
 
@@ -540,7 +580,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 |---|---|---|
 | 文件路径 | `PORTAL_HOSTS_YAML` | 主机注册 YAML |
 | 文件路径 | `PORTAL_POLICIES_YAML` | 安全策略 YAML |
-| 文件路径 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML（`portal_bash` / `portal_local_exec` 的 `secrets=` 参数解析源） |
+| 文件路径 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML（`portal_shell` / `portal_exec` / `portal_local_exec` 的 `secrets=` 参数解析源） |
 | 文件路径 | `PORTAL_LOG_DIR` | audit + server log 目录 |
 | 安全与认证 | `PORTAL_AUDIT_FAIL_OPEN` | audit 写盘失败时是否 fail-open |
 | 安全与认证 | `PORTAL_AUTH_TOKEN` | HTTP transport 的 Bearer token |
@@ -548,7 +588,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 | 连接池 | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 最大并发 channel 数 |
 | 连接池 | `PORTAL_SSH_MAX_IDLE_TIME` | 空闲连接自动关闭超时（秒） |
 | 连接池 | `PORTAL_SSH_MAX_CONN_AGE` | 连接最大存活时间（秒） |
-| 可靠性 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_bash` 执行期间 keepalive 心跳间隔（秒） |
+| 可靠性 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_shell` 执行期间 keepalive 心跳间隔（秒） |
 | 测试（仅 dev） | `PORTAL_TEST_LIVE` | 是否执行真实 SSH 集成测试 |
 | 测试（仅 dev） | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | live 测试目标 |
 
@@ -603,7 +643,7 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
-| `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_bash` / `portal_local_exec` 在命令执行期间每隔多少秒发一条 MCP progress 通知作 keepalive。命令无输出也不会让 client 撞 idle 超时（JSON-RPC `-32001`）；与服务端 `timeout` 参数相互独立。非正数或非法值回退到默认 | `5`（秒） |
+| `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_shell` / `portal_exec` / `portal_local_exec` 在命令执行期间每隔多少秒发一条 MCP progress 通知作 keepalive。命令无输出也不会让 client 撞 idle 超时（JSON-RPC `-32001`）；与服务端 `timeout` 参数相互独立。非正数或非法值回退到默认 | `5`（秒） |
 
 ### 测试（仅 dev）
 
@@ -647,8 +687,8 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 | 凭据流 | 命令源（密码管理器派） | 无回显交互入口（getpass 派） | 缓存 key | 缓存语义 | 触发点 |
 |---|---|---|---|---|---|
 | **A. 远程 SSH 登录密码** | `password_command`（hosts.yaml） | ✅ `portal ssh set <host>` | host | agent 内存 TTL（默认 900s，仅交互入口；命令源每次现取） | `auth: password` 连接时 / 密钥失败时自动 fallback |
-| **B. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `portal sudo set <host>` | host | agent 内存 TTL（默认 900s） | `portal_bash(use_sudo=True)` |
-| **C. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `portal secret set <name>` | name | agent 内存 TTL（默认 900s，`--ttl` 可调） | `portal_bash(secrets=[…])` |
+| **B. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `portal sudo set <host>` | host | agent 内存 TTL（默认 900s） | `portal_exec(use_sudo=True)` |
+| **C. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `portal secret set <name>` | name | agent 内存 TTL（默认 900s，`--ttl` 可调） | `portal_exec(secrets=[…])` |
 | **D. secret 注入·本地** | 同 C（共用 `secrets.yaml`） | 同 C（共用 `portal secret set`） | 同 C | 同 C | `portal_local_exec(secrets=[…])` |
 
 几点要知道：
@@ -658,6 +698,18 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 - **A 的回落顺序**：`auth: password` 主动登录走 `cache（portal ssh set）→ password_command → 错误`；纯密钥 host 在 asyncssh 抛 `PermissionDenied` 时自动 retry 一次密码路径（同一条 chain），有 cache 或 `password_command` 才 retry，否则原异常透传——免得"配置缺失"的报错盖掉"密钥真不对"的真因。
 - **交互入口（getpass 派）= per-user agent 内存 TTL 缓存**：默认 900 秒、TTL 内可复用、到期自动清、agent 重启即丢、从不落盘。**命令源（密码管理器派）= 每次现取**，无 TTL。
 - **明文永不离开 agent 内存**：CLI 故意没有 `show plaintext` 动词；`portal {ssh,sudo,secret} show <key>` 只回 sha256[:16] 指纹 + 剩余 TTL，`list` 汇总，`confirm` 二次输入比对。明文只交给同 uid 的真消费者（asyncssh / `sudo -S` / `$env` 注入）。完整 rationale 见上文 [systemd --user 凭据 agent](#systemd---user-凭据-agent) 段。
+
+#### 四套凭据机制：实现与为什么
+
+四种凭据走四套**不同**机制，不是随意挑的——每种凭据的消费方决定了注入方式：
+
+| 凭据类型 | 实现 | 为什么这么选 |
+|---|---|---|
+| **SSH 登录密码** | asyncssh `password=` 参数（SSH 协议级），源：`password_command` / `portal ssh set` 缓存 | SSH 协议原生支持密码认证，直接走协议帧最干净 |
+| **SSH key passphrase** | asyncssh `passphrase=` 参数，源：ssh-agent → `portal ssh set` 缓存 → `passphrase_command`；或 `use_ssh_agent` 纯走 agent | 本地解密 key，passphrase 不出当前进程。从用户视角"给这台 host 一个密码"和登录密码是同一件事，所以**复用同一套 `portal ssh set <host>`**，连接时按 host 的 auth 模式自动分派成登录密码 or passphrase |
+| **sudo 密码** | `sudo -S` + 喂 stdin（`conn.run(input=pw)`），源：`sudo_password_command` / `portal sudo set` 缓存 | sudo 只认 `-S`/`-A`/tty，不读 env。`-S` 安全暴露面最窄：密码寿命极短（读完即弃）、无远端落地物、不进 env（对比 `-A` askpass 要落临时 helper 文件 + helper 进程 env 含密码）。代价：sudo 命令本体的 stdin 被密码占用、提前 EOF（curl/CLI flag-reading 工具无影响） |
+| **secrets**（API tokens） | `bash -s` + stdin 喂 `export VAR=…\n<cmd>\n`，源：`secrets.yaml` `command` / `portal secret set` 缓存 | 工具普遍读 env（`GH_TOKEN`/`AWS_*`）；更纯的 SSH 协议级 env 帧被 sshd `AcceptEnv` 白名单（默认只 `LANG`/`LC_*`）卡住到不了远端，只能这么 workaround。值短暂在 bash stdin 解析的脚本串里，但 bash 即用即弃、不进 argv（不在 `ps`）、不进 log，比 `--token=xxx` 走 argv 窄得多 |
+
 
 ### SSH key（首选）
 
@@ -725,9 +777,16 @@ headless / CI 跑不动 ssh-agent 时，可在 `hosts.yaml` 写 `passphrase_comm
 
 运行时行为：`password_command` 10 秒超时，结尾换行剥掉一个，stderr 永不进日志（防泄密），非 0 退出 / 空输出 / 非 UTF-8 输出全部硬失败。设计细节（为什么 `shell=True`、为什么强制 `client_keys=[]`、为什么 stderr 不进日志…）见 **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**。
 
-### 加密私钥的 passphrase：`passphrase_command`
+### 加密私钥的 passphrase：`portal ssh set` / `passphrase_command` / `use_ssh_agent`
 
-同款机制，应用到加密私钥的解锁 passphrase：
+从用户视角，"给这台 host 一个密码"——无论它解锁的是 SSH 登录还是私钥文件——是同一件事。所以 passphrase **复用和 SSH 登录密码完全一样的一套**：同一个 `portal ssh set <host>` 入口、同一套 hosts.yaml 字段语义。连接时按 host 的 auth 模式自动分派（`auth: password` → 当登录密码；key auth + 加密 key → 当 passphrase）。
+
+完整 passphrase 优先级链（按顺序尝试）：
+
+1. **ssh-agent**（`$SSH_AUTH_SOCK`，用户已 `ssh-add` 解锁过的 key）—— **首选**，最常用、key 永不出 agent
+2. **agent 缓存**（`portal ssh set <host>` 临时无回显输入，TTL 缓存）—— 临时用一阵子
+3. **`passphrase_command`**（密码管理器拉）—— headless / CI
+4. asyncssh 默认加载 key 文件
 
 ```yaml
 hosts:
@@ -736,13 +795,17 @@ hosts:
     user: deploy
     key: ~/.ssh/encrypted_key
     passphrase_command: pass show ssh/encrypted_key
+    # 显式控制 ssh-agent：true=纯走 agent（不传 client_keys，用 agent 持有的 key）；
+    # false=硬禁用 agent（只用 key 文件）；省略=auto（asyncssh 自己兜底试 SSH_AUTH_SOCK）
+    use_ssh_agent: true
 ```
 
-ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headless / CI 这种没有交互终端的场景下用。
+ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；`passphrase_command` 只在 headless / CI 没有交互终端的场景用。
 
 ### 非交互 sudo：`use_sudo` + `portal sudo set`
 
-`portal_bash(host, cmd, use_sudo=True)` 让 agent 跑需要 root 的命令，但 **sudo 密码永远不进 LLM**——`portal_bash` 没有 password 参数，密码由 server 端就地解析。两条来源（同 SSH 密码一样的哲学）：
+`portal_exec(host, cmd, use_sudo=True)` 让 agent 跑需要 root 的命令，但 **sudo 密码永远不进 LLM**——`portal_exec` 没有 password 参数，密码由 server 端就地解析。两条来源（同 SSH 密码一样的哲学）：
+
 
 1. **密码管理器（1a，全自动）**——`hosts.yaml` 里给 host 配 `sudo_password_command`，机制与 `password_command` 完全对称：
 
@@ -768,7 +831,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 取密码顺序：**agent 内存缓存（1b）→ `sudo_password_command`（1a）→ 报错**（提示去 `portal sudo set` 或配 `sudo_password_command`）。
 
-实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `bash -i` 会话（`sudo -S` 读 stdin 会和 sentinel 协议打架）。因此 sudo 命令**不继承** 之前 `portal_bash` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_bash` 处理不了，让用户 `ssh -t host sudo ...`。
+实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `bash -i` 会话（`sudo -S` 读 stdin 会和 sentinel 协议打架）。因此 sudo 命令**不继承** 之前 `portal_shell` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_shell` 处理不了，让用户 `ssh -t host sudo ...`。
 
 ### 命名 secret 注入：`secrets=[…]` + `portal secret set`
 
@@ -776,7 +839,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 > **为什么不直接 `export`？** 痛点在于：临时 `export TOKEN=…` 注入不进 agent 的执行上下文——它只对你手里那个新开的终端生效，agent 跑命令用的是 MCP server 进程的环境，根本看不到。要让 agent 用上，过去只能 `vim` 一个 `.env` / secrets 文件让它去 source，于是 secret 又落了盘、又容易忘删。这个设计把"临时给一次密钥"做成了**原生的无回显 CLI 输入**（`portal secret set` 走 `getpass`，和你平时输密码一样），值只进 per-user credential agent 内存、带 TTL 自动过期，既不落盘也不进 LLM。
 
-- 远程：`portal_bash(host, cmd, secrets=["github_token"])`，命令里写 `$GITHUB_TOKEN`（secret 名大写）。
+- 远程：`portal_exec(host, cmd, secrets=["github_token"])`，命令里写 `$GITHUB_TOKEN`（secret 名大写）。
 - 本地：`portal_local_exec(cmd, secrets=["github_token"])`，在 **MCP server 本机**跑命令（不走 SSH）。本地执行威胁面更大，**默认禁用**，须给 server 进程设 `PORTAL_ALLOW_LOCAL_EXEC=1` 才开。
 
 两条来源（顺序：agent 内存缓存 → `secrets.yaml`）：
@@ -801,7 +864,7 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
    值经 systemd --user 管理的本地 unix socket 推进 per-user credential agent 内存缓存：`.socket` unit 监听 `%t/portal-mcp-server/credentials.sock`，安装器在 `agent.json` 记录解析后的绝对路径，目录 0700 / socket 0600，仅本用户可达。值**从不落盘、从不进 LLM**，TTL 到期自动清除。
 
-完整配置见 [`examples/secrets.yaml`](./examples/secrets.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_bash` 调用里互斥。
+完整配置见 [`examples/secrets.yaml`](./examples/secrets.yaml)。`secrets` 与 `use_sudo` 在同一次 `portal_shell` 调用里互斥。
 
 #### 等待语义：fail-fast → `ask_user` → 重试
 
@@ -813,13 +876,36 @@ ssh-agent 跑得起来时**不要**用这个，agent 体验更好；只在 headl
 
 于是"等待"只体现为一次正常的对话轮次交接：阻塞的是用户自己终端里的 `getpass`，agent 端永远是"查缓存 → 命中就跑 / 没命中就 fail-fast 给指令"。**绝不要让用户把值粘进对话**——那等于把它喂给了第三方 LLM，整套设计就白做了。
 
+### hosts.yaml 与 `~/.ssh/config`：优先级 + 叠加
+
+**优先级（无字段级 merge）**：同名 host 一旦在 `hosts.yaml` 出现，就**完全覆盖** ssh config，根本不查 ssh config——不存在"hosts.yaml 补 sudo，连接参数继承 ssh config 的 ProxyJump"这种混合。两个 footgun，server 都会发 warning（经 `portal_host(action=list)` 的 `warnings` 透出，因为 stdio server 的 stderr 用户看不见）：
+
+- 同名 host 同时在两边 → hosts.yaml 默默赢，ssh config 的 `IdentityFile`/`ProxyJump`/`User` 全失效；
+- `use_ssh_config: true` 但 ssh config 没对应 alias → asyncssh 回落到默认 DNS+user+key，多半不是你要的。
+
+**叠加配方**（连接靠 ssh config，元数据靠 hosts.yaml）：
+
+```yaml
+hosts:
+  web01:                          # key 必须 == ssh config 里 Host 别名
+    use_ssh_config: true          # 连接参数全从 ssh config 拿（HostName/User/Port/IdentityFile/ProxyJump…）
+    tags: [web, prod]             # portal 独有：portal_exec 的 group_tag
+    sudo_password_command: pass show sudo/web01   # portal 独有
+```
+
+`portal_host(action="register", name="web01")` 只给 `name` 时，会自动查 ssh config——有同名 alias 就自动登记成上面这种叠加。
+
+**字段对照 + 渐进补全**：基础字段全有（`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`），常用高级字段 `proxy_jump`（→ asyncssh `tunnel`）、`keepalive_interval`（→ ServerAliveInterval）、`forward_agent`（→ agent 转发）现已**原生支持**；其余 ssh config 字段走 `use_ssh_config: true` 叠加。
+
 ## 安全
 
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
-- **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel_close` 也走 gate；多机 gate 两阶段）
+- **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel(action=close)` 也走 gate；多机 gate 两阶段）
 - **认证**：默认且推荐 SSH key；密码登录支持但只走 `hosts.yaml` 的 `password_command`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
 - **审计**：所有状态变更写 `$PORTAL_LOG_DIR/audit.jsonl`（默认 `~/.local/state/portal-mcp-server/log/audit.jsonl`）；默认 fail-closed（`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open）
 - **hash 保护编辑**：`portal_read` + `portal_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
+- **远端 bash history 风险（异常远端配置）**：`portal_exec(secrets=…)` 的注入依赖远端 bash **非交互模式默认关 history**（bash 上游设计，与 `ssh`/`ansible`/CI shell step 等所有 SSH 命令执行工具相同前提）。若远端管理员**强制**了 `BASH_ENV` + `set -o history`，或在 `/etc/bash.bashrc` 删了 `[[ $- != *i* ]] && return` 守卫，则**任何**走 SSH 的 secret 注入工具（含本工具、`ssh`、`ansible`、CI runner）都可能让 secret 值进 `~/.bash_history`。这不是本项目独有弱点，是 Unix/SSH 生态的普遍前提。部署前在你的远端验证 `bash -s <<< 'echo test'` 不写 history。
+
 
 完整威胁模型、各防御层细节、运维 hygiene、已知限制、算法引用见 **[`SECURITY.md`](./SECURITY.md)**。
 
@@ -839,7 +925,7 @@ pytest tests/ -v
 
 ### 端到端 live smoke
 
-`tests/live_smoke.py` 直接 import 本地工作树驱动一系列真实 SSH 行为：`hosts.yaml` 残留 `password:` 字段处理、`ssh_exec` 基础调用、`portal_multi_exec(mode="parallel", group_tag=...)` 在真实主机上的 gate（blocked 命令 + 不在 allowlist 的主机均拦截）、`portal_bash` 单命令的 gate、`portal_bash` + `portal_patch` 在远端 `/tmp/` 的 round-trip（含 stale-hash 拒绝路径）、audit.jsonl 是否吃到新加的 operation tag。
+`tests/live_smoke.py` 直接 import 本地工作树驱动一系列真实 SSH 行为：`hosts.yaml` 残留 `password:` 字段处理、`ssh_exec` 基础调用、`portal_exec(group_tag=...)` 在真实主机上的 gate（blocked 命令 + 不在 allowlist 的主机均拦截）、`portal_shell` 单命令的 gate、`portal_shell` + `portal_patch` 在远端 `/tmp/` 的 round-trip（含 stale-hash 拒绝路径）、audit.jsonl 是否吃到新加的 operation tag。
 
 ```bash
 PORTAL_AUDIT_FAIL_OPEN=1 \
@@ -919,7 +1005,7 @@ Apache License 2.0（见 [`LICENSE`](LICENSE)）。
 
 衍生关系与 third-party 算法引用见 [`NOTICE`](NOTICE)：
 
-- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）**——git ancestry，底层模块（asyncssh 引擎、连接池、tunnel 管理、orchestrator、安全策略）沿用；上层 18 个 `portal_*` 工具是新设计
+- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）**——git ancestry，底层模块（asyncssh 引擎、连接池、tunnel 管理、orchestrator、安全策略）沿用；上层 14 个 `portal_*` 工具是新设计
 - **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT）**——`remote_text_editor.py` 的 SHA-256 hash-protected edit 算法参考来源，针对 AsyncSSH SFTP 重写
 
 > ⚠️ 本工具让 agent 拥有对远端系统的 SSH 访问能力。请只在你拥有或被授权的系统上使用。

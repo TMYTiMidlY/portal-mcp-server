@@ -51,7 +51,7 @@ When adding a new `@mcp.tool()`:
 
 1. **Reconsider whether you need a new tool.** Prefer extending an
    existing `portal_*` tool's `mode` / `action` parameter. The
-   "18 vs 57" tool-budget framing in the README is a deliberate
+   "14 vs 57" tool-budget framing in the README is a deliberate
    design constraint — don't blow it without a reason.
 2. **Write a complete docstring.** FastMCP exposes the docstring
    verbatim as the MCP tool description; the quality of the docstring

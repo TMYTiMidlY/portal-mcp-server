@@ -812,6 +812,7 @@ async def portal_shell(host: str, command: str, timeout: float = 3600.0,
 
     Use portal_shell only when you need that state continuity; otherwise use
     portal_exec (it's faster — no session setup — and can target many hosts).
+    For a long task you want to background and poll, use portal_job.
 
     Behavior:
       - First call for a host auto-creates a `bash -i` session via SSH; later
@@ -859,7 +860,7 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     persistent-session setup).
 
     Need cwd/export to persist across calls? Use portal_shell instead (single
-    host, stateful).
+    host, stateful). Got a long task to background and poll? Use portal_job.
 
     Targets (pick one):
       - host="web01"               : a single host.
@@ -897,7 +898,10 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
         exports it as the uppercased env var (github_token → $GITHUB_TOKEN).
         Reference it as `$GITHUB_TOKEN`. The value is fed over SSH stdin (never
         on argv/audit) and redacted to *** in the returned stdout/stderr.
-        Cannot be combined with use_sudo.
+        Cannot be combined with use_sudo. (⚠️ On a misconfigured remote that
+        forces history in non-interactive bash, a secret could land in
+        ~/.bash_history — the same caveat applies to ssh/ansible/CI; see the
+        README security section.)
     """
     # ── Resolve target hosts (host str | host list | group_tag) ──
     if group_tag:
@@ -1018,12 +1022,15 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
 async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
                             timeout: float = 600.0,
                             ctx: "Context | None" = None) -> str:
-    """Run a ONE-SHOT command on the MCP server host (LOCAL), optionally with
-    named secrets injected as environment variables.
+    """Run a command on the **MCP server's own machine** (LOCAL), optionally
+    with named secrets injected as environment variables. This does NOT go over
+    SSH to a remote host — for that use portal_exec.
 
-    Unlike every other portal_* tool (which runs over SSH on a remote host),
-    this executes locally — a larger threat surface — so it is DISABLED unless
-    the operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` for the server process.
+    Because local execution is a larger threat surface (it touches the server's
+    filesystem, environment, and credential socket), it is DISABLED unless the
+    operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` for the server process. Use it
+    only for tasks that genuinely belong on this host (e.g. a local script that
+    needs a local secret); anything on a remote host goes through portal_exec.
 
     secrets: a list of named secrets (e.g. ["github_token"]). You pass the NAME,
         never the value: the server resolves each from secrets.yaml or the
