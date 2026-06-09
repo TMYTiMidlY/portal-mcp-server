@@ -107,3 +107,51 @@ def test_set_does_not_reinstall_when_socket_present(monkeypatch, tmp_path):
                         fake_install)
     assert cli._ensure_agent_for_write(lambda: present) == present
     assert called["install"] is False
+
+
+# ── multi-step under sudo: commands[] runs separately; newlines never collapsed
+
+@pytest.mark.asyncio
+async def test_commands_under_sudo_run_each_separately(monkeypatch):
+    """The human-friendly multi-step path: commands=[...] + use_sudo runs each
+    line as its own sudo exec, verbatim — no flattening into one arg list."""
+    seen = []
+
+    async def fake_resolve(host):
+        return "pw"
+
+    async def fake_sudo(h, cmd, password, timeout=0):
+        seen.append(cmd)
+        return {"host": h, "command": cmd, "exit_code": 0,
+                "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(sudo_creds, "resolve_sudo_password", fake_resolve)
+    monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo)
+    await cli.portal_exec("web01",
+                          commands=["systemctl restart caddy", "sleep 4",
+                                    "echo ok"],
+                          use_sudo=True)
+    assert seen == ["systemctl restart caddy", "sleep 4", "echo ok"]
+
+
+@pytest.mark.asyncio
+async def test_multiline_sudo_command_newlines_preserved(monkeypatch):
+    """A multi-line `command` string reaches the sudo exec with newlines intact
+    (the server never collapses them to spaces); remote_sudo_exec then runs it
+    as a `bash -c` script."""
+    seen = []
+
+    async def fake_resolve(host):
+        return "pw"
+
+    async def fake_sudo(h, cmd, password, timeout=0):
+        seen.append(cmd)
+        return {"host": h, "command": cmd, "exit_code": 0,
+                "stdout": "", "stderr": ""}
+
+    monkeypatch.setattr(sudo_creds, "resolve_sudo_password", fake_resolve)
+    monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo)
+    await cli.portal_exec("web01",
+                          command="systemctl restart caddy\nsleep 4\necho ok",
+                          use_sudo=True)
+    assert seen[0] == "systemctl restart caddy\nsleep 4\necho ok"

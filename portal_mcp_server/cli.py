@@ -909,9 +909,21 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
       - group_tag="prod"           : every registered host carrying that tag.
 
     Commands (pick one):
-      - command="uptime"                       : a single command.
+      - command="uptime"                       : a single command. A multi-line
+        string is fine — it's run as one `bash -c` script (newlines are
+        preserved and act as statement separators), so the whole thing executes
+        as written.
       - commands=["apt update","apt upgrade"]  : a sequence run in order on
-        each host (stops at the first non-zero exit when stop_on_error=True).
+        each host (stops at the first non-zero exit when stop_on_error=True),
+        each with its own exit code in the result.
+
+    ★ For several steps, **prefer `commands=[...]` (a JSON array) over packing
+    multiple lines into one `command` string** — the array is unambiguous and
+    can't be silently flattened into a single space-joined line, and you get a
+    per-step exit code. This matters most with `use_sudo`: `commands=["systemctl
+    restart x","sleep 4","curl ..."]` runs each line as its own `sudo` command,
+    whereas a multi-line `command` that some caller flattened to
+    "systemctl restart x sleep 4 curl ..." would feed `systemctl` garbage args.
 
     Fan-out across multiple hosts is **parallel** by default. Set
     serialize=True to run hosts one at a time (a rolling / zero-downtime
