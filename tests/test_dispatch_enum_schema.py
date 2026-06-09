@@ -23,6 +23,8 @@ _DISPATCH_ENUMS = [
     ("portal_tunnel", "kind", {"local", "reverse", "socks"}),
     ("portal_grep", "output_mode",
      {"files_with_matches", "content", "count"}),
+    ("portal_job", "action", {"submit", "poll", "cancel", "list"}),
+    ("portal_job", "signal", {"TERM", "KILL"}),
     ("portal_audit", "view",
      {"snapshot", "server", "sessions", "history", "stats", "policy"}),
 ]

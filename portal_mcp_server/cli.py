@@ -1,7 +1,8 @@
 """
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
-Exposes 14 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
-shell(+close_shell)/exec core + local_exec + host/transfer/tunnel/audit/check.
+Exposes 15 portal_* tools covering: read/patch/cleanup_tmps/grep/glob/
+shell(+close_shell)/exec/job core + local_exec + host/transfer/tunnel/audit/
+check.
 """
 import asyncio
 import json
@@ -19,6 +20,7 @@ from .shell_engine import ssh_exec
 from .file_ops import (ssh_upload_file, ssh_download_file, ssh_sync_directory,
                        ssh_mirror_directory, ssh_upload_list, ssh_download_list)
 from .network_tools import get_tunnel_manager
+from .job_manager import get_job_manager
 from .audit import audit_log, get_history, get_audit_stats
 from .security import get_policy
 from .server_info import server_info, set_transport as _set_server_transport
@@ -1087,6 +1089,92 @@ async def portal_close_shell(host: str) -> str:
     if err:
         raise ToolError(f"BLOCKED: {err}")
     return await _re_bash_close(host)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# BACKGROUND JOBS  (portal_job — action=submit|poll|cancel|list)
+# ═══════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
+                     host: str = "", command: str = "", job_id: str = "",
+                     since: int = 0, tail: int = 0,
+                     signal: Literal["TERM", "KILL"] = "TERM") -> str:
+    """Run a command in the **background** and get a job_id back immediately, so
+    you can keep thinking while it runs, poll for incremental output, and cancel
+    it. Use this for long tasks; for a command that finishes quickly just use
+    portal_exec (it waits and returns the result).
+
+    ## Actions
+    - action="submit": start `command` on `host` in the background (nohup +
+        remote tmp files), returning {job_id, host, remote_pid, started_at,
+        status} right away. The job keeps running even if the SSH connection
+        drops. NOTE: sudo / secret injection are NOT supported in the
+        background (sudo -S needs stdin; secrets would land on argv / `ps`) —
+        use portal_exec for those.
+    - action="poll": fetch this job's status + new output. Required: job_id.
+        Pass since=<new_offset from the previous poll> to get only the bytes
+        produced since then (avoids re-pulling output); or tail=N to just get
+        the last N lines. Returns {status: running|done|failed|cancelled|
+        unknown, exit_code?, output_chunk, new_offset, finished_at?}.
+    - action="cancel": signal the job. Required: job_id. signal=TERM (default)
+        or KILL. Best-effort — `kill` doesn't guarantee instant death; poll to
+        confirm. Returns {job_id, signal_sent, status_after}.
+    - action="list": list all known jobs {job_id, host, status, started_at,
+        age_s, exit_code?}.
+
+    Limits (L1): job_ids do NOT survive a server restart (the job table is
+    in-memory; the remote process keeps running but becomes detached from your
+    view — recover it manually via `ps` if needed). Finished jobs are swept
+    after a TTL (default 1h) and their tmp files removed. There is a cap on
+    concurrent live jobs (default 50).
+
+    Manual fallback (no portal_job): you can always background a command
+    yourself with portal_exec(command="nohup mycmd >/tmp/x.log 2>&1 & echo $!")
+    and poll the log with portal_exec(command="tail /tmp/x.log").
+    """
+    jm = get_job_manager()
+
+    if action == "list":
+        return json.dumps(await jm.list_jobs(), indent=2, ensure_ascii=False)
+
+    if action == "submit":
+        if not host or not command:
+            raise ToolError('action="submit" requires `host` and `command`.')
+        err = _gate(host, command)
+        if err:
+            raise ToolError(f"BLOCKED: {err}")
+        try:
+            res = await jm.submit(host, command)
+        except RuntimeError as e:
+            raise ToolError(str(e))
+        audit_log(host, f"job-submit: {command}", res.get("job_id", "?"),
+                  operation="job_submit")
+        return json.dumps(res, indent=2, ensure_ascii=False)
+
+    if action == "poll":
+        if not job_id:
+            raise ToolError('action="poll" requires `job_id`.')
+        res = await jm.poll(job_id, since=since, tail=tail)
+        return json.dumps(res, indent=2, ensure_ascii=False)
+
+    if action == "cancel":
+        if not job_id:
+            raise ToolError('action="cancel" requires `job_id`.')
+        # Gate against the job's host so an agent that lost host access can't
+        # still kill its jobs (consistent with portal_tunnel close).
+        jobs = await jm.list_jobs()
+        owner = next((j["host"] for j in jobs if j["job_id"] == job_id), None)
+        if owner is not None:
+            err = _gate(owner)
+            if err:
+                raise ToolError(f"BLOCKED: {err}")
+        res = await jm.cancel(job_id, signal=signal)
+        audit_log(owner or "?", f"job-cancel:{job_id}",
+                  res.get("status_after", "?"), operation="job_cancel")
+        return json.dumps(res, indent=2, ensure_ascii=False)
+
+    raise ToolError(f'unknown action {action!r}. Valid: submit, poll, cancel, list.')
 
 
 # ═══════════════════════════════════════════════════════════════════
