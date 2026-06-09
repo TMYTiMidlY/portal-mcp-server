@@ -74,6 +74,21 @@ async def test_submit_no_pid_raises(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_submit_use_sudo_is_rejected_with_redirect():
+    # background can't feed sudo's stdin -> guide the agent to portal_exec/shell
+    with pytest.raises(ToolError, match="portal_exec"):
+        await cli.portal_job(action="submit", host="h", command="x",
+                             use_sudo=True)
+
+
+@pytest.mark.asyncio
+async def test_submit_secrets_is_rejected_with_redirect():
+    with pytest.raises(ToolError, match="portal_exec"):
+        await cli.portal_job(action="submit", host="h", command="x",
+                             secrets=["GITHUB_TOKEN"])
+
+
+@pytest.mark.asyncio
 async def test_submit_respects_max_live(monkeypatch):
     monkeypatch.setenv("PORTAL_JOB_MAX_LIVE", "1")
     _install_conn(monkeypatch, lambda c: "5\n" if "echo $!" in c else "")

@@ -1126,7 +1126,9 @@ async def portal_close_shell(host: str) -> str:
 async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
                      host: str = "", command: str = "", job_id: str = "",
                      since: int = 0, tail: int = 0, max_bytes: int = 65536,
-                     signal: Literal["TERM", "KILL"] = "TERM") -> str:
+                     signal: Literal["TERM", "KILL"] = "TERM",
+                     use_sudo: bool = False,
+                     secrets: "list[str] | None" = None) -> str:
     """Run a command in the **background** and get a job_id back immediately, so
     you can keep thinking while it runs, poll for incremental output, and cancel
     it. Use this for long tasks; for a command that finishes quickly just use
@@ -1137,8 +1139,10 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
         remote tmp files), returning {job_id, host, remote_pid, started_at,
         status} right away. The job keeps running even if the SSH connection
         drops. NOTE: sudo / secret injection are NOT supported in the
-        background (sudo -S needs stdin; secrets would land on argv / `ps`) —
-        use portal_exec for those.
+        background and passing use_sudo=True or secrets=[...] here is rejected
+        with guidance (sudo -S needs a stdin the nohup process detaches;
+        secrets would land on argv / `ps` for the whole job) — run those with
+        portal_exec (one-shot) or portal_shell instead.
     - action="poll": fetch this job's status + new output **on demand, not all
         at once**. Required: job_id. Pass since=<new_offset from the previous
         poll> to get only the bytes produced since then; each poll returns at
@@ -1171,6 +1175,19 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
     if action == "submit":
         if not host or not command:
             raise ToolError('action="submit" requires `host` and `command`.')
+        if use_sudo or secrets:
+            raise ToolError(
+                "portal_job is background-only and can't inject sudo passwords "
+                "or secrets: the nohup process detaches stdin (nothing to feed "
+                "`sudo -S`), and an exported secret would sit on the process "
+                "argv (visible in `ps`) for the whole job lifetime. Use "
+                "portal_exec(use_sudo=True / secrets=[...]) — it's synchronous, "
+                "one-shot, and feeds them over stdin — or portal_shell for an "
+                "interactive session. If the job is genuinely long AND needs "
+                "elevation, configure NOPASSWD on the remote, or pre-stage the "
+                "secret into a 0600 file with a one-shot portal_exec and read "
+                "it inside the job."
+            )
         err = _gate(host, command)
         if err:
             raise ToolError(f"BLOCKED: {err}")
