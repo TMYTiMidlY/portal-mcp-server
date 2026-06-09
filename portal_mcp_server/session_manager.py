@@ -256,6 +256,30 @@ class SessionManager:
         logger.info(f"Session {session_id} closed")
         return f"Session {session_id} closed"
 
+    async def close_all(self) -> int:
+        """Close every live session and release its pool slot. Returns the count.
+
+        Called at server shutdown (FastMCP lifespan). Best-effort: a failure on
+        one session never blocks the others. The channels would be reaped by the
+        OS/sshd on process exit anyway, so this is a clean-shutdown nicety, not a
+        correctness requirement.
+        """
+        async with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for s in sessions:
+            try:
+                s.process.close()
+            except Exception:  # pragma: no cover - best effort
+                pass
+            try:
+                get_manager().release_connection(s.host_name, s.conn)
+            except Exception:  # pragma: no cover - best effort
+                pass
+        if sessions:
+            logger.info("Closed %d shell session(s) on shutdown", len(sessions))
+        return len(sessions)
+
     def list_sessions(self) -> list[dict]:
         return [
             {

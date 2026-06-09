@@ -10,6 +10,7 @@ import logging
 import os
 import sys
 import time
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
@@ -53,7 +54,31 @@ logging.basicConfig(
 )
 logger = logging.getLogger("portal_mcp")
 
-mcp = FastMCP("portal-mcp-server")
+
+@asynccontextmanager
+async def _server_lifespan(_server: "FastMCP"):
+    """Graceful shutdown hook for all transports (stdio / streamable_http).
+
+    On shutdown, close live shell sessions and pooled SSH connections. The
+    OS/sshd reap the channels on process exit regardless, so this is a
+    clean-shutdown + observability win (sessions closed and logged), not a
+    correctness fix. Failures are swallowed so shutdown can't hang.
+    """
+    try:
+        yield
+    finally:
+        try:
+            from .session_manager import get_session_manager
+            await get_session_manager().close_all()
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("session close_all on shutdown failed", exc_info=True)
+        try:
+            await get_manager().close_all()
+        except Exception:  # pragma: no cover - best effort
+            logger.debug("pool close_all on shutdown failed", exc_info=True)
+
+
+mcp = FastMCP("portal-mcp-server", lifespan=_server_lifespan)
 
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS
