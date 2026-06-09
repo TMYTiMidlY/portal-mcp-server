@@ -224,7 +224,14 @@ async def _grep_fallback(conn, pattern, base, *, glob, output_mode,
                          ignore_case, before_context, after_context, context,
                          head_limit, offset) -> Dict[str, Any]:
     """Best-effort grep fallback when ripgrep is absent (no mtime sort)."""
-    flags = ["-r"]
+    # -H: force the filename prefix. ``grep -r`` omits it when the path is a
+    #   single file, so the output becomes ``line:text`` / ``count`` instead of
+    #   ``file:line:text`` / ``file:count`` and every row fails the int() parse
+    #   below -> silently empty results. -H restores the prefix in every case.
+    # -E: use ERE so ``|`` ``+`` ``?`` ``()`` behave like the rg (Rust-regex)
+    #   path. Under grep's default BRE ``|`` is a literal, so an alternation
+    #   pattern that works on an rg host silently matches nothing on a grep host.
+    flags = ["-r", "-H", "-E"]
     if ignore_case:
         flags.append("-i")
     if glob:

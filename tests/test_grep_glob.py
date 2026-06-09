@@ -172,6 +172,20 @@ async def test_grep_fallback_to_grep(monkeypatch):
     assert rec[0].startswith("grep")
 
 
+@pytest.mark.asyncio
+async def test_grep_fallback_forces_filename_and_ere(monkeypatch):
+    """Regression: grep -r drops the filename prefix for a single-file arg and
+    treats `|` as a literal under BRE. Every fallback mode must pass -H and -E
+    so parsing survives and alternation matches the rg path."""
+    for mode in ("content", "count", "files_with_matches"):
+        rec = _install(monkeypatch, "f.txt:1:x\n", rg=False)
+        await rs.remote_grep("h", "a|b", "/etc/caddy/Caddyfile",
+                             output_mode=mode)
+        toks = rec[0].split()
+        assert "-H" in toks, f"{mode}: missing -H -> {rec[0]}"
+        assert "-E" in toks, f"{mode}: missing -E -> {rec[0]}"
+
+
 # ── portal_glob ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
