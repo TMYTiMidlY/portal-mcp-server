@@ -1241,7 +1241,7 @@ def _kind_key_noun(kind: str) -> str:
 def _kind_prompt(kind: str, key: str) -> str:
     """getpass prompt for a kind/key."""
     return {
-        "ssh": f"SSH password for host '{key}': ",
+        "ssh": f"SSH password or key passphrase for host '{key}': ",
         "sudo": f"sudo password for host '{key}': ",
         "secret": f"value for secret '{key}': ",
     }[kind]
@@ -1249,7 +1249,7 @@ def _kind_prompt(kind: str, key: str) -> str:
 
 def _kind_label(kind: str) -> str:
     """Human label for the credential kind (singular)."""
-    return {"ssh": "SSH password",
+    return {"ssh": "SSH password/passphrase",
             "sudo": "sudo password",
             "secret": "secret"}[kind]
 
@@ -1540,9 +1540,11 @@ def _build_kind_subparser(sub, kind: str):
 
     noun = _kind_key_noun(kind)
     descriptions = {
-        "ssh": "Manage cached SSH login passwords (side-channel for "
-               "`auth: password` hosts and the key-auth fallback). "
-               "Cached in the per-user credential agent's memory only.",
+        "ssh": "Manage the cached SSH credential for a host — used as the "
+               "login password for `auth: password` hosts, or as the private-"
+               "key passphrase for key-auth hosts (same per-host slot; the "
+               "connection picks the right use). Cached in the per-user "
+               "credential agent's memory only.",
         "sudo": "Manage cached sudo passwords. Fed to `sudo -S` on stdin "
                 "when an MCP call sets use_sudo=True. Cached in the "
                 "per-user credential agent's memory only.",

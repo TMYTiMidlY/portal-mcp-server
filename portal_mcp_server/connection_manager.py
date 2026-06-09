@@ -145,6 +145,11 @@ class HostConfig:
     keepalive_interval: Optional[int] = None
     # ForwardAgent. -> ``agent_forwarding``.
     forward_agent: Optional[bool] = None
+    # ssh-agent usage for key auth. ``None`` = auto (asyncssh consults
+    # SSH_AUTH_SOCK on its own, alongside key files); ``True`` = pure agent
+    # (omit client_keys, authenticate with the keys the agent holds); ``False``
+    # = hard-disable the agent (key files only). See ``_build_connect_kwargs``.
+    use_ssh_agent: Optional[bool] = None
 
 
 @dataclass
@@ -277,6 +282,9 @@ class ConnectionManager:
                                     else None),
                 forward_agent=(bool(cfg["forward_agent"])
                                if cfg.get("forward_agent") is not None
+                               else None),
+                use_ssh_agent=(bool(cfg["use_ssh_agent"])
+                               if cfg.get("use_ssh_agent") is not None
                                else None),
             )
         logger.info(f"Loaded {len(self._registry)} hosts from registry")
@@ -512,6 +520,29 @@ class ConnectionManager:
             )
         return None
 
+    async def _resolve_ssh_passphrase(self, cfg: HostConfig) -> Optional[str]:
+        """Key-passphrase chain — the symmetric twin of
+        :meth:`_resolve_ssh_password`. From the user's point of view "the
+        password for this host" is the same idea whether it unlocks the SSH
+        login or decrypts a key file, so it shares the SAME per-host side
+        channel: credential-agent cache (populated by ``portal ssh set
+        <host>``) → ``passphrase_command`` in hosts.yaml. Returns ``None`` when
+        neither is set (asyncssh then relies on the ssh-agent or an
+        unencrypted key).
+        """
+        from .ssh_creds import get_cached_password, fetch_ssh_password_from_agent
+        pp = get_cached_password(cfg.name)
+        if pp is not None:
+            return pp
+        pp = await asyncio.to_thread(fetch_ssh_password_from_agent, cfg.name)
+        if pp is not None:
+            return pp
+        if cfg.passphrase_command:
+            return await self._run_secret_command(
+                cfg.passphrase_command, host=cfg.name, kind="passphrase_command",
+            )
+        return None
+
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
         if cfg.use_ssh_config:
             # asyncssh resolves everything from ~/.ssh/config using the alias.
@@ -560,10 +591,25 @@ class ConnectionManager:
             return kwargs
 
         # ── Key-based auth (the default and recommended path) ──
-        if cfg.key:
+        # ssh-agent control (use_ssh_agent): None = auto, True = pure agent,
+        # False = hard-disable the agent.
+        if cfg.use_ssh_agent is False:
+            # Resolve to '' inside asyncssh = no agent; key files only.
+            kwargs["agent_path"] = None
+
+        if cfg.use_ssh_agent is True:
+            # Pure ssh-agent: omit client_keys so asyncssh authenticates with
+            # the keys the agent holds via SSH_AUTH_SOCK (the user ran
+            # `ssh-add`). The key never leaves the agent.
+            pass
+        elif cfg.key:
             kwargs["client_keys"] = [cfg.key]
         else:
-            # Try default SSH agent / key locations
+            # No explicit key file: enumerate the usual default keys. NOTE:
+            # asyncssh ALSO consults the ssh-agent (SSH_AUTH_SOCK) by default,
+            # so an agent-held key authenticates here too even though this loop
+            # only lists files. (The old comment claimed to "try the agent" but
+            # only ever checked files — the agent fallback is asyncssh's doing.)
             default_keys = []
             for k in ["~/.ssh/id_ed25519", "~/.ssh/id_rsa", "~/.ssh/id_ecdsa"]:
                 kp = Path(k).expanduser()
@@ -572,15 +618,14 @@ class ConnectionManager:
             if default_keys:
                 kwargs["client_keys"] = default_keys
 
-        # Encrypted private keys: if the user supplied a passphrase_command,
-        # run it. Otherwise leave the slot empty so asyncssh can fall back to
-        # ssh-agent (the recommended UX for encrypted keys).
-        if cfg.passphrase_command:
-            kwargs["passphrase"] = await self._run_secret_command(
-                cfg.passphrase_command,
-                host=cfg.name,
-                kind="passphrase_command",
-            )
+        # Encrypted private keys: resolve a passphrase through the same side
+        # channel as the SSH login password (agent cache → passphrase_command).
+        # Skipped for the pure-agent path (the agent already holds the
+        # decrypted key, so no passphrase is needed here).
+        if cfg.use_ssh_agent is not True:
+            passphrase = await self._resolve_ssh_passphrase(cfg)
+            if passphrase is not None:
+                kwargs["passphrase"] = passphrase
 
         return kwargs
 

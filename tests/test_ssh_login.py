@@ -329,11 +329,11 @@ async def test_key_auth_fallback_drops_passphrase_kwarg(tmp_path, monkeypatch):
         "    host: 1.2.3.4\n"
         "    user: deploy\n"
         "    passphrase_command: \"printf '%s' key-unlock\"\n"
+        "    password_command: \"printf '%s' login-pw\"\n"
     )
     m = ConnectionManager(hosts_yaml=yml)
 
     ssh_creds.clear_ssh_password()
-    ssh_creds.cache_ssh_password("encryptedkeyhost", "live-secret", ttl=60)
 
     call_log: list[dict] = []
     fake = _FakeConn()
@@ -354,11 +354,11 @@ async def test_key_auth_fallback_drops_passphrase_kwarg(tmp_path, monkeypatch):
     # is actually exercising the pop() path on retry, not a no-op.
     assert call_log[0].get("passphrase") == "key-unlock"
 
-    # Retry attempt: password supplied, client_keys forced empty, and the
-    # passphrase MUST be gone — otherwise asyncssh would treat it as a
-    # password-mode auth with a stray key-passphrase, which is meaningless
-    # and version-dependent in its error.
-    assert call_log[1]["password"] == "live-secret"
+    # Retry attempt: the SSH *login* password (from password_command) is
+    # supplied, client_keys forced empty, and the key passphrase MUST be gone
+    # — otherwise asyncssh would treat it as a password-mode auth with a stray
+    # key-passphrase, which is meaningless and version-dependent in its error.
+    assert call_log[1]["password"] == "login-pw"
     assert call_log[1]["client_keys"] == []
     assert "passphrase" not in call_log[1]
 
