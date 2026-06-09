@@ -61,7 +61,13 @@ def audit_log(host: str, command: str, result,
     _history.append(entry)
     if len(_history) > _HISTORY_LIMIT:
         _history.pop(0)
-    # Append to JSONL file
+    # Append to JSONL file.
+    # ADR — why direct JSONL writes, not logging.handlers.*: stdlib logging
+    # handlers SWALLOW write errors (Handler.handleError prints to stderr and
+    # returns), which is incompatible with the fail-closed guarantee above — a
+    # failed audit write must raise and abort the operation. We also keep the
+    # in-memory ring buffer (_history) for portal_audit. Future enhancement:
+    # size-based rotation (RotatingFileHandler-style) for unbounded audit.jsonl.
     try:
         with open(_audit_file, "a") as f:
             f.write(json.dumps(entry) + "\n")

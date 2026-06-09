@@ -632,6 +632,16 @@ class ConnectionManager:
     def _try_load_from_ssh_config(self, host_name: str) -> Optional[HostConfig]:
         """Check whether host_name is defined as an alias in ~/.ssh/config.
         Returns a synthetic HostConfig (use_ssh_config=True) if found, else None.
+
+        ADR — why a hand scan, not asyncssh's config parser: asyncssh does the
+        *real* parse at connect time (use_ssh_config -> we pass host=alias and it
+        resolves HostName/User/Port/IdentityFile/ProxyJump itself). What we need
+        here is the one thing its resolver can't report — "is this name an
+        *explicitly defined* Host alias?" — so we don't auto-register every
+        random hostname. asyncssh.SSHClientConfig.load() resolves for ANY host
+        (returning defaults), so it can't answer that. Limitation: this scan does
+        not follow `Include` / `Match` directives; such hosts need an explicit
+        hosts.yaml entry or `use_ssh_config: true`.
         """
         ssh_config = Path("~/.ssh/config").expanduser()
         if not ssh_config.exists():

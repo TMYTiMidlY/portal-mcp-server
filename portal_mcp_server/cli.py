@@ -155,6 +155,11 @@ async def _await_with_heartbeat(coro, ctx: "Context | None",
     lost. Each progress notification resets that window; the value is just a
     monotonic liveness tick (``total`` left indeterminate). No-op when ``ctx``
     is None or the client supplied no progressToken.
+
+    ADR — why hand-driven: FastMCP exposes the progress primitive
+    (``ctx.report_progress``) but does not auto-emit keepalives during a
+    blocking tool call, so we drive the periodic tick ourselves. The
+    notification transport itself is FastMCP-native.
     """
     task = asyncio.ensure_future(coro)
     if ctx is None:

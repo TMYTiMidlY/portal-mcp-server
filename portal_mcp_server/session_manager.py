@@ -129,6 +129,13 @@ class SessionManager:
         """
         session = self._get(session_id)
         session.touch()
+        # ADR — why a sentinel, not asyncssh's native exit status: a persistent
+        # `bash -i` runs many commands over ONE channel, and SSH only reports an
+        # exit status when the channel/process *closes*. asyncssh's conn.run()
+        # returns a native exit code precisely because it opens a fresh channel
+        # per command — that is the one-shot model (= portal_exec). To keep
+        # cwd/env across calls we reuse the channel, so we recover each command's
+        # $? by echoing a unique sentinel after it.
         # Sentinel uses the FULL 128-bit uuid so a command whose stdout
         # happens to contain the prefix string can never be mistaken for
         # completion. The previous 32-bit prefix had a 1-in-4-billion
