@@ -38,6 +38,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 from functools import lru_cache
 from pathlib import Path
 
@@ -182,6 +183,52 @@ def credential_agent_socket_path() -> Path:
 
 def default_systemd_credential_agent_socket_path() -> Path:
     return systemd_user_runtime_dir() / _APP / "credentials.sock"
+
+
+def default_launchd_credential_agent_socket_path() -> Path:
+    """macOS default socket path for the credential agent.
+
+    macOS has no ``XDG_RUNTIME_DIR``; per-user ``$TMPDIR`` (e.g.
+    ``/var/folders/.../T/``) is the Apple-blessed per-user-writable runtime
+    location. We place a 0700 subdir under it for the 0600 socket.
+    """
+    base = os.environ.get("TMPDIR") or "/tmp"
+    return Path(base).expanduser() / _APP / "credentials.sock"
+
+
+def credential_agent_platform() -> str:
+    """Which credential-agent install backend fits this OS.
+
+    ``"systemd"`` (Linux user units) / ``"launchd"`` (macOS LaunchAgent) /
+    ``"unsupported"`` (Windows and everything else — there is no automated
+    install path yet; use the command-source credentials instead).
+    """
+    if sys.platform.startswith("linux"):
+        return "systemd"
+    if sys.platform == "darwin":
+        return "launchd"
+    return "unsupported"
+
+
+def credential_agent_unsupported_hint() -> str:
+    """Actionable message for platforms without an automated agent install.
+
+    The credential *agent* (the no-echo `portal {ssh,sudo,secret} set` path)
+    needs an OS service manager. Where we don't have one wired up, the agent's
+    purpose — keeping a value out of the LLM — is still fully achievable via
+    the command-source credentials, which this message points at.
+    """
+    return (
+        f"The interactive credential agent has no automated install on this "
+        f"platform ({sys.platform}). The MCP server and every remote portal_* "
+        f"tool still work — only the no-echo `portal {{ssh,sudo,secret}} set` "
+        f"caching path needs an OS service manager (systemd on Linux, launchd "
+        f"on macOS). Instead, drive credentials from command sources: "
+        f"`password_command` / `passphrase_command` / `sudo_password_command` "
+        f"in hosts.yaml, and a `command:` in secrets.yaml — each reads from "
+        f"your password manager (Keychain, pass, 1Password CLI, ...) on demand "
+        f"and never enters the model context."
+    )
 
 
 def systemd_user_unit_dir() -> Path:

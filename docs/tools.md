@@ -124,11 +124,14 @@ skipped).
 The agent never sees a credential value. Passwords / passphrases / secrets are
 provisioned by a human in a separate terminal and held by a per-user agent.
 
-> **⚠️ Platform: Linux only.** The credential agent is a pair of **systemd user
-> units** (`.socket` + `.service`), socket-activated. `portal agent install`
-> and the three CLIs that depend on it (`portal ssh set` / `portal sudo set` /
-> `portal secret set`) are Linux-only today. On macOS / Windows, drive sudo and
-> SSH credentials from `hosts.yaml`'s `password_command` / `passphrase_command`
+> **⚠️ Platform: Linux + macOS.** The credential agent install is OS-dispatched
+> (`portal agent install`): **Linux** uses **systemd user units** (`.socket` +
+> `.service`, socket-activated); **macOS** uses a **launchd LaunchAgent**
+> (`~/Library/LaunchAgents/com.tmytimidly.portal-credential-agent.plist`,
+> run-and-keepalive — the agent self-binds its AF_UNIX socket). **Windows** has
+> no automated install yet, so `portal agent install` (and the three `set`
+> CLIs) print an actionable error there. On any unsupported platform, drive sudo
+> and SSH credentials from `hosts.yaml`'s `password_command` / `passphrase_command`
 > / `sudo_password_command`, and named secrets from `secrets.yaml`'s `command:`
 > — the rest of the server (every `portal_*` remote tool) is platform-agnostic.
 

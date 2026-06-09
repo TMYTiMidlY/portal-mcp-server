@@ -43,7 +43,10 @@ from ._peer_creds import is_same_uid_peer, peer_uid
 from .paths import (
     CredentialAgentNotConfigured,
     credential_agent_config_path,
+    credential_agent_platform,
     credential_agent_socket_path,
+    credential_agent_unsupported_hint,
+    default_launchd_credential_agent_socket_path,
     default_systemd_credential_agent_socket_path,
     systemd_user_unit_dir,
 )
@@ -53,6 +56,8 @@ logger = logging.getLogger("portal_mcp.credential_agent")
 UNIT_BASENAME = "portal-credential-agent"
 SOCKET_UNIT = f"{UNIT_BASENAME}.socket"
 SERVICE_UNIT = f"{UNIT_BASENAME}.service"
+# macOS LaunchAgent label (reverse-DNS, Apple convention).
+LAUNCHD_LABEL = "com.tmytimidly.portal-credential-agent"
 
 DEFAULT_TTL_SEC = 15 * 60
 _LISTEN_FDS_START = 3
@@ -464,6 +469,146 @@ def uninstall_user_units(*, stop_now: bool = True,
         "config_removed": remove_config,
         "errors": errors,
     }
+
+
+# ── macOS launchd LaunchAgent ────────────────────────────────────────────────
+#
+# Rather than launchd *socket activation* (which needs the C
+# ``launch_activate_socket`` API via ctypes — fiddly and easy to get wrong),
+# we install a plain run-and-keepalive LaunchAgent: launchd keeps
+# ``portal agent run --socket <path>`` alive and the agent binds the socket
+# itself (``_bind_socket`` works on macOS — it has AF_UNIX). The same-uid peer
+# check degrades to filesystem permissions on non-Linux (see _peer_creds), and
+# the 0700 dir / 0600 socket still gate access.
+
+
+def launchd_plist_path() -> Path:
+    return Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+
+
+def _launchd_plist_text(socket_path: Path, exec_argv: list[str]) -> str:
+    args_xml = "\n".join(
+        f"        <string>{_xml_escape(a)}</string>" for a in exec_argv)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{LAUNCHD_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+{args_xml}
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PORTAL_CREDENTIAL_AGENT_SOCKET</key>
+        <string>{_xml_escape(str(socket_path))}</string>
+    </dict>
+</dict>
+</plist>
+"""
+
+
+def _xml_escape(s: str) -> str:
+    return (s.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def install_launchd_agent(*, socket_path: Path | None = None,
+                          enable_now: bool = False) -> dict[str, str]:
+    resolved_socket_path = (socket_path
+                            or default_launchd_credential_agent_socket_path())
+    exec_argv = [sys.executable, "-m", "portal_mcp_server", "agent", "run",
+                 "--socket", str(resolved_socket_path)]
+    plist_text = _launchd_plist_text(resolved_socket_path, exec_argv)
+
+    plist_path = launchd_plist_path()
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    plist_path.write_text(plist_text)
+
+    config_path = credential_agent_config_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({
+        "socket_path": str(resolved_socket_path),
+    }, indent=2) + "\n")
+
+    if enable_now:
+        # `launchctl load -w` registers + starts the agent (RunAtLoad).
+        subprocess.run(["launchctl", "load", "-w", str(plist_path)], check=True)
+
+    return {
+        "plist": str(plist_path),
+        "socket_path": str(resolved_socket_path),
+        "config_path": str(config_path),
+    }
+
+
+def uninstall_launchd_agent(*, stop_now: bool = True,
+                            remove_config: bool = True) -> dict[str, Any]:
+    errors: list[str] = []
+    plist_path = launchd_plist_path()
+    if stop_now and plist_path.exists():
+        try:
+            subprocess.run(["launchctl", "unload", "-w", str(plist_path)],
+                           check=False)
+        except OSError as e:
+            errors.append(str(e))
+
+    removed: list[str] = []
+    targets = [plist_path]
+    if remove_config:
+        targets.append(credential_agent_config_path())
+    for path in targets:
+        try:
+            path.unlink()
+            removed.append(str(path))
+        except FileNotFoundError:
+            pass
+
+    return {"removed": removed, "config_removed": remove_config,
+            "errors": errors}
+
+
+# ── OS-dispatching install entry points ──────────────────────────────────────
+
+
+def install_agent(*, socket_path: Path | None = None,
+                  enable_now: bool = False) -> dict[str, Any]:
+    """Install the per-user credential agent for the current OS.
+
+    Linux -> systemd user units; macOS -> launchd LaunchAgent. Raises
+    ``RuntimeError`` with an actionable hint on platforms without an automated
+    install (Windows etc. — use command-source credentials instead).
+    """
+    backend = credential_agent_platform()
+    if backend == "systemd":
+        res = install_user_units(socket_path=socket_path, enable_now=enable_now)
+    elif backend == "launchd":
+        res = install_launchd_agent(socket_path=socket_path, enable_now=enable_now)
+    else:
+        raise RuntimeError(credential_agent_unsupported_hint())
+    res["backend"] = backend
+    return res
+
+
+def uninstall_agent(*, stop_now: bool = True,
+                    remove_config: bool = True) -> dict[str, Any]:
+    backend = credential_agent_platform()
+    if backend == "systemd":
+        res = uninstall_user_units(stop_now=stop_now, remove_config=remove_config)
+    elif backend == "launchd":
+        res = uninstall_launchd_agent(stop_now=stop_now, remove_config=remove_config)
+    else:
+        raise RuntimeError(credential_agent_unsupported_hint())
+    res["backend"] = backend
+    return res
 
 
 def main(argv: list[str] | None = None) -> None:

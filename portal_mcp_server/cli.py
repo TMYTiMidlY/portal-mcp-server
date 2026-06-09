@@ -1272,29 +1272,48 @@ def _format_ttl(seconds: int) -> str:
 # ── portal agent ─────────────────────────────────────────────────────
 
 def _agent_install_cli(args) -> int:
-    from .credential_agent import install_user_units, SOCKET_UNIT
+    from .credential_agent import install_agent, SOCKET_UNIT, LAUNCHD_LABEL
+    from .paths import credential_agent_platform
+    backend = credential_agent_platform()
     try:
-        res = install_user_units(socket_path=args.socket, enable_now=args.now)
-    except Exception as e:
-        print(f"Failed to install credential agent units: {e}", file=sys.stderr)
+        res = install_agent(socket_path=args.socket, enable_now=args.now)
+    except RuntimeError as e:
+        # Unsupported platform: print the actionable hint, not a stack trace.
+        print(str(e), file=sys.stderr)
         return 1
-    print("Installed portal credential agent user units:")
-    print(f"  socket unit:   {res['socket_unit']}")
-    print(f"  service unit:  {res['service_unit']}")
-    print(f"  config:        {res['config_path']}")
-    print(f"  recorded path: {res['socket_path']}")
-    if not args.now:
-        print(f"Enable it with: systemctl --user enable --now {SOCKET_UNIT}")
+    except Exception as e:
+        print(f"Failed to install credential agent: {e}", file=sys.stderr)
+        return 1
+    if backend == "systemd":
+        print("Installed portal credential agent user units:")
+        print(f"  socket unit:   {res['socket_unit']}")
+        print(f"  service unit:  {res['service_unit']}")
+        print(f"  config:        {res['config_path']}")
+        print(f"  recorded path: {res['socket_path']}")
+        if not args.now:
+            print(f"Enable it with: systemctl --user enable --now {SOCKET_UNIT}")
+    else:  # launchd
+        print("Installed portal credential agent LaunchAgent:")
+        print(f"  plist:         {res['plist']}")
+        print(f"  config:        {res['config_path']}")
+        print(f"  recorded path: {res['socket_path']}")
+        if not args.now:
+            print(f"Load it with: launchctl load -w "
+                  f"~/Library/LaunchAgents/{LAUNCHD_LABEL}.plist")
     return 0
 
 
 def _agent_uninstall_cli(args) -> int:
-    from .credential_agent import uninstall_user_units
-    res = uninstall_user_units(
-        stop_now=not args.no_stop,
-        remove_config=not args.keep_config,
-    )
-    print("Uninstalled portal credential agent user units.")
+    from .credential_agent import uninstall_agent
+    try:
+        res = uninstall_agent(
+            stop_now=not args.no_stop,
+            remove_config=not args.keep_config,
+        )
+    except RuntimeError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+    print("Uninstalled portal credential agent.")
     if res["removed"]:
         print("Removed:")
         for path in res["removed"]:
@@ -1302,7 +1321,7 @@ def _agent_uninstall_cli(args) -> int:
     if res["errors"]:
         print("Warnings:")
         for err in res["errors"]:
-            print(f"  systemctl --user: {err}")
+            print(f"  service manager: {err}")
     return 0
 
 
