@@ -162,3 +162,42 @@ async def test_extra_fields_absent_by_default(tmp_path):
     assert "tunnel" not in kwargs
     assert "keepalive_interval" not in kwargs
     assert "agent_forwarding" not in kwargs
+
+
+# ── asyncssh-backed detection: Include is followed, wildcards excluded ────────
+
+def test_alias_detection_follows_include(home, tmp_path):
+    """Regression: the old line scan missed `Include`d hosts. The asyncssh
+    parser follows them, so a host defined only in an included file is found."""
+    incdir = home / ".ssh" / "conf.d"
+    incdir.mkdir()
+    (incdir / "extra.conf").write_text("Host viainclude\n  HostName 10.9.9.9\n")
+    _ssh_config(home, "Include conf.d/*.conf\n"
+                      "Host direct\n  HostName 10.0.0.1\n"
+                      "Host *\n  User root\n")
+    m = cm.ConnectionManager(hosts_yaml=_hosts_yaml(tmp_path, "hosts: {}\n"))
+    assert m.has_ssh_config_alias("viainclude")   # via Include — the fix
+    assert m.has_ssh_config_alias("direct")
+    assert not m.has_ssh_config_alias("never-defined")  # only Host * — excluded
+
+
+def test_alias_detection_catches_user_only_stanza(home, tmp_path):
+    """A stanza that sets only User (no HostName) is still an explicit alias."""
+    _ssh_config(home, "Host useronly\n  User deploy\nHost *\n  User root\n")
+    m = cm.ConnectionManager(hosts_yaml=_hosts_yaml(tmp_path, "hosts: {}\n"))
+    assert m.has_ssh_config_alias("useronly")
+    assert not m.has_ssh_config_alias("bare")
+
+
+def test_alias_detection_regex_fallback(home, tmp_path, monkeypatch):
+    """If asyncssh can't parse the config, fall back to the regex scan rather
+    than reporting every host as undefined."""
+    _ssh_config(home, "Host web01\n  HostName 10.0.0.1\n")
+    m = cm.ConnectionManager(hosts_yaml=_hosts_yaml(tmp_path, "hosts: {}\n"))
+
+    def boom(self, ssh_config, name):
+        raise RuntimeError("asyncssh parse exploded")
+
+    monkeypatch.setattr(cm.ConnectionManager, "_ssh_config_signature", boom)
+    assert m.has_ssh_config_alias("web01")          # regex fallback finds it
+    assert not m.has_ssh_config_alias("nope")

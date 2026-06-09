@@ -219,7 +219,6 @@ class ConnectionManager:
         with open(p) as f:
             data = yaml.safe_load(f) or {}
         hosts = data.get("hosts", {})
-        alias_set = self._ssh_config_alias_set()
         for name, cfg in hosts.items():
             warnings: list[str] = []
             use_ssh_config = bool(cfg.get("use_ssh_config", False))
@@ -256,7 +255,7 @@ class ConnectionManager:
                 logger.error("Host '%s' has %s", name, msg)
                 warnings.append(msg)
                 auth = None
-            warnings.extend(self._overlay_warnings(name, use_ssh_config, alias_set))
+            warnings.extend(self._overlay_warnings(name, use_ssh_config))
             if warnings:
                 self._config_warnings[name] = warnings
             self._registry[name] = HostConfig(
@@ -294,38 +293,77 @@ class ConnectionManager:
             return None
         return str(Path(path).expanduser())
 
-    def _ssh_config_alias_set(self) -> set[str]:
-        """Return the set of non-wildcard ``Host`` aliases in ~/.ssh/config.
+    # Options that mark a name as an *explicitly configured* Host (vs one merely
+    # caught by a `Host *` wildcard). Compared against a never-defined sentinel
+    # so wildcard-applied values cancel out and only explicit stanzas remain.
+    _SSH_CONFIG_MARKER_OPTS = ("Hostname", "User", "Port", "IdentityFile",
+                               "ProxyJump", "ProxyCommand")
+    _SSH_CONFIG_SENTINEL = "zz-portal-mcp-sentinel-9d3f-no-such-host"
 
-        Parsed fresh each call (the file is small and this runs only at
-        registry load / host registration, not on the hot path).
+    def _ssh_config_signature(self, ssh_config: Path, name: str) -> tuple:
+        """Resolve the marker options for ``name`` via asyncssh's own parser.
+
+        Parse-only (``SSHClientConfig.load``) — unlike the full
+        connection-options path it does NOT load IdentityFile keys, so an
+        absent/encrypted key can't make detection throw. ``Include`` directives
+        are followed natively. ``user``/``port`` are passed as ``()`` (asyncssh's
+        "unspecified") so the config's own User/Port directives resolve.
+        """
+        import getpass
+        from asyncssh.config import SSHClientConfig
+        cfg = SSHClientConfig.load(
+            None, [str(ssh_config)], False, False, False,
+            getpass.getuser(), (), name, (),
+        )
+        out = []
+        for key in self._SSH_CONFIG_MARKER_OPTS:
+            try:
+                out.append(repr(cfg.get(key)))
+            except Exception:  # pragma: no cover - unknown option key
+                out.append(None)
+        return tuple(out)
+
+    def has_ssh_config_alias(self, name: str) -> bool:
+        """True if ``name`` is an explicitly configured ``Host`` in ~/.ssh/config.
+
+        Uses asyncssh's config parser so ``Include`` directives are followed (the
+        old hand-rolled line scan missed them). A name counts as explicit when
+        its resolved marker options differ from a never-defined sentinel host —
+        i.e. something more than a ``Host *`` wildcard matched it. Falls back to a
+        regex line scan (no Include) only if asyncssh can't parse the file.
         """
         ssh_config = Path("~/.ssh/config").expanduser()
         if not ssh_config.exists():
-            return set()
+            return False
+        try:
+            sentinel = self._ssh_config_signature(
+                ssh_config, self._SSH_CONFIG_SENTINEL)
+            candidate = self._ssh_config_signature(ssh_config, name)
+        except Exception:
+            logger.debug("asyncssh ssh-config parse failed; regex fallback",
+                         exc_info=True)
+            return self._regex_ssh_config_alias(name)
+        return candidate != sentinel
+
+    def _regex_ssh_config_alias(self, name: str) -> bool:
+        """Degraded fallback (does NOT follow Include); used only when asyncssh
+        cannot parse ~/.ssh/config."""
+        ssh_config = Path("~/.ssh/config").expanduser()
         try:
             content = ssh_config.read_text()
         except OSError:
-            return set()
-        aliases: set[str] = set()
+            return False
         for line in content.splitlines():
             s = line.strip()
             if not s or s.startswith("#"):
                 continue
             m = re.match(r"^Host\s+(.+)$", s, re.IGNORECASE)
-            if not m:
-                continue
-            for p in m.group(1).split():
-                if p not in ("*", "?"):
-                    aliases.add(p)
-        return aliases
+            if m and name in [p for p in m.group(1).split()
+                              if p not in ("*", "?")]:
+                return True
+        return False
 
-    def has_ssh_config_alias(self, name: str) -> bool:
-        """True if ``name`` is a concrete ``Host`` alias in ~/.ssh/config."""
-        return name in self._ssh_config_alias_set()
-
-    def _overlay_warnings(self, name: str, use_ssh_config: bool,
-                          alias_set: Optional[set[str]] = None) -> list[str]:
+    def _overlay_warnings(self, name: str, use_ssh_config: bool) -> list[str]:
         """Warnings about hosts.yaml <-> ~/.ssh/config interactions.
 
         Two footguns we surface (never block):
@@ -335,8 +373,7 @@ class ConnectionManager:
             silently wins (ssh config's IdentityFile/ProxyJump/User are
             ignored); the fix is the use_ssh_config overlay recipe.
         """
-        aliases = self._ssh_config_alias_set() if alias_set is None else alias_set
-        exists = name in aliases
+        exists = self.has_ssh_config_alias(name)
         if use_ssh_config and not exists:
             return [(f"host '{name}' sets use_ssh_config: true but ~/.ssh/config "
                      "has no matching Host alias; asyncssh will fall back to a "
@@ -630,48 +667,21 @@ class ConnectionManager:
         return kwargs
 
     def _try_load_from_ssh_config(self, host_name: str) -> Optional[HostConfig]:
-        """Check whether host_name is defined as an alias in ~/.ssh/config.
-        Returns a synthetic HostConfig (use_ssh_config=True) if found, else None.
+        """Check whether host_name is an explicit alias in ~/.ssh/config.
+        Returns a synthetic HostConfig (use_ssh_config=True) if so, else None.
 
-        ADR — why a hand scan, not asyncssh's config parser: asyncssh does the
-        *real* parse at connect time (use_ssh_config -> we pass host=alias and it
-        resolves HostName/User/Port/IdentityFile/ProxyJump itself). What we need
-        here is the one thing its resolver can't report — "is this name an
-        *explicitly defined* Host alias?" — so we don't auto-register every
-        random hostname. asyncssh.SSHClientConfig.load() resolves for ANY host
-        (returning defaults), so it can't answer that. Limitation: this scan does
-        not follow `Include` / `Match` directives; such hosts need an explicit
-        hosts.yaml entry or `use_ssh_config: true`.
+        Detection is delegated to has_ssh_config_alias, which uses asyncssh's
+        own parser (Include-aware). The actual connection params are resolved by
+        asyncssh at connect time (use_ssh_config -> host=alias).
         """
-        ssh_config = Path("~/.ssh/config").expanduser()
-        if not ssh_config.exists():
+        if not self.has_ssh_config_alias(host_name):
             return None
-        try:
-            with open(ssh_config) as f:
-                content = f.read()
-        except OSError:
-            return None
-        # Lightweight scan: look for a `Host <alias>` line that lists host_name
-        # as one of the patterns (excluding wildcard-only entries).
-        for line in content.splitlines():
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            m = re.match(r"^Host\s+(.+)$", stripped, re.IGNORECASE)
-            if not m:
-                continue
-            patterns = m.group(1).split()
-            # Skip pure wildcard hosts like `Host *` to avoid false positives
-            if all(p in ("*", "?") for p in patterns):
-                continue
-            if host_name in patterns:
-                return HostConfig(
-                    name=host_name,
-                    host=host_name,  # placeholder; asyncssh ignores when use_ssh_config
-                    use_ssh_config=True,
-                    tags=["ssh-config"],
-                )
-        return None
+        return HostConfig(
+            name=host_name,
+            host=host_name,  # placeholder; asyncssh ignores when use_ssh_config
+            use_ssh_config=True,
+            tags=["ssh-config"],
+        )
 
     async def get_connection(self, host_name: str) -> asyncssh.SSHClientConnection:
         """Get or create a pooled connection to a host.
