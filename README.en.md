@@ -51,11 +51,7 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 ## Overview
 
-`portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0). The lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first 14-tool surface:
-
-- **2** hash-protected remote file editing tools (`portal_read` / `portal_patch`), with the SHA-256 conflict-detection algorithm referenced from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT), reimplemented for SFTP
-- **6** core IO / search / persistent bash tools
-- **10** higher-level tools consolidated via a single `mode` parameter (tunnels, file transfer, multi-host orchestration, playbooks, audit, …)
+`portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0): the lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first `portal_*` tool surface — built around three execution paths (a persistent bash session, one-shot exec, and background jobs) plus primitives for hash-protected remote editing, structured search, SFTP transfer, tunnels, and auditing. The double-hash conflict-detection algorithm behind remote editing (`portal_read` / `portal_patch`) is referenced from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT) and reimplemented for SFTP.
 
 See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenance and security posture.
 
@@ -65,7 +61,7 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 - **Same speed on Windows**: no dependency on OpenSSH `ControlMaster`; the pool is plain Python objects, so the three major OSes get identical reuse performance.
 - **Persistent bash sessions**: `portal_shell` keeps a `bash -i` per host with cwd / env preserved across calls — the agent doesn't have to rebuild context every command.
 - **Hash-protected remote edits**: `portal_read` + `portal_patch` use whole-file SHA-256 plus per-range hashes, write through tmp + `posix_rename` (atomic), then re-hash on disk to refuse stale or concurrent overwrites.
-- **Agent-first tool budget**: 14 tools instead of the upstream's 57, with `mode` parameters collapsing semantically overlapping entries so the agent has fewer look-alike tools to choose between. The 14 tools' schemas (name + description + inputSchema) currently total **~8k tokens** (≈ **4%** of a 200k context window; `tiktoken o200k_base` estimate).
+- **Agent-first, minimal tool surface**: `action` / `mode` parameters collapse semantically overlapping entries, and each tool earns its place only by offering a guarantee bash can't cheaply synthesize — so the agent has fewer look-alike tools to choose between. The tool schemas (name + description + inputSchema) total **~8k tokens** (≈ **4%** of a 200k context window; `tiktoken o200k_base` estimate).
 - **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default.
 - **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
 - **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
@@ -266,22 +262,24 @@ A complete per-tool reference is in [`docs/tools.md`](docs/tools.md).
 
 ## Design notes
 
-### Tool consolidation: 14 vs. 57
+### Tool consolidation: few and orthogonal
 
 Anthropic's [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) is explicit:
 
 > "More tools don't always lead to better outcomes... Tools that merely wrap existing software functionality is a common error... Too many tools or overlapping tools can also distract agents from pursuing efficient strategies."
 
-The upstream `ssh-shell-mcp` exposes one tool per ergonomic — `ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` … — **57 tools total**. Most are one-line bash wrappers that **`portal_shell` (a persistent bash session) replaces by itself**.
+So portal-mcp-server collapses the tool surface to a **few orthogonal** primitives. The test is a single one: **a tool is kept only when it provides a guarantee bash can't cheaply synthesize** (concurrency safety, atomic / hash-protected writes, credential non-leakage, the security gate, real structured output). Anything that's just a one-line bash wrapper with overlapping semantics gets no tool of its own — it's covered by `portal_shell` (a persistent bash session) and `portal_exec` (one-shot, incl. multi-host fan-out / sudo / secrets). Each remaining tool holds exactly one such guarantee:
 
-| Bucket | What we did |
+| Tool surface | The "bash can't cheaply synthesize this" guarantee |
 |---|---|
-| **Kept and redesigned** | `portal_read`+`portal_patch` (SHA-256 hash protection replaces the concurrency hole in raw cat/write); `portal_grep`/`portal_glob` (structured search faithfully ported from CC's schema); `portal_shell`(`_close`) persistent shell + exit codes; `portal_exec` one-shot + multi-host fan-out + sudo/secrets; `portal_transfer` SFTP |
-| **action/mode merged** | `portal_tunnel(action=open\|close\|list, kind=...)` replaces 3 upstream tunnel tools; `portal_host(action=...)` and `portal_audit(view=...)` collapse introspection (the `sessions` view is the former `portal_bash_status`) |
-| **New** | `portal_job` (background submit/poll/cancel/list, giving the agent the ability to think + interrupt mid-task) |
-| **Deleted / absorbed** | `multi_exec`→`portal_exec` flags; `playbook`→`portal_exec(commands=[…])`; `ping`→`portal_exec(host=[…], command="echo pong")`; `cleanup_tmps`→folded into `portal_patch`; the upstream exec-family 5 / multi-session 6 / sysinfo 7 / process-management 5 / tmux 4 are all covered by `portal_shell`/`portal_exec` |
+| `portal_read` + `portal_patch` | Whole-file SHA-256 + per-range hashes, replacing the concurrent-overwrite and mid-stream-disconnect holes of raw `cat` / `sed` / `> file` |
+| `portal_grep` / `portal_glob` | Structured output faithfully ported from Claude Code's search schema (`rg --json` first, auto-fallback to `grep` / `find`) — the agent never parses raw text |
+| `portal_shell`(`_close`) / `portal_exec` | Persistent shell + exit codes; one-shot + true parallel multi-host fan-out + a two-phase security gate + credential non-leakage |
+| `portal_transfer` | SFTP incremental short-circuit (size+mtime or sha256) + progress heartbeat against idle timeouts + per-file fault tolerance |
+| `portal_job` | Background submit/poll/cancel/list — giving the agent the ability to background work, think, and interrupt at will |
+| `portal_tunnel` / `portal_host` / `portal_audit` | An `action` / `view` field folds a resource's several actions into one tool instead of one tool per action |
 
-Result: the agent no longer has to disambiguate between semantically overlapping tools. All dispatch parameters (`action`/`view`/`output_mode`/...) are annotated with `typing.Literal`, so the schema carries `enum` and clients can validate. **Tool-schema context footprint**: the 14 tools' name + description + inputSchema total **~8k tokens** (`tiktoken o200k_base` estimate, ≈ **4%** of a 200k context window; the descriptions carry sudo / secrets / safety-convention guardrail prose, so they run thick).
+All dispatch parameters (`action` / `view` / `output_mode` / ...) are annotated with `typing.Literal`, so the schema carries `enum` and clients can validate — the agent never has to disambiguate between semantically overlapping tools. **Tool-schema context footprint**: the tools' name + description + inputSchema total **~8k tokens** (`tiktoken o200k_base` estimate, ≈ **4%** of a 200k context window; the descriptions carry sudo / secrets / safety-convention guardrail prose, so they run thick).
 
 ### In-process connection pool
 

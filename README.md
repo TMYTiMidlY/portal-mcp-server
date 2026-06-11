@@ -45,11 +45,7 @@
 
 ## 简介
 
-`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）。底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块；上层重新设计了 14 个面向 agent 的 `portal_*` 工具：
-
-- **2 个** hash-protected 的远端文件编辑工具（`portal_read` / `portal_patch`），算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT），针对 SFTP 重写
-- **6 个** 核心 IO / 搜索 / 持久 bash 工具
-- **10 个** 用 `mode` 字段合并的高层工具（隧道、文件传输、多机编排、playbook、审计 ...）
+`portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）：底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块。上层重新设计了一套面向 agent 的 `portal_*` 工具——围绕"持久 bash 会话 + 一次性 exec + 后台 job"三条执行路径，外加 hash 保护的远端文件编辑、结构化搜索、SFTP 传输、隧道、审计等原语。其中远端文件编辑（`portal_read` / `portal_patch`）的双层 hash 校验算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT），并针对 SFTP 重写。
 
 完整衍生关系与算法引用见 [`NOTICE`](./NOTICE) 与 [安全](#安全) 章节。
 
@@ -59,7 +55,7 @@
 - **Windows 上同样快**：不依赖 OpenSSH `ControlMaster`，连接池是纯 Python 对象，三大平台获得一致的复用性能。
 - **持久 bash 会话**：`portal_shell` 为每台 host 维护一个 `bash -i`，cwd / env 跨调用保留；agent 不需要每条命令重建上下文。
 - **hash 保护的远端编辑**：`portal_read` + `portal_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
-- **agent-first 工具数量**：把上游 57 个工具收敛到 14 个，`mode` 字段合并语义重复的入口，减少 agent 选工具的歧义。当前 14 个工具的 schema（name + description + inputSchema）约占 **~8k tokens**（≈ 200k 上下文窗口的 **~4%**；`tiktoken o200k_base` 估算）。
+- **agent-first 的精简工具面**：`action` / `mode` 字段合并语义重复的入口，每个工具只提供一条 bash 难以廉价合成的保证，减少 agent 选工具的歧义。工具 schema（name + description + inputSchema）合计约占 **~8k tokens**（≈ 200k 上下文窗口的 **~4%**；`tiktoken o200k_base` 估算）。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
@@ -258,22 +254,24 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 ## 设计理念
 
-### 工具精简：14 vs. 57
+### 工具精简：少而正交
 
 Anthropic 的 [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) 明确说：
 
 > "More tools don't always lead to better outcomes... Tools that merely wrap existing software functionality is a common error... Too many tools or overlapping tools can also distract agents from pursuing efficient strategies."
 
-上游 `ssh-shell-mcp` 把每种 ergonomic 都做成单独 tool（`ssh_run` / `ssh_run_batch` / `ssh_run_script` / `ssh_run_with_env` / `ssh_session_exec` / `ssh_ps` / `ssh_kill` / `ssh_df` / `ssh_free` / `ssh_journalctl` / `ssh_docker` / `ssh_tmux_*` ...），共 **57 个**。这些大部分是 bash 一行命令的包装，**`portal_shell`（持久 bash 会话）+ `portal_exec`（一次性，含多机/sudo/secrets）两个工具就能覆盖**。
+portal-mcp-server 据此把工具面收敛到一组**少而正交**的原语。判据只有一条：**一个工具只在它能提供 bash 难以廉价合成的保证时才保留**（并发安全、原子 / hash 保护写入、凭据非泄漏、安全 gate、真正的结构化输出）。凡是"一行 bash 就能办、彼此语义重叠"的便利封装，都不单独立工具，交给 `portal_shell`（持久 bash 会话）+ `portal_exec`（一次性，含多机 fanout / sudo / secrets）覆盖。剩下的工具各自守住一条这样的保证：
 
-| 类别 | 数量 | 处理方式 |
-|---|---:|---|
-| **保留并重新设计** | — | `portal_read`+`portal_patch`（SHA-256 hash 保护取代裸 cat/write 的并发漏洞）；`portal_grep`/`portal_glob`（忠实移植 CC schema 的结构化搜索）；`portal_shell`(`_close`) 持久 shell + exit code；`portal_exec` 一次性 + 多机 fanout + sudo/secrets；`portal_transfer` SFTP |
-| **action/mode 合并** | — | `portal_tunnel(action=open\|close\|list, kind=...)` 取代上游 3 个隧道 tool；`portal_host(action=...)`、`portal_audit(view=...)` 合并 introspection（`sessions` view 即原 `portal_bash_status`） |
-| **新增** | — | `portal_job`（后台 submit/poll/cancel/list，给 agent 中途思考+中断的能力） |
-| **删/吸收** | — | `multi_exec`→`portal_exec` flag；`playbook`→`portal_exec(commands=[…])`；`ping`→`portal_exec(host=[…], command="echo pong")`；`cleanup_tmps`→折进 `portal_patch`；上游命令执行族 5 / 多 session 族 6 / 系统检查族 7 / 进程管理 5 / tmux 4 全由 `portal_shell`/`portal_exec` 覆盖 |
+| 工具面 | 提供的"bash 难以廉价合成"的保证 |
+|---|---|
+| `portal_read` + `portal_patch` | SHA-256 整文件 + 行范围双层 hash，取代裸 `cat` / `sed` / `> file` 的并发覆盖与中途断连漏洞 |
+| `portal_grep` / `portal_glob` | 忠实移植 Claude Code 搜索 schema 的结构化输出（`rg --json` 优先，自动 fallback `grep` / `find`），不让 agent 自己 parse raw text |
+| `portal_shell`(`_close`) / `portal_exec` | 持久 shell + exit code；一次性 + 真并发多机 fanout + 两阶段安全 gate + 凭据非泄漏 |
+| `portal_transfer` | SFTP 增量短路（size+mtime 或 sha256）+ 进度心跳防 idle 超时 + 批量单点容错 |
+| `portal_job` | 后台 submit/poll/cancel/list，给 agent"丢后台、中途思考、随时打断"的能力 |
+| `portal_tunnel` / `portal_host` / `portal_audit` | 用 `action` / `view` 字段把同一资源的多个动作合并进一个工具，而非每个动作各立一个 tool |
 
-收益：agent 不再需要在多个语义重复的工具里选择。所有派发参数（`action`/`view`/`output_mode`/...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验。**工具 schema 上下文占用**：14 个工具的 name + description + inputSchema 合计约 **~8k tokens**（`tiktoken o200k_base` 估算，约为 200k 上下文窗口的 **4%**；descriptions 含 sudo / secrets / 安全约定等护栏文案，故偏厚）。
+所有派发参数（`action` / `view` / `output_mode` / ...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验——agent 不必在多个语义重复的工具里反复选择。**工具 schema 上下文占用**：所有工具的 name + description + inputSchema 合计约 **~8k tokens**（`tiktoken o200k_base` 估算，约为 200k 上下文窗口的 **~4%**；descriptions 含 sudo / secrets / 安全约定等护栏文案，故偏厚）。
 
 
 ### 进程内连接池
