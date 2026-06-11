@@ -1,3 +1,9 @@
+## v3.1.2 (2026-06-11)
+
+### Fix
+
+- resolve code-review findings across exec/jobs/creds/search + doc drift
+
 ## v3.1.1 (2026-06-09)
 
 ## v3.1.0 (2026-06-09)
