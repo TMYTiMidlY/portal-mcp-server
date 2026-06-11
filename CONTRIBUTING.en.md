@@ -50,15 +50,17 @@ pip install -e ".[dev]"       # -e/--editable points at this source tree
 When adding a new `@mcp.tool()`:
 
 1. **Reconsider whether you need a new tool.** Prefer extending an
-   existing `portal_*` tool's `mode` / `action` parameter. The
-   "14 vs 57" tool-budget framing in the README is a deliberate
-   design constraint — don't blow it without a reason.
+   existing `portal_*` tool's `mode` / `action` parameter. The README's
+   "Design notes · Tool consolidation" section explains the deliberate
+   "few and orthogonal" constraint — a tool earns its place only by
+   offering a guarantee bash can't cheaply synthesize; don't add one
+   without that justification.
 2. **Write a complete docstring.** FastMCP exposes the docstring
    verbatim as the MCP tool description; the quality of the docstring
    directly determines whether the agent uses the tool correctly.
 3. **Wire the security gate.** Any state-changing operation must call
    `_gate(host, command)`; multi-host operations use `_gate_many` /
-   `_gate_playbook`.
+   `_gate_exec`.
 4. **Emit an audit entry.** State-changing happy paths end with
    `audit_log(host, op_str, result, operation="...")`. Read-only
    tools intentionally skip auditing.
