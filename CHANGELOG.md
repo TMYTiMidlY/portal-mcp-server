@@ -1,3 +1,9 @@
+## v3.2.1 (2026-06-13)
+
+### Fix
+
+- scrub hardcoded internal test host and sync portal_shell docs to OSC 133
+
 ## v3.2.0 (2026-06-13)
 
 ### Feat
