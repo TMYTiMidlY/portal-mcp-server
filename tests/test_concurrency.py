@@ -149,7 +149,6 @@ class TestRemoteBashPerHostLock:
 class TestSessionReadLockSerializes:
     @pytest.mark.asyncio
     async def test_concurrent_execute_on_one_session_does_not_overlap(self):
-        import re as _re
         from portal_mcp_server import session_manager as sm
 
         depth = {"cur": 0, "max": 0}
@@ -158,12 +157,11 @@ class TestSessionReadLockSerializes:
             def __init__(self, proc):
                 self.proc = proc
 
-            def write(self, s):
-                # The engine writes "<cmd>\necho <sentinel>:$?\n"; queue the
-                # sentinel line that a real bash would echo back.
-                m = _re.search(r"(__DONE_[0-9a-f]+__):\$\?", s)
-                if m:
-                    self.proc.queue.append(f"{m.group(1)}:0\n")
+            def write(self, data):
+                # The engine writes "<cmd>\n" (bytes) per command; queue the OSC
+                # 133 D marker a real shell would emit when the command finishes.
+                if isinstance(data, (bytes, bytearray)) and data.strip():
+                    self.proc.queue.append(b"\x1b]133;D;0\x07")
 
         class _FakeStdout:
             def __init__(self, proc):
@@ -182,7 +180,7 @@ class TestSessionReadLockSerializes:
 
         class _FakeProc:
             def __init__(self):
-                self.queue: list[str] = []
+                self.queue: list[bytes] = []
                 self.stdin = _FakeStdin(self)
                 self.stdout = _FakeStdout(self)
 
@@ -203,6 +201,6 @@ class TestSessionReadLockSerializes:
             f"reads overlapped (max={depth['max']}): _read_lock not held during "
             "execute_in_session — concurrent commands race on the shared PTY"
         )
-        # Both commands still get their own clean exit code.
-        assert a == ("", 0)
-        assert b == ("", 0)
+        # Both commands still get their own clean (output, exit_code, truncated).
+        assert a == ("", 0, False)
+        assert b == ("", 0, False)

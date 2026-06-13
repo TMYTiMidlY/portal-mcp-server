@@ -220,8 +220,8 @@ class TestSessionEnvInjection:
         # BEFORE the fix the line was:  export FOO='$(reboot)'\n  (via repr)
         # which is *coincidentally* safe but only because Python's repr happened
         # to use single quotes. AFTER the fix we explicitly use shlex.quote.
+        # The session channel is in bytes mode, so the line is written as bytes.
         line = s.process.stdin.writes[-1]
-        assert line.startswith("export FOO=")
-        assert "$(reboot)" not in line.split("=", 1)[1].replace("'", "")[:0]
+        assert line.startswith(b"export FOO=")
         # Definitively verify the value is single-quoted.
-        assert line == "export FOO='$(reboot)'\n"
+        assert line == b"export FOO='$(reboot)'\n"

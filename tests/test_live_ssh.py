@@ -175,6 +175,16 @@ class TestFileTransfer:
 # TEST 3: Persistent shell sessions
 # ════════════════════════════════════════════════════════
 
+async def _bootstrapped_session(sm):
+    """Create a persistent session and inject the OSC 133 integration script,
+    mirroring what remote_bash._setup_session does — without it the shell emits
+    no D markers and every command times out."""
+    from portal_mcp_server.session_manager import OSC133_INTEGRATION_SCRIPTS
+    sid = await sm.create_session(TEST_HOST_NAME)
+    await sm.bootstrap_osc133(sid, OSC133_INTEGRATION_SCRIPTS["bash"])
+    return sid
+
+
 class TestPersistentSessions:
 
     @pytest.mark.asyncio
@@ -182,11 +192,11 @@ class TestPersistentSessions:
         """Create a session, run commands, verify state persists."""
         from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
-        sid = await sm.create_session(TEST_HOST_NAME)
+        sid = await _bootstrapped_session(sm)
         assert sid, "Session ID must not be empty"
         # CWD change must persist across calls
-        out1, _ = await sm.execute_in_session(sid, "cd /tmp && pwd")
-        out2, _ = await sm.execute_in_session(sid, "pwd")
+        out1, _, _ = await sm.execute_in_session(sid, "cd /tmp && pwd")
+        out2, _, _ = await sm.execute_in_session(sid, "pwd")
         assert "/tmp" in out2, f"CWD did not persist: {out2}"
         await sm.close_session(sid)
 
@@ -195,10 +205,10 @@ class TestPersistentSessions:
         """Inject env var into session and read it back."""
         from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
-        sid = await sm.create_session(TEST_HOST_NAME)
+        sid = await _bootstrapped_session(sm)
         sm.set_env(sid, "MCP_TEST_VAR", "hello123")
         await asyncio.sleep(0.3)
-        out, _ = await sm.execute_in_session(sid, "echo $MCP_TEST_VAR")
+        out, _, _ = await sm.execute_in_session(sid, "echo $MCP_TEST_VAR")
         assert "hello123" in out
         await sm.close_session(sid)
 
@@ -207,7 +217,7 @@ class TestPersistentSessions:
         """Session appears in list while active, gone after close."""
         from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
-        sid = await sm.create_session(TEST_HOST_NAME)
+        sid = await _bootstrapped_session(sm)
         sessions = sm.list_sessions()
         ids = [s["session_id"] for s in sessions]
         assert sid in ids
@@ -221,12 +231,12 @@ class TestPersistentSessions:
         """Two concurrent sessions maintain independent CWDs."""
         from portal_mcp_server.session_manager import get_session_manager
         sm = get_session_manager()
-        sid1 = await sm.create_session(TEST_HOST_NAME)
-        sid2 = await sm.create_session(TEST_HOST_NAME)
+        sid1 = await _bootstrapped_session(sm)
+        sid2 = await _bootstrapped_session(sm)
         await sm.execute_in_session(sid1, "cd /tmp")
         await sm.execute_in_session(sid2, "cd /var")
-        out1, _ = await sm.execute_in_session(sid1, "pwd")
-        out2, _ = await sm.execute_in_session(sid2, "pwd")
+        out1, _, _ = await sm.execute_in_session(sid1, "pwd")
+        out2, _, _ = await sm.execute_in_session(sid2, "pwd")
         assert "/tmp" in out1
         assert "/var" in out2
         await sm.close_session(sid1)

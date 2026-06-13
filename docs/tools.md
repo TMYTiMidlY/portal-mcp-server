@@ -34,21 +34,28 @@ only the first line still chooses correctly.
 | Tool | Signature | Purpose |
 |---|---|---|
 | `portal_exec` | `(host="" \| [host…], command="", commands=None, group_tag="", timeout=3600.0, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` | **Default workhorse.** Stateless one-shot over the connection pool; returns immediately with **split** stdout/stderr + exit code. Targets one host, an explicit list, or a `group_tag`. Runs one `command` or a `commands` sequence. Fan-out is parallel by default; `serialize=True` (+`delay_s`) does a rolling rollout. `use_sudo` / `secrets` inject credentials out-of-band (see below). Single host + single command → one dict; otherwise a list (a multi-command host carries `{host, results:[…]}`). |
-| `portal_shell` | `(host, command, timeout=3600.0)` | **Persistent `bash -i` session** for one host — `cwd` and env (`cd` / `export` / venv) survive across calls. Output is the **combined** stream (a PTY merges stdout/stderr). Returns `{host, session_id, command, exit_code, output, duration_s}`. Use only when you need state continuity; otherwise `portal_exec` is faster. |
+| `portal_shell` | `(host, command="", commands=None, stop_on_error=True, timeout=3600.0)` | **Persistent interactive-shell session** (bash or zsh) for one host — `cwd` and env (`cd` / `export` / venv) survive across calls. Completion + exit codes ride on **OSC 133 (FinalTerm) Shell Integration**: the shell itself emits `\x1b]133;D;<exit>\x07` via a PROMPT_COMMAND/precmd hook injected once over stdin (never written to disk). Output is the **combined** stream (a PTY merges stdout/stderr); oversize output is capped + flagged `truncated`. Single `command` → `{host, session_id, command, exit_code, output, duration_s}`. A `commands=[…]` sequence runs in the SAME session so `cd` / `export` / `source venv/bin/activate` carry across steps (what `portal_exec`'s multi-command path can't do) → `{host, session_id, results:[…], duration_s}`, stopping at the first failure when `stop_on_error=True` (adds `stopped_at`). A command that wedges on an interactive prompt (sudo / ssh / passphrase) is auto-Ctrl-C'd and returns `exit_code:-1` + `error:"interactive_prompt_blocked"` + `session_preserved:true` — the session/cwd/env survive, so the next non-interactive command runs straight away. Use only when you need state continuity; otherwise `portal_exec` is faster. |
 | `portal_job` | `(action=submit\|poll\|cancel\|list, host="", command="", job_id="", since=0, tail=0, max_bytes=65536, signal=TERM\|KILL, use_sudo=False, secrets=None)` | **Background** execution. `submit` returns a `job_id` immediately (the job runs under `nohup` + remote tmp files, surviving a dropped connection); `poll` fetches status + new output **on demand** — `since=<new_offset>` returns only newer bytes, capped at `max_bytes` (default 64 KiB) per call, with a `more` flag so the agent pages through a big backlog instead of getting it all at once (or `tail=N` to peek the last N lines); the chunk is base64-transferred + boundary-aware UTF-8 decoded so chunk seams never split a multibyte char. `cancel` signals it; `list` shows all jobs. Job table is **best-effort persisted** across restarts (`<state>/jobs.json`; `PORTAL_JOB_PERSIST=0` to disable), bounded (`PORTAL_JOB_MAX_LIVE`), TTL-swept (`PORTAL_JOB_TTL`). `use_sudo`/`secrets` are background-unsafe — passing them is **rejected with a redirect** to `portal_exec`. |
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` | Run a command on the **MCP server's own machine** (not over SSH). DISABLED unless the operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` (larger threat surface). For tasks that genuinely belong on the server host (e.g. a local secret); remote work goes through `portal_exec`. |
 | `portal_close_shell` | `(host)` | Close the cached `portal_shell` session for a host (next `portal_shell` reopens). Rarely needed — only to reset a dirtied session. |
 
-> **sudo (`portal_exec(use_sudo=True)`)** — the password is **never** supplied
-> by the agent. It comes from the per-user credential agent populated by
-> `portal sudo set <host>` (temporary, no-echo, TTL-cached), or from the host's
-> `sudo_password_command` in `hosts.yaml` (permanent, e.g. a password manager).
-> Resolved per host; fed to `sudo -S -k` on stdin (never on the command line).
-> Audited as `exec_sudo`. The result carries **`"high_risk": true`** + a note so
-> the calling agent reports the privileged action (or does it only with explicit
-> permission). If no password source exists the call is refused with guidance on
-> both options. Whenever the user wants to run something as root, the agent MUST
-> use this rather than embedding bare `sudo` in a command.
+> **sudo**: whenever the user wants to run anything as root, use
+> `portal_exec(use_sudo=True)` — it feeds the stored sudo password (from the
+> per-user credential agent / `hosts.yaml` `sudo_password_command`, never from
+> the agent) to `sudo -S -k` on stdin, audits as `exec_sudo`, and flags the
+> result `high_risk`. Do NOT embed bare `sudo` in `portal_shell` or plain
+> `portal_exec`; both fail fast with guidance pointing here (in `portal_shell`
+> it is auto-Ctrl-C'd, leaving the session alive — see that tool's row).
+
+> **portal_shell protocol & shells.** Command boundaries use **OSC 133
+> (FinalTerm) Shell Integration** — the same事实标准 iTerm2 / VS Code's
+> integrated terminal use. A tiny integration script is injected over stdin on
+> first use (never written to disk); thereafter the shell reports each exit
+> code in `\x1b]133;D;<exit>\x07`. Supported shells: **bash** (default) and
+> **zsh**; any other login shell falls back to bash (which must exist — else
+> the call is refused, pointing you at one-shot `portal_exec`). fish has a
+> documented `fish_postexec` hook too but isn't shipped active yet (pending a
+> real-hardware spike).
 
 > **secrets (`secrets=[…]`)** — for `portal_exec` and `portal_local_exec`, the
 > agent passes secret **names**, never values. Each name resolves (via the
@@ -63,8 +70,8 @@ only the first line still chooses correctly.
 > **Two layers of reuse (don't conflate them).** *Connection reuse* = the
 > asyncssh TCP/channel pool, shared by **every** tool, purely for **speed**
 > (~10-30 ms/call after the first ~280 ms connect). *Session reuse* = the one
-> sticky `bash -i` per host that only `portal_shell` uses, for **state**
-> continuity. A bash session rides on a pooled channel; the two are orthogonal.
+> sticky interactive shell (bash/zsh) per host that only `portal_shell` uses,
+> for **state** continuity. That shell rides on a pooled channel; orthogonal.
 
 ---
 
@@ -171,7 +178,7 @@ implementation modules:
 | `connection_manager.py` | the connection pool + host registry used by every tool |
 | `shell_engine.py` | `portal_exec` (one-shot `ssh_exec`) |
 | `remote_bash.py` | `portal_shell` / `portal_close_shell` (persistent session) + sudo/secrets one-shot paths |
-| `session_manager.py` | the persistent `bash -i` session (cwd/env, exit codes) |
+| `session_manager.py` | the persistent interactive-shell session — OSC 133 boundary protocol (cwd/env, exit codes, soft-cancel) |
 | `job_manager.py` | `portal_job` (background submit/poll/cancel/list) |
 | `local_exec.py` | `portal_local_exec` |
 | `remote_text_editor.py` | `portal_read` / `portal_patch` (+ orphan-tmp sweep) |

@@ -33,6 +33,7 @@ from .remote_text_editor import (
 from .remote_search import remote_grep as _re_grep, remote_glob as _re_glob
 from .remote_bash import (
     remote_bash as _re_bash,
+    remote_bash_many as _re_bash_many,
     remote_bash_close as _re_bash_close,
     remote_bash_status as _re_bash_status,
     remote_sudo_exec as _re_sudo_exec,
@@ -275,6 +276,33 @@ def _sudo_missing_message(host: str) -> str:
         "run the first command and confirm when done; if you have no such "
         "tool, tell them what to run and end your turn to wait."
     )
+
+
+# Substrings sudo itself prints when it needs a password but has no tty and no
+# `-S`/askpass (i.e. a plain portal_exec command containing a bare `sudo`).
+# The command fails fast (good) but with a cryptic message — we attach a hint
+# pointing at the right tool so the agent doesn't have to guess.
+_SUDO_TTY_SIGNS = (
+    "a terminal is required to read the password",
+    "no tty present and no askpass program",
+    "sudo: a password is required",
+)
+
+
+def _maybe_hint_sudo_tty(res: dict) -> None:
+    """If a plain exec result shows sudo failing for lack of a tty, attach a
+    `hint` telling the agent to use use_sudo=True (in place, idempotent)."""
+    if not isinstance(res, dict) or "hint" in res:
+        return
+    text = (res.get("stderr") or "") + "\n" + (res.get("stdout") or "")
+    if any(sign in text for sign in _SUDO_TTY_SIGNS):
+        res["hint"] = (
+            "sudo needs a password but had no tty to prompt on. Re-run this as "
+            "portal_exec(host=..., command=..., use_sudo=True): it feeds the "
+            "stored sudo password to `sudo -S` over stdin. If none is stored "
+            "yet, ask the user to run `portal sudo set <host>` in a separate "
+            "terminal first — never have them paste the password into the chat."
+        )
 
 
 def _result_failed(r: dict) -> bool:
@@ -847,35 +875,83 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 
 
 @mcp.tool()
-async def portal_shell(host: str, command: str, timeout: float = 3600.0,
+async def portal_shell(host: str, command: str = "",
+                       commands: "list[str] | None" = None,
+                       stop_on_error: bool = True,
+                       timeout: float = 3600.0,
                        ctx: "Context | None" = None) -> str:
-    """Run a command in the **persistent bash session** for one host — cwd and
-    environment (cd / export / venv activation) survive across calls.
+    """Run a command (or a sequence) in the **persistent shell session** for one
+    host — cwd and environment (cd / export / venv activation) survive across
+    calls.
 
     Use portal_shell only when you need that state continuity; otherwise use
     portal_exec (it's faster — no session setup — and can target many hosts).
     For a long task you want to background and poll, use portal_job.
 
+    Completion + exit codes ride on the **OSC 133 (FinalTerm) Shell Integration**
+    protocol — the same事实标准 iTerm2 / VS Code's integrated terminal use. On
+    first use the session injects a tiny integration script over stdin (never
+    written to disk); thereafter the shell itself reports each command's exit
+    code in a `\\x1b]133;D;<exit>\\x07` escape via its PROMPT_COMMAND / precmd
+    hook. Supports bash (default) and zsh; any other login shell falls back to
+    bash (bash must exist on the host).
+
+    Commands (pick one):
+      - command="uptime"                 : a single command. Returns a single
+        dict {host, session_id, command, exit_code, output, duration_s}.
+      - commands=["cd /tmp","source venv/bin/activate","pytest"] : a sequence
+        run in order in the SAME session, so cwd / export / shell functions
+        carry across steps. Returns {host, session_id, results:[…], duration_s}
+        with a per-step {command, exit_code, output}; stop_on_error=True
+        (default) halts at the first non-zero / unknown exit and adds
+        stopped_at. (This cross-step state continuity is what portal_exec's
+        multi-command path CANNOT do — it opens a fresh shell per step.)
+
     Behavior:
-      - First call for a host auto-creates a `bash -i` session via SSH; later
-        calls reuse the same shell, so `cd /tmp` in one call makes the next
-        call's `pwd` print `/tmp`.
       - Each host keeps exactly ONE sticky session (host → session_id), reused
         across calls. This "session reuse" (state) is a different layer from the
         connection pool's "connection reuse" (speed) — see README §"Two layers
         of reuse".
       - Output is the combined stdout/stderr stream (a PTY merges them — use
-        portal_exec when you need them split). Returns {host, session_id,
-        command, exit_code, output, duration_s}.
+        portal_exec when you need them split). Very large output is capped and
+        flagged with truncated=true.
       - Long, silent commands are fine: the call is held open until the command
-        exits or `timeout` (below) elapses.
+        exits or `timeout` (per command) elapses.
       - sudo / secret injection are NOT available here (both are one-shot by
-        nature) — use portal_exec(use_sudo=True / secrets=[...]).
+        nature) — use portal_exec(use_sudo=True / secrets=[...]). A command that
+        wedges on an interactive prompt (sudo password, ssh first-connect,
+        passphrase, …) is auto-Ctrl-C'd and returns exit_code -1 +
+        error:"interactive_prompt_blocked" + session_preserved:true — the
+        session, cwd and env all survive, so the next non-interactive command
+        runs straight away. To run sudo, use portal_exec(use_sudo=True).
+        (NOPASSWD / already-cached sudo never prompts and runs normally.)
 
     ⚠️ Safety: by default, write operations should target /tmp/ on the remote
        unless the user has explicitly approved a different path. This tool does
        NOT enforce that — it's a convention for the agent's skill prompt.
     """
+    # command vs commands: exactly one, mirroring portal_exec.
+    if commands is not None:
+        if command:
+            raise ToolError("pass either command or commands, not both.")
+        if not isinstance(commands, list) or not all(isinstance(c, str) for c in commands):
+            raise ToolError("commands must be a list of strings.")
+        if not commands:
+            raise ToolError("commands list is empty.")
+        for c in commands:
+            err = _gate(host, c)
+            if err:
+                raise ToolError(f"BLOCKED: {err}")
+        res = await _await_with_heartbeat(
+            _re_bash_many(host, commands, stop_on_error=stop_on_error,
+                          timeout=timeout), ctx)
+        for entry in res.get("results", []):
+            audit_log(host, entry.get("command", "?"),
+                      entry.get("exit_code", "?"), operation="shell")
+        return json.dumps(res, indent=2, ensure_ascii=False)
+
+    if not command:
+        raise ToolError("provide command (str) or commands (list of str).")
     err = _gate(host, command)
     if err:
         raise ToolError(f"BLOCKED: {err}")
@@ -1055,7 +1131,9 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
                       operation="exec_sudo")
             return res
         # Plain one-shot path: ssh_exec runs over the pool and audits as "exec".
-        return await ssh_exec(h, cmd, timeout=int(timeout))
+        res = await ssh_exec(h, cmd, timeout=int(timeout))
+        _maybe_hint_sudo_tty(res)
+        return res
 
     async def run_host(h: str):
         if not multi_cmd:

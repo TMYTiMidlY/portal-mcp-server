@@ -47,22 +47,29 @@ class _FakeStdin:
 
 
 class _ScriptedStdout:
-    """Yields a queue of chunks to ``.read()``; ``None`` raises ``exc``."""
+    """Yields a queue of chunks to ``.read()``; ``None`` raises ``exc``.
+
+    The session channel runs in *bytes* mode (encoding=None), so ``read``
+    returns ``bytes``; ``str`` chunks in the script are encoded as UTF-8 for
+    convenience (escape sequences like ``\\x1b]133;D;0\\x07`` survive).
+    """
 
     def __init__(self, chunks: list, exc: BaseException | None = None):
         self._chunks = list(chunks)
         self._exc = exc
 
-    async def read(self, _size: int) -> str:
+    async def read(self, _size: int) -> bytes:
         if not self._chunks:
             # Simulate blocking forever — the caller's wait_for(0.3) will
             # time out and loop. Use a long sleep so the per-iteration
             # timeout fires before this resolves.
             await asyncio.sleep(10)
-            return ""
+            return b""
         chunk = self._chunks.pop(0)
         if chunk is None and self._exc is not None:
             raise self._exc
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8")
         return chunk
 
 
@@ -256,12 +263,13 @@ class TestRemoteBashAutoRecover:
 
         async def fake_execute(self, sid, cmd, timeout=60.0):
             # Only the FIRST execute call dies — the recreated session
-            # serves the retry happily.
+            # serves the retry happily. Returns the (output, exit_code,
+            # truncated) 3-tuple of the OSC 133 protocol.
             if sid == "sid-1":
                 raise session_manager.SessionDead(
                     sid, BrokenPipeError("channel gone")
                 )
-            return f"OK from {sid}", 0
+            return f"OK from {sid}", 0, False
 
         monkeypatch.setattr(remote_bash, "_ensure_session", fake_ensure)
         monkeypatch.setattr(
