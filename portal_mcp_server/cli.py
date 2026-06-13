@@ -1208,9 +1208,20 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     if os.environ.get("PORTAL_ALLOW_LOCAL_EXEC", "").lower() not in (
         "1", "true", "yes", "on",
     ):
-        raise ToolError("portal_local_exec is disabled. The operator must set "
-                        "PORTAL_ALLOW_LOCAL_EXEC=1 for the MCP server process to "
-                        "allow running commands on the local host.")
+        raise ToolError(
+            "portal_local_exec is disabled. Running commands on the MCP "
+            "server's OWN machine is off by default. To enable it, set the "
+            "environment variable PORTAL_ALLOW_LOCAL_EXEC=1 in the MCP server "
+            "PROCESS's environment — this is a process-env switch, NOT a "
+            "policies.yaml/hosts.yaml setting (it is deliberately kept out of "
+            "the config files so the agent can't self-enable local execution by "
+            "editing a file it can otherwise write). The usual place is the env "
+            "block of the portal server entry in the MCP client config that "
+            'launches it (e.g. .mcp.json): add  "env": '
+            '{"PORTAL_ALLOW_LOCAL_EXEC": "1"}  to that entry, then restart the '
+            "session so the server is relaunched with it. (If you start the "
+            "server another way, export the variable in its shell or set "
+            "Environment=PORTAL_ALLOW_LOCAL_EXEC=1 in its systemd unit instead.)")
     err = _gate("<local>", command)
     if err:
         raise ToolError(f"BLOCKED: {err}")
