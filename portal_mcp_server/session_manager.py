@@ -166,6 +166,37 @@ OSC133_INTEGRATION_SCRIPTS = {
 SUPPORTED_SHELLS = tuple(SHELL_COMMAND_LINES.keys())
 
 
+def _wrap_compound(command: str) -> str:
+    """Wrap a multi-line command so an interactive shell runs it as ONE
+    compound command, emitting a single OSC 133 ``D`` boundary marker.
+
+    Interactive bash / zsh fire ``PROMPT_COMMAND`` / ``precmd`` — and therefore
+    the ``D`` completion marker this module keys on — after *every* top-level
+    input line. A ``command`` string with embedded newlines would thus emit one
+    ``D`` per line, and the reader (which returns at the *first* ``D``) would run
+    only the first line, leave the rest queued in the PTY, and desync every later
+    call by one marker. Enclosing the whole string in a brace group ``{ … }``
+    keeps the shell in PS2 continuation until the matching ``}``, so the prompt —
+    and the marker — fire exactly once for the entire command.
+
+    A brace group (unlike a ``( … )`` subshell) executes in the *current* shell,
+    so ``cd`` / ``export`` and other state still persist across calls — the whole
+    point of a persistent session. The ``$?`` reported in the ``D`` marker is the
+    group's last command's exit status, matching what a one-shot exec of the same
+    script returns.
+
+    Single-line commands (no embedded newline) are returned unchanged: they
+    already produce exactly one marker, so the common path stays byte-for-byte
+    identical and well-exercised ``a; b; c`` joins are unaffected.
+    """
+    if "\n" not in command:
+        return command
+    # Trailing newlines are dropped so the closing brace sits on its own line
+    # right after the final command; the leading "{\n" opens the group.
+    return "{\n" + command.rstrip("\n") + "\n}"
+
+
+
 class InteractivePromptBlocked(RuntimeError):
     """Raised by execute_in_session when a command wedged on an interactive
     prompt that reads from the PTY — the most common is ``sudo`` asking for a
@@ -451,7 +482,8 @@ class SessionManager:
         """
         session_id = session.session_id
         try:
-            session.process.stdin.write((command + "\n").encode("utf-8"))
+            payload = _wrap_compound(command)
+            session.process.stdin.write((payload + "\n").encode("utf-8"))
         except (BrokenPipeError, ConnectionResetError, OSError,
                 asyncssh.ChannelOpenError, asyncssh.ConnectionLost) as e:
             await self._invalidate(session_id)

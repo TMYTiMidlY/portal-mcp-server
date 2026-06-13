@@ -502,3 +502,99 @@ def test_integration_scripts_present():
     assert set(smod.OSC133_INTEGRATION_SCRIPTS) == {"bash", "zsh"}
     assert smod.SUPPORTED_SHELLS == ("bash", "zsh")
     assert "fish" not in smod.SHELL_COMMAND_LINES
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Multi-line command → ONE compound command (brace-group wrap)
+#
+#  Regression for the bug where a ``command`` with embedded newlines was written
+#  to the interactive shell line-by-line, so PROMPT_COMMAND fired (and emitted a
+#  D marker) per line. The reader returns at the FIRST D, so only line one ran;
+#  the rest stayed queued and desynced every later call by one marker. The fix
+#  wraps multi-line commands in a brace group ``{ … }`` so the shell stays in PS2
+#  continuation and emits exactly one D for the whole command.
+# ════════════════════════════════════════════════════════════════════════════
+
+def test_wrap_compound_unit():
+    w = smod._wrap_compound
+    # Single line (incl. `;`-joined): unchanged — the hot path stays identical.
+    assert w("echo hi") == "echo hi"
+    assert w("echo a; sleep 1; echo b") == "echo a; sleep 1; echo b"
+    # Multi-line: wrapped as one brace group.
+    assert w("echo a\nsleep 1\necho b") == "{\necho a\nsleep 1\necho b\n}"
+    # A trailing newline is trimmed so `}` sits on its own line after the last cmd.
+    assert w("echo a\n") == "{\necho a\n}"
+    assert w("echo a\nb\n\n") == "{\necho a\nb\n}"
+
+
+@pytest.mark.asyncio
+async def test_multiline_command_sends_brace_group(monkeypatch):
+    """A multi-line command reaches the shell as a single ``{ … }`` write, and
+    its exit code (from the one D) is passed through."""
+    seen: list[bytes] = []
+
+    def on_command(proc, data):
+        seen.append(data)
+        proc.queue.append(b"grouped\r\n" + _d(7))
+
+    proc = _Proc(on_command, with_drain=True)
+    sm, sid = await _make_ready_session(monkeypatch, proc)
+    out, code, _ = await sm.execute_in_session(
+        sid, "echo a\nsleep 1\necho b", timeout=5)
+
+    assert len(seen) == 1, "the whole multi-line command is a single write"
+    assert seen[0].decode() == "{\necho a\nsleep 1\necho b\n}\n"
+    assert out == "grouped"
+    assert code == 7, "the one D's exit code is the group's last command"
+
+
+@pytest.mark.asyncio
+async def test_singleline_command_not_wrapped(monkeypatch):
+    """Single-line commands (incl. `;`-joined) are written verbatim — no brace
+    wrap, so the well-exercised path is byte-for-byte unchanged."""
+    seen: list[bytes] = []
+
+    def on_command(proc, data):
+        seen.append(data)
+        proc.queue.append(_d(0))
+
+    proc = _Proc(on_command, with_drain=True)
+    sm, sid = await _make_ready_session(monkeypatch, proc)
+    await sm.execute_in_session(sid, "echo a; sleep 1; echo b", timeout=5)
+
+    assert seen == [b"echo a; sleep 1; echo b\n"]
+
+
+@pytest.mark.asyncio
+async def test_multiline_does_not_desync_next_call(monkeypatch):
+    """Model an interactive shell that emits one D per top-level line for a raw
+    multi-line write, but ONE D for a brace group. With the fix a multi-line
+    command consumes exactly one D, so the NEXT call reads its own output and no
+    stray marker is left queued.
+
+    This fails if the brace wrap is reverted: a raw 3-line write would queue 3
+    D's, the reader would return at the first, and 2 strays would remain to
+    desync the follow-up — leaving ``proc.queue`` non-empty.
+    """
+    def on_command(proc, data):
+        text = data.decode()
+        stripped = text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            proc.queue.append(b"grouped\r\n" + _d(0))           # one compound D
+        else:
+            lines = [ln for ln in text.split("\n") if ln.strip()]
+            proc.queue.append(b"out\r\n")
+            for _ in lines:                                      # one D per line
+                proc.queue.append(_d(0))
+
+    proc = _Proc(on_command, with_drain=True)
+    sm, sid = await _make_ready_session(monkeypatch, proc)
+
+    out1, code1, _ = await sm.execute_in_session(
+        sid, "echo A\nsleep 1\necho B", timeout=5)
+    assert out1 == "grouped", "multi-line must run as one compound command"
+    assert code1 == 0
+
+    out2, _, _ = await sm.execute_in_session(sid, "echo NEXT", timeout=5)
+    assert out2 == "out", "follow-up reads its own output (no leftover D)"
+    assert proc.queue == [], "no stray D markers left queued — no desync"
