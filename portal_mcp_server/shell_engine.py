@@ -18,6 +18,7 @@ Hardening notes
 """
 import asyncio
 import time
+import uuid
 import logging
 from typing import AsyncGenerator
 
@@ -118,7 +119,7 @@ async def ssh_exec_script(host_name: str, script_content: str,
     except ValueError as e:
         return {"error": f"Invalid interpreter: {e}", "host": host_name}
 
-    remote_path = f"/tmp/_mcp_script_{int(time.time())}.sh"
+    remote_path = f"/tmp/_mcp_script_{uuid.uuid4().hex}.sh"
     quoted_path = quote_shell(remote_path)
     mgr = get_manager()
     conn = await mgr.get_connection(host_name)

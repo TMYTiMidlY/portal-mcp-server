@@ -196,8 +196,7 @@ async def ssh_list_directory(host_name: str, remote_path: str = ".") -> list[dic
                     "size": a.size,
                     "permissions": oct(a.permissions) if a.permissions else None,
                     "mtime": a.mtime,
-                    "is_dir": asyncssh.SFTP_TYPE_DIRECTORY ==
-                              (a.permissions >> 12 & 0xf if a.permissions else 0),
+                    "is_dir": _stat.S_ISDIR(a.permissions or 0),
                 })
             return result
     except Exception as e:

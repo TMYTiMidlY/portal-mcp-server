@@ -170,7 +170,9 @@ def validate_signal(sig: str) -> str:
     """Validate a Unix signal name (``TERM``, ``HUP``, ...). Returns upper-cased."""
     if not isinstance(sig, str):
         raise ValueError(f"signal must be a string, got {type(sig).__name__}")
-    s = sig.upper().lstrip("SIG")
+    s = sig.upper()
+    if s.startswith("SIG"):
+        s = s[3:]
     if s not in _ALLOWED_SIGNALS:
         raise ValueError(
             f"signal {sig!r} not in allowlist: {sorted(_ALLOWED_SIGNALS)}"
