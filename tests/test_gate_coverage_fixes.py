@@ -62,13 +62,13 @@ def fresh_mgr(monkeypatch, tmp_path):
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestPortalHostGate:
-    def test_register_with_target_in_allowlist_succeeds(self, policy, fresh_mgr):
+    async def test_register_with_target_in_allowlist_succeeds(self, policy, fresh_mgr):
         from portal_mcp_server import cli
         # Target host alias matches 'safe-*' allowlist
-        out = cli.portal_host(action="register", name="alias1", host="safe-target")
+        out = await cli.portal_host(action="register", name="alias1", host="safe-target")
         assert "registered" in out.lower(), out
 
-    def test_register_with_target_outside_allowlist_blocked(self, policy, fresh_mgr):
+    async def test_register_with_target_outside_allowlist_blocked(self, policy, fresh_mgr):
         """Even with a benign alias name, registering a target host that's
         NOT in the allowlist must be blocked. Without the gate fix, an
         agent could register 'safe-pivot' → '10.0.0.99' and operate on
@@ -76,11 +76,11 @@ class TestPortalHostGate:
         """
         from portal_mcp_server import cli
         with pytest.raises(ToolError, match="BLOCKED:"):
-            cli.portal_host(action="register", name="safe-pivot", host="evil-host")
+            await cli.portal_host(action="register", name="safe-pivot", host="evil-host")
         assert "evil-host" not in [h["name"] for h in fresh_mgr.list_hosts()]
         assert "safe-pivot" not in [h["name"] for h in fresh_mgr.list_hosts()]
 
-    def test_remove_blocked_alias_is_gated(self, policy, fresh_mgr):
+    async def test_remove_blocked_alias_is_gated(self, policy, fresh_mgr):
         """Remove gates against the alias name. If the alias isn't in the
         allowlist (e.g. pre-existing in hosts.yaml from before the policy
         tightened), removal must be blocked too.
@@ -91,7 +91,7 @@ class TestPortalHostGate:
             "evil-host"
         ) or _make_hostconfig("evil-host")
         with pytest.raises(ToolError, match="BLOCKED:"):
-            cli.portal_host(action="remove", name="evil-host")
+            await cli.portal_host(action="remove", name="evil-host")
 
 
 def _make_hostconfig(name: str):
@@ -185,7 +185,7 @@ class _FakeListener:
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestGateManyTwoPhase:
-    def test_failed_host_does_not_burn_others_rate_limit(self, policy):
+    async def test_failed_host_does_not_burn_others_rate_limit(self, policy):
         """If host3 is outside the allowlist, hosts h1 and h2 must still
         have full rate-limit quota afterwards. Old buggy implementation
         called check_rate_limit (which mutates the sliding window) for
@@ -193,7 +193,7 @@ class TestGateManyTwoPhase:
         """
         from portal_mcp_server import cli
 
-        err = cli._gate_many(
+        err = await cli._gate_many(
             ["safe-01", "safe-02", "evil-host"],
             command="echo hi",
         )
@@ -204,13 +204,13 @@ class TestGateManyTwoPhase:
         assert rc.get("safe-01", []) == []
         assert rc.get("safe-02", []) == []
 
-    def test_all_hosts_pass_consumes_one_token_per_host(self, policy):
+    async def test_all_hosts_pass_consumes_one_token_per_host(self, policy):
         """Sanity: when every host validates, each gets exactly one token
         committed. No double-counting.
         """
         from portal_mcp_server import cli
 
-        err = cli._gate_many(["safe-01", "safe-02"], command="echo hi")
+        err = await cli._gate_many(["safe-01", "safe-02"], command="echo hi")
         assert err is None
         rc = policy._rate_counters
         assert len(rc["safe-01"]) == 1
@@ -222,21 +222,21 @@ class TestGateManyTwoPhase:
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestGateExec:
-    def test_blocked_command_does_not_burn_host_rate_limit(self, policy):
+    async def test_blocked_command_does_not_burn_host_rate_limit(self, policy):
         """A blocked command anywhere in the sequence must reject the run
         before any per-host rate-limit token is consumed (two-phase gate).
         """
         from portal_mcp_server import cli
 
         policy.command_blocklist = ["rm -rf*"]
-        err = cli._gate_exec(["safe-01"], ["echo a", "rm -rf /"])
+        err = await cli._gate_exec(["safe-01"], ["echo a", "rm -rf /"])
         assert err is not None
         assert policy._rate_counters.get("safe-01", []) == []
 
-    def test_all_pass_consumes_one_token_per_host(self, policy):
+    async def test_all_pass_consumes_one_token_per_host(self, policy):
         from portal_mcp_server import cli
 
-        err = cli._gate_exec(["safe-01", "safe-02"], ["echo a", "echo b"])
+        err = await cli._gate_exec(["safe-01", "safe-02"], ["echo a", "echo b"])
         assert err is None
         assert len(policy._rate_counters["safe-01"]) == 1
         assert len(policy._rate_counters["safe-02"]) == 1
@@ -247,7 +247,7 @@ class TestGateExec:
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestPortalCheckDryRun:
-    def test_enforce_dry_run_does_not_consume_quota(self, tmp_path):
+    async def test_enforce_dry_run_does_not_consume_quota(self, tmp_path):
         """enforce(commit_rate_limit=False) runs host/command checks but leaves
         the rate-limit counter untouched, so a pre-flight check never throttles
         the real operation it is checking for."""
@@ -256,15 +256,15 @@ class TestPortalCheckDryRun:
         pol = security.SecurityPolicy(policies_yaml=tmp_path / "none.yaml")
         pol.rate_limit_rps = 2.0
         # Many dry-runs never block and never touch the counter ...
-        assert all(pol.enforce("h", commit_rate_limit=False) is None
-                   for _ in range(10))
+        for _ in range(10):
+            assert await pol.enforce("h", commit_rate_limit=False) is None
         assert pol._rate_counters.get("h", []) == []
         # ... so a subsequent real burst still gets its full 2/s allowance.
-        assert pol.enforce("h") is None
-        assert pol.enforce("h") is None
-        assert pol.enforce("h") is not None  # 3rd real call blocked at 2/s
+        assert await pol.enforce("h") is None
+        assert await pol.enforce("h") is None
+        assert await pol.enforce("h") is not None  # 3rd real call blocked at 2/s
 
-    def test_portal_check_never_self_throttles(self, monkeypatch, tmp_path):
+    async def test_portal_check_never_self_throttles(self, monkeypatch, tmp_path):
         """portal_check called many times in a row must never report a spurious
         'Rate limit exceeded' (the dry-run path used to consume quota and
         self-throttle). Regression for the portal_check rate-limit burn."""
@@ -273,5 +273,5 @@ class TestPortalCheckDryRun:
         pol = security.SecurityPolicy(policies_yaml=tmp_path / "none.yaml")
         pol.rate_limit_rps = 2.0
         monkeypatch.setattr(cli, "get_policy", lambda: pol)
-        outs = [cli.portal_check("h") for _ in range(6)]
+        outs = [await cli.portal_check("h") for _ in range(6)]
         assert all("BLOCKED" not in o for o in outs), outs

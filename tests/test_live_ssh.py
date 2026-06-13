@@ -353,16 +353,18 @@ class TestTunnels:
 
 class TestSecurity:
 
-    def test_command_blocklist(self):
+    async def test_command_blocklist(self):
         """Blocked commands are rejected."""
         from portal_mcp_server.security import SecurityPolicy
+        from portal_mcp_server.safety_net import SafetyNetChecker
         pol = SecurityPolicy.__new__(SecurityPolicy)
         pol.host_allowlist = []
         pol.command_blocklist = ["rm -rf /"]
         pol.command_allowlist = []
         pol.rate_limit_rps = 1000
         pol._rate_counters = {}
-        err = pol.check_command("rm -rf /")
+        pol.safety_net = SafetyNetChecker(enabled=False)
+        err = await pol.check_command("rm -rf /")
         assert err is not None
 
     def test_host_allowlist(self):

@@ -24,20 +24,24 @@ Design choices
   verdict (binary missing, timeout, crash, unparseable output) the command is
   REFUSED with an actionable message. A broken safety net must never silently
   degrade into an open door. Set ``fail_closed: false`` to allow-through instead.
-* **Synchronous, up-front.** The policy gate already runs synchronously *before*
-  any SSH/local work, so this adds one short-lived subprocess (~100-300 ms) per
+* **Ordered before any SSH/local work.** The policy gate runs *before* any
+  SSH/local execution, so this adds one short-lived subprocess (~100-300 ms) per
   command at gate time, bounded by ``timeout_s``. It does not interleave with the
-  command's own runtime or the keepalive heartbeat.
+  command's own runtime or the keepalive heartbeat. The check is implemented as
+  ``async`` (``asyncio.create_subprocess_exec``) so the MCP server's event loop
+  keeps scheduling other coroutines while the npx subprocess runs — a sync
+  ``subprocess.run`` here would freeze the entire process for ``timeout_s``
+  seconds (see ``CONTRIBUTING.md`` §代码规范).
 
 ``explain`` always exits 0 (it is a debug/analysis subcommand) — the verdict is
 the JSON ``result`` field (``"allowed"`` / ``"blocked"``), never the exit code.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import subprocess
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -121,7 +125,7 @@ class SafetyNetChecker:
         )
 
     # ── the gate ────────────────────────────────────────────────────────────
-    def check(self, command: str) -> Optional[str]:
+    async def check(self, command: str) -> Optional[str]:
         """Return ``None`` if the command is allowed, else a block reason string.
 
         * Disabled checker → always ``None``.
@@ -130,6 +134,14 @@ class SafetyNetChecker:
         * ``result == "blocked"`` → the cc-safety-net reason, prefixed.
         * Checker cannot run / unparseable → fail-closed refusal string (or
           ``None`` when ``fail_closed`` is false).
+
+        Async by design: this runs inside the asyncio event loop of the MCP
+        server, so a blocking ``subprocess.run`` here would freeze the entire
+        loop for ``timeout_s`` seconds (no other tool call processed, no
+        progress notifications, no keep-alive heartbeat) — see
+        ``CONTRIBUTING.md`` §代码规范. ``asyncio.create_subprocess_exec`` lets
+        the loop keep scheduling other coroutines while the npx subprocess
+        runs in the kernel.
         """
         if not self.enabled:
             return None
@@ -139,28 +151,35 @@ class SafetyNetChecker:
         argv = [*self.command, "explain", "--json", command]
         run_env = {**os.environ, **self.env}
         try:
-            proc = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                timeout=self.timeout_s,
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
                 cwd=self.rulebook_cwd,  # None → inherit the server's cwd
                 env=run_env,
-                check=False,
             )
         except FileNotFoundError:
             return self._unavailable(
                 f"the checker binary {self.command[0]!r} was not found on PATH")
-        except subprocess.TimeoutExpired:
-            return self._unavailable(
-                f"the checker timed out after {self.timeout_s}s")
         except OSError as e:
             return self._unavailable(
                 f"the checker could not be launched ({type(e).__name__}: {e})")
 
-        out = (proc.stdout or "").strip()
+        try:
+            stdout_b, stderr_b = await asyncio.wait_for(
+                proc.communicate(), timeout=self.timeout_s)
+        except asyncio.TimeoutError:
+            # Clean up the runaway process so we do not leak a zombie / a
+            # backgrounded npx that keeps holding pipes open.
+            await self._terminate(proc)
+            return self._unavailable(
+                f"the checker timed out after {self.timeout_s}s")
+
+        stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+        stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+        out = stdout.strip()
         if not out:
-            err = (proc.stderr or "").strip()
+            err = stderr.strip()
             return self._unavailable(
                 f"the checker produced no output (exit {proc.returncode})"
                 + (f"; stderr: {err[:200]!r}" if err else ""))
@@ -180,6 +199,22 @@ class SafetyNetChecker:
             return f"Safety Net blocked this command: {reason}"
         return self._unavailable(
             f"the checker returned an unrecognized verdict {result!r}")
+
+    @staticmethod
+    async def _terminate(proc: "asyncio.subprocess.Process") -> None:
+        """Best-effort kill of a stuck subprocess (timeout path)."""
+        for sig in ("terminate", "kill"):
+            try:
+                getattr(proc, sig)()
+            except (ProcessLookupError, OSError):
+                return
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+                return
+            except asyncio.TimeoutError:
+                continue
+            except ProcessLookupError:
+                return
 
     # ── fail-closed messaging ────────────────────────────────────────────────
     def _unavailable(self, detail: str) -> Optional[str]:

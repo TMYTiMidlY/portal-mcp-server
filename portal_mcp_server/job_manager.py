@@ -193,10 +193,25 @@ class JobManager:
         mgr = get_manager()
         conn = await mgr.get_connection(host)
         try:
-            result = await asyncio.wait_for(
-                conn.run(spawn, check=False, errors=DEFAULT_DECODE_ERRORS),
-                timeout=30,
-            )
+            try:
+                result = await asyncio.wait_for(
+                    conn.run(spawn, check=False, errors=DEFAULT_DECODE_ERRORS),
+                    timeout=30,
+                )
+            except asyncio.TimeoutError as exc:
+                # The spawn command finishes in milliseconds (nohup detaches and
+                # `echo $!` returns immediately) — a 30 s timeout almost always
+                # means the SSH link itself stalled. The remote bash may have
+                # already forked the nohup child though, in which case the job
+                # is running detached but we never recorded its PID, so portal
+                # has no way to list / cancel / poll it. Surface the token so
+                # the user can find and clean up the orphan by hand.
+                raise RuntimeError(
+                    f"timed out submitting background job on {host!r} after "
+                    f"30s; the remote process may still be running detached. "
+                    f"Check with `ssh {host} 'pgrep -f portal-job-{token}'` "
+                    f"and clean up /tmp/portal-job-{token}.{{out,meta}} if so."
+                ) from exc
         finally:
             mgr.release_connection(host, conn)
 

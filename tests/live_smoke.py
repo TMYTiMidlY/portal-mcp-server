@@ -252,10 +252,10 @@ async def main() -> int:
     # ── (5) audit.jsonl received the new operation types ─────────────────
     sect("5. audit.jsonl recorded new operation tags")
     # Trigger host_register via the MCP wrapper so the audit hook fires.
-    cli.portal_host(action="register", name="live-smoke-audit", host=TEST_HOST,
-                     port=TEST_PORT, user=TEST_USER,
-                     key_path=TEST_KEY if os.path.exists(TEST_KEY) else "",
-                     tags="smoke-audit")
+    await cli.portal_host(action="register", name="live-smoke-audit", host=TEST_HOST,
+                           port=TEST_PORT, user=TEST_USER,
+                           key_path=TEST_KEY if os.path.exists(TEST_KEY) else "",
+                           tags="smoke-audit")
     # portal_shell exercise to fire shell audit operation
     await cli.portal_shell("live-smoke-audit", "echo audit-ok", timeout=5)
     await cli.portal_close_shell("live-smoke-audit")

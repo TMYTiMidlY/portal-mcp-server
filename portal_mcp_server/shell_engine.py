@@ -134,9 +134,14 @@ async def ssh_exec_script(host_name: str, script_content: str,
                 timeout=timeout,
             )
         finally:
-            # cleanup runs even if the inner ssh_exec raised or timed out
+            # Cleanup runs even if the inner ssh_exec raised or timed out.
+            # Reuse the OUTER conn: a second ssh_exec(host_name, ...) would
+            # call get_connection again and occupy two pool slots for the
+            # same host throughout this call — with pool_max_per_host=1
+            # that deadlocks (the inner get_connection waits forever for
+            # the slot we are holding).
             try:
-                await ssh_exec(host_name, f"rm -f {quoted_path}", timeout=10)
+                await conn.run(f"rm -f {quoted_path}", check=False)
             except Exception:  # pragma: no cover
                 logger.debug(f"script cleanup failed for {remote_path}")
     except Exception as e:

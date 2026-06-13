@@ -196,7 +196,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | --- | --- |
 | `portal_shell` | `(host, command='', commands=None, stop_on_error=True, timeout=3600.0)` |
 | `portal_exec` | `(host='', command='', commands=None, group_tag='', timeout=3600.0, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` |
-| `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, signal='TERM')` |
+| `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal='TERM')` |
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` |
 | `portal_close_shell` | `(host)` |
 | `portal_read` | `(host, path, start=1, end=None, encoding='utf-8')` |

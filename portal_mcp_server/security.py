@@ -59,8 +59,13 @@ class SecurityPolicy:
                 return None
         return f"Host '{host_name}' is not in the allowlist"
 
-    def check_command(self, command: str) -> Optional[str]:
-        """Returns error string if command is blocked, None if allowed."""
+    async def check_command(self, command: str) -> Optional[str]:
+        """Returns error string if command is blocked, None if allowed.
+
+        Async because the optional semantic gate (``safety_net.check``) shells
+        out to a subprocess; running it synchronously would freeze the MCP
+        server's event loop for the whole ``timeout_s``.
+        """
         cmd_lower = command.lower().strip()
         for pattern in self.command_blocklist:
             if fnmatch.fnmatch(cmd_lower, pattern.lower()):
@@ -69,7 +74,7 @@ class SecurityPolicy:
         # defense-in-depth BEFORE the allowlist short-circuit, so a
         # semantically destructive command (e.g. `bash -c 'git reset --hard'`)
         # is caught even when an allowlist would otherwise wave it through.
-        sn_err = self.safety_net.check(command)
+        sn_err = await self.safety_net.check(command)
         if sn_err:
             return sn_err
         if self.command_allowlist:
@@ -91,20 +96,23 @@ class SecurityPolicy:
         calls.append(now)
         return None
 
-    def enforce(self, host_name: str, command: str = "",
-                *, commit_rate_limit: bool = True) -> Optional[str]:
+    async def enforce(self, host_name: str, command: str = "",
+                      *, commit_rate_limit: bool = True) -> Optional[str]:
         """Run all checks. Returns first error found, or None if all pass.
 
         ``commit_rate_limit=False`` runs the host + command checks but does NOT
         consume a rate-limit token — used by the ``portal_check`` dry-run so a
         pre-flight check never burns the real operation's quota (or
         self-throttles into a spurious "Rate limit exceeded").
+
+        Async because ``check_command`` is async (it may invoke the
+        ``safety_net`` subprocess gate).
         """
         err = self.check_host(host_name)
         if err:
             return err
         if command:
-            err = self.check_command(command)
+            err = await self.check_command(command)
             if err:
                 return err
         if commit_rate_limit:

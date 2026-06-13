@@ -270,13 +270,16 @@ def _systemd_activated_sockets() -> list[socket.socket]:
 
 def _bind_socket(path: Path) -> socket.socket:
     parent = path.parent
-    parent_existed = parent.exists()
     parent.mkdir(parents=True, exist_ok=True)
-    if not parent_existed:
-        try:
-            os.chmod(parent, 0o700)
-        except OSError:
-            pass
+    # Always tighten the parent directory to 0700 — not just when we just
+    # created it. If the parent was inherited (e.g. somebody's home, or a
+    # pre-existing $XDG_RUNTIME_DIR/portal-mcp/), we still don't want
+    # other-user discoverability around our credential socket. Best-effort:
+    # silently ignore failure (parent owned by someone else, read-only fs,…).
+    try:
+        os.chmod(parent, 0o700)
+    except OSError:
+        pass
     if path.exists():
         probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         probe.settimeout(0.5)
@@ -289,7 +292,16 @@ def _bind_socket(path: Path) -> socket.socket:
             probe.close()
         path.unlink()
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.bind(str(path))
+    # Wrap the bind in an aggressive umask so the socket file is created with
+    # 0600 from the start — closes the (small) window where `s.bind` would
+    # leave the file at the process default umask (typically 0022 → 0755) until
+    # the explicit os.chmod a few lines down. Belt-and-braces in front of the
+    # SO_PEERCRED uid check the handler does on accept().
+    old_umask = os.umask(0o077)
+    try:
+        s.bind(str(path))
+    finally:
+        os.umask(old_umask)
     os.chmod(path, 0o600)
     s.listen(socket.SOMAXCONN)
     s.setblocking(False)

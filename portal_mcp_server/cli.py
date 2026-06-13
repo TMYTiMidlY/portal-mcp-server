@@ -86,13 +86,19 @@ mcp = FastMCP("portal-mcp-server", lifespan=_server_lifespan)
 # HELPERS
 # ═══════════════════════════════════════════════════════════════════
 
-def _gate(host: str, command: str = "", *, commit_rate_limit: bool = True) -> str | None:
+async def _gate(host: str, command: str = "", *,
+                commit_rate_limit: bool = True) -> str | None:
     """Returns error string if blocked, None if allowed.
 
     ``commit_rate_limit=False`` runs the host/command checks without consuming
     a rate-limit token (for the ``portal_check`` dry-run).
+
+    Async because the underlying ``SecurityPolicy.enforce`` may invoke the
+    optional ``safety_net`` subprocess gate; running it synchronously would
+    block the MCP server's event loop for the whole ``safety_net.timeout_s``.
     """
-    return get_policy().enforce(host, command, commit_rate_limit=commit_rate_limit)
+    return await get_policy().enforce(
+        host, command, commit_rate_limit=commit_rate_limit)
 
 
 async def _resolve_secrets(names: "list[str]"):
@@ -221,7 +227,7 @@ async def _await_with_heartbeat(coro, ctx: "Context | None",
     return task.result()
 
 
-def _gate_exec(hosts: list[str], commands: list[str]) -> str | None:
+async def _gate_exec(hosts: list[str], commands: list[str]) -> str | None:
     """Multi-host / multi-command policy gate for portal_exec.
 
     Two-phase to avoid burning rate-limit quota on hosts that pass when a
@@ -229,11 +235,15 @@ def _gate_exec(hosts: list[str], commands: list[str]) -> str | None:
     against the blocklist, then every host against the allowlist), and only
     commit per-host rate-limit consumption ONCE per host after everything
     validated. Returns the first error found, or None if all checks pass.
+
+    Async because ``check_command`` may invoke the ``safety_net`` subprocess
+    gate (one subprocess per command); we ``await`` it instead of blocking
+    the MCP server's event loop.
     """
     pol = get_policy()
     # Phase 1: command blocklist for every command (no mutation).
     for c in commands:
-        err = pol.check_command(c)
+        err = await pol.check_command(c)
         if err:
             return f"command {c[:60]!r}: {err}"
     # Phase 2: validate every host (no mutation).
@@ -249,12 +259,12 @@ def _gate_exec(hosts: list[str], commands: list[str]) -> str | None:
     return None
 
 
-def _gate_many(hosts: list[str], command: str = "") -> str | None:
+async def _gate_many(hosts: list[str], command: str = "") -> str | None:
     """Single-command multi-host gate — thin wrapper over :func:`_gate_exec`.
 
     Kept for the direct unit tests that pin the two-phase rate-limit behaviour.
     """
-    return _gate_exec(hosts, [command] if command else [])
+    return await _gate_exec(hosts, [command] if command else [])
 
 
 def _sudo_missing_message(host: str) -> str:
@@ -330,9 +340,9 @@ def _resolve_group(group_tag: str) -> list[str]:
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def portal_host(action: Literal["list", "register", "remove"], name: str = "",
-                 host: str = "", user: str = "root", port: int = 22,
-                 key_path: str = "", tags: str = "") -> str:
+async def portal_host(action: Literal["list", "register", "remove"], name: str = "",
+                       host: str = "", user: str = "root", port: int = 22,
+                       key_path: str = "", tags: str = "") -> str:
     """Manage the SSH host registry.
 
     ## Modes
@@ -380,7 +390,7 @@ def portal_host(action: Literal["list", "register", "remove"], name: str = "",
                     f'add a `Host {name}` stanza to ~/.ssh/config first.')
             # Gate on the alias name (the actual target lives in ssh config and
             # is not visible here; tools gate on the alias name anyway).
-            err = _gate(name)
+            err = await _gate(name)
             if err:
                 raise ToolError(f"BLOCKED: {err}")
             result = mgr.register_host(name=name, use_ssh_config=True,
@@ -393,7 +403,7 @@ def portal_host(action: Literal["list", "register", "remove"], name: str = "",
         # register an arbitrary alias pointing at a non-allowlisted host
         # and then operate on it freely — host_allowlist would only ever
         # see the alias.
-        err = _gate(host)
+        err = await _gate(host)
         if err:
             raise ToolError(f"BLOCKED: {err}")
         result = mgr.register_host(name=name, host=host, user=user, port=port,
@@ -406,7 +416,7 @@ def portal_host(action: Literal["list", "register", "remove"], name: str = "",
             raise ToolError('action="remove" requires `name`.')
         # Gate the alias being removed — same surface as any other
         # state-changing op against that alias.
-        err = _gate(name)
+        err = await _gate(name)
         if err:
             raise ToolError(f"BLOCKED: {err}")
         result = mgr.remove_host(name)
@@ -475,7 +485,7 @@ async def portal_transfer(
     trees. Note: directory modes copy *files* only — symlinks and special files
     are skipped, and empty directories are not created on their own.
     """
-    err = _gate(host)
+    err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     progress_cb = _make_progress_cb(ctx)
@@ -569,7 +579,7 @@ async def portal_tunnel(action: Literal["open", "close", "list"],
     if action == "open":
         if not host:
             raise ToolError('action="open" requires `host`.')
-        err = _gate(host)
+        err = await _gate(host)
         if err:
             raise ToolError(f"BLOCKED: {err}")
         if kind == "local":
@@ -593,7 +603,7 @@ async def portal_tunnel(action: Literal["open", "close", "list"],
                       if t["tunnel_id"] == tunnel_id), None)
         if owner is None:
             raise ToolError(f"Tunnel '{tunnel_id}' not found")
-        err = _gate(owner)
+        err = await _gate(owner)
         if err:
             raise ToolError(f"BLOCKED: {err}")
         result = await tm.close_tunnel(tunnel_id)
@@ -608,7 +618,7 @@ async def portal_tunnel(action: Literal["open", "close", "list"],
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def portal_check(host: str, command: str = "") -> str:
+async def portal_check(host: str, command: str = "") -> str:
     """Dry-run a host (and optional command) through the security policy.
 
     - command="" : check whether the host is accessible at all.
@@ -631,7 +641,7 @@ def portal_check(host: str, command: str = "") -> str:
     the server actually has loaded. ALLOWED therefore means "no rule
     currently blocks this", not "this is safe to run".
     """
-    err = _gate(host, command, commit_rate_limit=False)
+    err = await _gate(host, command, commit_rate_limit=False)
     if err:
         return f"BLOCKED: {err}"
     if not command:
@@ -752,7 +762,7 @@ async def portal_read(host: str, path: str, start: int = 1,
         end: 1-based ending line, inclusive (default: end of file)
         encoding: Text encoding (default utf-8)
     """
-    err = _gate(host)
+    err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     res = await _re_read(host, path, start=start, end=end, encoding=encoding)
@@ -783,7 +793,7 @@ async def portal_patch(host: str, path: str, file_hash: str,
         contents are auto-appended *only* if the slice they replace ended
         with one. The result includes a "warnings" list either way.
     """
-    err = _gate(host)
+    err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     try:
@@ -838,7 +848,7 @@ async def portal_grep(host: str, pattern: str, path: str = ".",
     Respects `.gitignore` (ripgrep's default). Returns JSON whose shape depends
     on output_mode; every shape includes a `truncated` flag.
     """
-    err = _gate(host)
+    err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     res = await _re_grep(
@@ -873,7 +883,7 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
     Returns {filenames:[…newest first], num_files, truncated, duration_ms}.
     Unlike portal_grep this does NOT respect `.gitignore` (matches CC Glob).
     """
-    err = _gate(host)
+    err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     res = await _re_glob(host, pattern, path=path)
@@ -939,7 +949,7 @@ async def portal_shell(host: str, command: str = "",
         if not commands:
             raise ToolError("commands list is empty.")
         for c in commands:
-            err = _gate(host, c)
+            err = await _gate(host, c)
             if err:
                 raise ToolError(f"BLOCKED: {err}")
         res = await _await_with_heartbeat(
@@ -952,7 +962,7 @@ async def portal_shell(host: str, command: str = "",
 
     if not command:
         raise ToolError("provide command (str) or commands (list of str).")
-    err = _gate(host, command)
+    err = await _gate(host, command)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     res = await _await_with_heartbeat(
@@ -1086,7 +1096,7 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
         raise ToolError("secrets and use_sudo cannot be combined in one call.")
 
     # ── Gate every (host, command) pair up front ──
-    err = _gate_exec(hosts, cmd_list)
+    err = await _gate_exec(hosts, cmd_list)
     if err:
         raise ToolError(f"BLOCKED: {err}")
 
@@ -1231,7 +1241,7 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
             "session so the server is relaunched with it. (If you start the "
             "server another way, export the variable in its shell or set "
             "Environment=PORTAL_ALLOW_LOCAL_EXEC=1 in its systemd unit instead.)")
-    err = _gate("<local>", command)
+    err = await _gate("<local>", command)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     env: dict[str, str] = {}
@@ -1265,7 +1275,7 @@ async def portal_close_shell(host: str) -> str:
     Rarely needed: the session is created/reused/auto-recreated implicitly by
     portal_shell — you don't manage its lifecycle. Use this only to reset a
     session whose state has gotten dirty."""
-    err = _gate(host)
+    err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     return await _re_bash_close(host)
@@ -1342,7 +1352,7 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
                 "secret into a 0600 file with a one-shot portal_exec and read "
                 "it inside the job."
             )
-        err = _gate(host, command)
+        err = await _gate(host, command)
         if err:
             raise ToolError(f"BLOCKED: {err}")
         try:
@@ -1367,7 +1377,7 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
         jobs = await jm.list_jobs()
         owner = next((j["host"] for j in jobs if j["job_id"] == job_id), None)
         if owner is not None:
-            err = _gate(owner)
+            err = await _gate(owner)
             if err:
                 raise ToolError(f"BLOCKED: {err}")
         res = await jm.cancel(job_id, signal=signal)

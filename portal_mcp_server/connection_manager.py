@@ -449,8 +449,12 @@ class ConnectionManager:
         del self._registry[name]
         # Drop the lazy lock (otherwise ``_locks`` grows indefinitely if hosts
         # churn) and close any pooled connections so we do not leak SSH
-        # channels for an alias the caller has explicitly forgotten.
+        # channels for an alias the caller has explicitly forgotten. Also
+        # drop any cached config warnings — re-registering the same alias
+        # cleanly later must not resurrect stale "BOTH hosts.yaml and ssh
+        # config" diagnostics from the previous instance.
         self._locks.pop(name, None)
+        self._config_warnings.pop(name, None)
         pool = self._pool.pop(name, [])
         for pc in pool:
             try:
@@ -642,7 +646,12 @@ class ConnectionManager:
         # ssh-agent control (use_ssh_agent): None = auto, True = pure agent,
         # False = hard-disable the agent.
         if cfg.use_ssh_agent is False:
-            # Resolve to '' inside asyncssh = no agent; key files only.
+            # asyncssh normalises ``None`` → ``''`` for agent_path but still
+            # constructs an ``SSHAgentClient('')`` at auth time; that client's
+            # ``open_agent('')`` then fails with ``OSError(ENOENT)`` which gets
+            # wrapped to ``ValueError`` and silently swallowed by the
+            # auth loop. Net effect: no agent keys are ever offered. Setting
+            # ``agent_path`` to anything truthy would re-enable it.
             kwargs["agent_path"] = None
 
         if cfg.use_ssh_agent is True:
