@@ -1,3 +1,11 @@
+## v3.3.2 (2026-06-14)
+
+### Fix
+
+- harden gate, job manager, and credential agent
+- repair latent bugs in dormant helper functions
+- drop unused server-level MCP instructions, relax mcp[cli] floor to >=1.0.0
+
 ## v3.3.1 (2026-06-14)
 
 ### Fix
