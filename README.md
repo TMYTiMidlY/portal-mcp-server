@@ -896,6 +896,9 @@ ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；
 
 于是"等待"只体现为一次正常的对话轮次交接：阻塞的是用户自己终端里的 `getpass`，agent 端永远是"查缓存 → 命中就跑 / 没命中就 fail-fast 给指令"。**绝不要让用户把值粘进对话**——那等于把它喂给了第三方 LLM，整套设计就白做了。
 
+> **这条引导靠什么到达 agent？** 全靠**每个 `portal_*` 工具自己的 description**——MCP client 一定会把工具描述喂给模型，所以"任务需要 token 时先引导用户 `portal secret set`、而不是索取明文"这句就直接写在 `portal_exec` / `portal_local_exec` 描述的顶部。
+> MCP 协议另有一个 **server 级 `instructions` 字段**（`initialize` 响应里返回，本可放一段全局凭据纪律），但规范把它定义为 *“a ‘hint’ to the model … this information **MAY** be added to the system prompt”*（[InitializeResult.instructions](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)，字段可选）——**可选、client 用不用全凭自己**。实测（2026-06）**Copilot CLI / Codex CLI / Claude Code 三家都不把它注入模型上下文**，故 portal **不依赖** server 级 instructions，凭据引导一律落在工具描述里。
+
 ### hosts.yaml 与 `~/.ssh/config`：优先级 + 叠加
 
 **优先级（无字段级 merge）**：同名 host 一旦在 `hosts.yaml` 出现，就**完全覆盖** ssh config，根本不查 ssh config——不存在"hosts.yaml 补 sudo，连接参数继承 ssh config 的 ProxyJump"这种混合。两个 footgun，server 都会发 warning（经 `portal_host(action=list)` 的 `warnings` 透出，因为 stdio server 的 stderr 用户看不见）：

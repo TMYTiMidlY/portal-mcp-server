@@ -891,6 +891,9 @@ No-echo input inherently means "wait for the human to type it," but **that wait 
 
 So "waiting" surfaces only as a normal conversational turn handoff: the `getpass` block lives in the user's own terminal, while the agent side is always "check cache → run on hit / fail-fast with instructions on miss." **Never ask the user to paste the value into the conversation** — that would feed it straight to the third-party LLM and defeat the entire design.
 
+> **How does this guidance reach the agent?** Entirely through **each `portal_*` tool's own description** — an MCP client always feeds tool descriptions to the model, so "when a task needs a token, steer the user to `portal secret set` instead of asking for plaintext" is written at the top of the `portal_exec` / `portal_local_exec` descriptions.
+> MCP also defines a **server-level `instructions` field** (returned in the `initialize` response — a natural home for a global credential discipline), but the spec frames it as *“a ‘hint’ to the model … this information **MAY** be added to the system prompt”* ([InitializeResult.instructions](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle), an optional field) — **optional, entirely at the client's discretion**. Empirically (2026-06) **Copilot CLI / Codex CLI / Claude Code all ignore it** (none inject it into the model context), so portal does **not** rely on server-level instructions; the credential guidance lives in the per-tool descriptions instead.
+
 ## Security
 
 - **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).

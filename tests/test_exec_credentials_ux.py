@@ -3,9 +3,8 @@
   * the missing-sudo-password error names both the temporary and permanent
     password sources;
   * `portal <kind> set` auto-installs the credential agent when it's not up;
-  * decision-point onboarding: the server `instructions` and the exec tool
-    docstrings steer credential acquisition to `portal secret set` instead of
-    asking the user for plaintext.
+  * decision-point onboarding: the exec tool docstrings front-load the
+    `portal secret set` cue instead of asking the user for plaintext.
 """
 from __future__ import annotations
 
@@ -160,25 +159,7 @@ async def test_multiline_sudo_command_newlines_preserved(monkeypatch):
     assert seen[0] == "systemctl restart caddy\nsleep 4\necho ok"
 
 
-# ── decision-point credential onboarding (server instructions + tool docs) ───
-
-def test_server_instructions_drive_secret_onboarding():
-    """The MCP-level `instructions` (returned on initialize, injected by most
-    clients at the agent's EARLIEST decision point) must steer credential
-    acquisition out-of-band — naming the exact `portal secret set` /
-    `portal sudo set` routes and forbidding pasting plaintext into the chat."""
-    instr = cli._SERVER_INSTRUCTIONS
-    low = instr.lower()
-    assert "portal secret set" in instr          # secret onboarding route
-    assert "secrets=[" in instr                  # how to consume it
-    assert "portal sudo set" in instr            # sudo route named too
-    assert "out-of-band" in low                  # the discipline (any casing)
-    assert "paste" in low                        # never-paste-plaintext rule
-    # …and it is actually wired into what clients receive on initialize.
-    assert cli.mcp.instructions == instr
-    opts = cli.mcp._mcp_server.create_initialization_options()
-    assert opts.instructions == instr
-
+# ── decision-point credential onboarding (front-loaded in tool docstrings) ───
 
 def test_exec_tool_docstrings_frontload_secret_onboarding():
     """Both exec tools must surface the `portal secret set` cue at the TOP of
