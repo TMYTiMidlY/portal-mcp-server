@@ -1,3 +1,9 @@
+## v3.2.0 (2026-06-13)
+
+### Feat
+
+- **portal_shell**: switch command boundary to OSC 133 shell integration
+
 ## v3.1.2 (2026-06-11)
 
 ### Fix
