@@ -1,3 +1,10 @@
+## v3.3.1 (2026-06-14)
+
+### Fix
+
+- **cli**: front-load out-of-band credential onboarding for agents
+- **local_exec**: make the disabled-tool error point at the MCP config env block
+
 ## v3.3.0 (2026-06-13)
 
 ### Feat
