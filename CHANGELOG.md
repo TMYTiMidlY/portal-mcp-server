@@ -1,3 +1,13 @@
+## v3.3.0 (2026-06-13)
+
+### Feat
+
+- **security**: gate portal exec paths through cc-safety-net
+
+### Fix
+
+- **portal_shell**: run multi-line commands as one compound command
+
 ## v3.2.1 (2026-06-13)
 
 ### Fix
