@@ -80,7 +80,42 @@ async def _server_lifespan(_server: "FastMCP"):
             logger.debug("pool close_all on shutdown failed", exc_info=True)
 
 
-mcp = FastMCP("portal-mcp-server", lifespan=_server_lifespan)
+# Top-level MCP `instructions` (returned in the `initialize` response, which
+# most clients inject as a system prompt). Two jobs: a one-glance capability
+# map, and — crucially — the credential-acquisition discipline at the agent's
+# EARLIEST decision point, so "this task needs a token" routes to
+# `portal secret set` + secrets=[...] instead of asking the user for plaintext.
+_SERVER_INSTRUCTIONS = """\
+portal-mcp-server — SSH orchestration for coding agents: operate remote hosts \
+as if local, over one connection pool reused across all tools.
+  • portal_exec — one-shot command on one/many hosts (immediate exit code + \
+split stdout/stderr; supports use_sudo and secret injection).
+  • portal_shell — persistent per-host bash/zsh session (cwd/env survive calls).
+  • portal_job — background long-running jobs (submit/poll/cancel).
+  • portal_local_exec — run on THIS server's OWN machine (off unless enabled).
+  • portal_read / portal_patch — hash-protected remote file read/edit.
+  • portal_grep / portal_glob — structured remote search (ripgrep / glob).
+  • portal_transfer — SFTP upload/download/sync/mirror.
+  • portal_host / portal_tunnel / portal_check / portal_audit — host registry, \
+SSH tunnels, policy dry-run, read-only introspection.
+
+CREDENTIAL DISCIPLINE — obtain every credential OUT-OF-BAND; NEVER ask the user \
+to paste a plaintext token or password into this conversation (it would be sent \
+to the model backend and captured in the tool-call trace):
+  • API token / secret → the moment a task needs one, have the user run \
+`portal secret set <name>` in their own terminal, then pass secrets=[<name>] to \
+portal_exec / portal_local_exec and reference it as the uppercased env var \
+(github_token → $GITHUB_TOKEN). Do NOT ask the user for the value itself.
+  • sudo / root → portal_exec(..., use_sudo=True); if no password is stored yet, \
+have the user run `portal sudo set <host>`.
+  • SSH login password → configured server-side in hosts.yaml (auth: password + \
+password_command), never via a tool parameter.
+Prefer an interactive ask_user-style tool to ask the user to run the relevant \
+`set` command and confirm, then retry the call.
+"""
+
+mcp = FastMCP("portal-mcp-server", lifespan=_server_lifespan,
+              instructions=_SERVER_INSTRUCTIONS)
 
 # ═══════════════════════════════════════════════════════════════════
 # HELPERS
@@ -984,6 +1019,11 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     portal_shell (there is no TTY and the password can't be fed). For a
     privileged command on the server's OWN machine, use portal_local_exec.
 
+    ★ credentials / API tokens: when a task needs a secret (API token, deploy
+    key, etc.), do NOT ask the user to paste it into the chat — have them run
+    `portal secret set <name>` in their own terminal, then pass secrets=[<name>]
+    here and reference it as the uppercased env var (see the `secrets` arg).
+
     Targets (pick one):
       - host="web01"               : a single host.
       - host=["web01","web02"]     : an explicit list of hosts.
@@ -1188,6 +1228,10 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` for the server process. Use it
     only for tasks that genuinely belong on this host (e.g. a local script that
     needs a local secret); anything on a remote host goes through portal_exec.
+
+    ★ credentials / API tokens: if the command needs a secret, do NOT ask the
+    user to paste it into the chat — have them run `portal secret set <name>` in
+    their own terminal, then pass secrets=[<name>] here (see the `secrets` arg).
 
     secrets: same name-not-value semantics as portal_exec (pass the NAME only,
         resolved from secrets.yaml / the `portal secret set` cache, never on

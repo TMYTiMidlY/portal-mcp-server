@@ -2,7 +2,10 @@
   * sudo / secret exec results are flagged high_risk so the agent reports it;
   * the missing-sudo-password error names both the temporary and permanent
     password sources;
-  * `portal <kind> set` auto-installs the credential agent when it's not up.
+  * `portal <kind> set` auto-installs the credential agent when it's not up;
+  * decision-point onboarding: the server `instructions` and the exec tool
+    docstrings steer credential acquisition to `portal secret set` instead of
+    asking the user for plaintext.
 """
 from __future__ import annotations
 
@@ -155,3 +158,33 @@ async def test_multiline_sudo_command_newlines_preserved(monkeypatch):
                           command="systemctl restart caddy\nsleep 4\necho ok",
                           use_sudo=True)
     assert seen[0] == "systemctl restart caddy\nsleep 4\necho ok"
+
+
+# ── decision-point credential onboarding (server instructions + tool docs) ───
+
+def test_server_instructions_drive_secret_onboarding():
+    """The MCP-level `instructions` (returned on initialize, injected by most
+    clients at the agent's EARLIEST decision point) must steer credential
+    acquisition out-of-band — naming the exact `portal secret set` /
+    `portal sudo set` routes and forbidding pasting plaintext into the chat."""
+    instr = cli._SERVER_INSTRUCTIONS
+    low = instr.lower()
+    assert "portal secret set" in instr          # secret onboarding route
+    assert "secrets=[" in instr                  # how to consume it
+    assert "portal sudo set" in instr            # sudo route named too
+    assert "out-of-band" in low                  # the discipline (any casing)
+    assert "paste" in low                        # never-paste-plaintext rule
+    # …and it is actually wired into what clients receive on initialize.
+    assert cli.mcp.instructions == instr
+    opts = cli.mcp._mcp_server.create_initialization_options()
+    assert opts.instructions == instr
+
+
+def test_exec_tool_docstrings_frontload_secret_onboarding():
+    """Both exec tools must surface the `portal secret set` cue at the TOP of
+    their description (where an agent reads the tool overview), not only buried
+    in the `secrets` parameter detail."""
+    for doc in (cli.portal_exec.__doc__, cli.portal_local_exec.__doc__):
+        assert doc is not None
+        assert "portal secret set <name>" in doc
+        assert "paste" in doc.lower()
