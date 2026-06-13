@@ -888,14 +888,6 @@ async def portal_shell(host: str, command: str = "",
     portal_exec (it's faster — no session setup — and can target many hosts).
     For a long task you want to background and poll, use portal_job.
 
-    Completion + exit codes ride on the **OSC 133 (FinalTerm) Shell Integration**
-    protocol — the same事实标准 iTerm2 / VS Code's integrated terminal use. On
-    first use the session injects a tiny integration script over stdin (never
-    written to disk); thereafter the shell itself reports each command's exit
-    code in a `\\x1b]133;D;<exit>\\x07` escape via its PROMPT_COMMAND / precmd
-    hook. Supports bash (default) and zsh; any other login shell falls back to
-    bash (bash must exist on the host).
-
     Commands (pick one):
       - command="uptime"                 : a single command. Returns a single
         dict {host, session_id, command, exit_code, output, duration_s}.
@@ -908,6 +900,8 @@ async def portal_shell(host: str, command: str = "",
         multi-command path CANNOT do — it opens a fresh shell per step.)
 
     Behavior:
+      - Runs on bash (default) or zsh; any other login shell falls back to bash
+        (which must exist on the host, else the call is refused — use portal_exec).
       - Each host keeps exactly ONE sticky session (host → session_id), reused
         across calls. This "session reuse" (state) is a different layer from the
         connection pool's "connection reuse" (speed) — see README §"Two layers

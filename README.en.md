@@ -59,7 +59,7 @@ See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenan
 
 - **Cross-tool connection reuse**: every `portal_*` tool shares the same in-process asyncssh pool; one TCP per host gets reused indefinitely, individual calls amortise to channel creation (~10–30 ms).
 - **Same speed on Windows**: no dependency on OpenSSH `ControlMaster`; the pool is plain Python objects, so the three major OSes get identical reuse performance.
-- **Persistent bash sessions**: `portal_shell` keeps a `bash -i` per host with cwd / env preserved across calls — the agent doesn't have to rebuild context every command.
+- **Persistent shell sessions**: `portal_shell` keeps an interactive shell (bash/zsh) per host with cwd / env preserved across calls, and can run a `commands=[…]` sequence in the same session — the agent doesn't have to rebuild context every command.
 - **Hash-protected remote edits**: `portal_read` + `portal_patch` use whole-file SHA-256 plus per-range hashes, write through tmp + `posix_rename` (atomic), then re-hash on disk to refuse stale or concurrent overwrites.
 - **Agent-first, minimal tool surface**: `action` / `mode` parameters collapse semantically overlapping entries, and each tool earns its place only by offering a guarantee bash can't cheaply synthesize — so the agent has fewer look-alike tools to choose between. The tool schemas (name + description + inputSchema) total **~8k tokens** (≈ **4%** of a 200k context window; `tiktoken o200k_base` estimate).
 - **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default.
@@ -76,7 +76,7 @@ The naive way to give an agent remote access is to let it shell out to `ssh` / `
 | **SSH reuse · Windows** | ❌ **Doesn't work** — Microsoft's Win32-OpenSSH port has had `ControlMaster` broken since v0.0.3.0 (`muxclient socket(): Unknown error`), [issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) open since 2017 (the implementation needs Unix-domain-socket fd sharing, which Windows lacks) | ✅ **Identical to Linux** — the pool is a plain Python dict; asyncssh needs no OS-level socket sharing |
 | **First connect / subsequent latency** | First ~200–500ms; **without reuse every command is a fresh TCP+auth, ~300ms each** (the default on Windows); with ControlMaster, ~10–30ms after the first | First ~200–500ms, **then ~10–30ms (same on all three OSes)** — just channel creation |
 | **Cross-"tool" reuse** | `ssh` and `scp` only reuse a master if `ControlPath` matches exactly; in practice each binary opens its own connection | ✅ Every `portal_*` tool (bash / read / patch / transfer / tunnel …) naturally shares the same TCP |
-| **Persistent shell state** | Every `ssh host cmd` is a new shell; `cd` / `export` / venv activation **all reset**; the agent has to prepend `cd /path && source venv/bin/activate && ...` to every command | ✅ `portal_shell` keeps a sticky `bash -i`; cwd / env / venv survive across calls |
+| **Persistent shell state** | Every `ssh host cmd` is a new shell; `cd` / `export` / venv activation **all reset**; the agent has to prepend `cd /path && source venv/bin/activate && ...` to every command | ✅ `portal_shell` keeps a sticky interactive shell (bash/zsh); cwd / env / venv survive across calls |
 | **Remote file editing (safe edit)** | All three options are unsafe: ① `scp` down → edit → `scp` up (no concurrency check, concurrent writer's changes silently lost, non-atomic); ② `ssh host "sed -i ..."` (no dry-run, no rollback, line numbers brittle); ③ `ssh host "cat > file"` (concurrent overwrite, half-written file if the connection drops mid-write) | ✅ `portal_read` returns SHA-256 + per-range hashes; `portal_patch` checks the hashes → writes to `*.mcp_tmp.*` → atomic `posix_rename` → re-hashes after write. **Concurrent edits / interrupted writes / line-number drift all fail instead of silently corrupting** |
 | **File / directory transfer** | `scp` has no incremental skip and a single failure kills the batch; `rsync` is better but forks a new process per invocation, and **its progress never reaches the agent** — MCP clients drop the connection on idle timeout during long transfers | ✅ `portal_transfer` does size+mtime (or sha256) incremental skipping, **emits MCP progress as a keepalive against idle timeout**, lands per-file failures in `failed[]` without aborting the batch, and `paths_json` supports arbitrary local↔remote pair batches |
 | **sudo password ergonomics** | All options are bad: ① `ssh -t host sudo cmd` **prompts every time** — the agent can't drive it; ② `echo $PASS \| ssh host "sudo -S cmd"` — **password lands in the LLM context**; ③ `sshpass -p $PASS ssh ...` — **password ends up in `ps` argv and the LLM**; ④ NOPASSWD sudoers — give up on auth entirely | ✅ `portal_exec(use_sudo=True)`: password source is either ① `sudo_password_command` (pulled from `pass` / `op` / `bw` on demand, fully automatic) or ② `portal sudo set <host>` (user types it once in another terminal via `getpass`, stored in the systemd `--user` credential agent's in-memory TTL cache). **Password never reaches the LLM, never appears in `ps` argv, never hits disk** |
@@ -137,12 +137,12 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | Tool | When to use it |
 |---|---|
 | `portal_exec` | **Default workhorse.** Stateless one-shot, result immediately (**split** stdout/stderr + exit code). `host` can be one host / a list / a `group_tag`; one `command` or a `commands` sequence; multi-host is parallel by default, `serialize=True` (+`delay_s`) does a rolling rollout; `use_sudo` / `secrets` inject credentials out-of-band. Reuses the connection pool — fast. |
-| `portal_shell` | Only when you need **cwd/env to persist across calls** (`cd`/`export`/venv) — one sticky `bash -i` per host. Output is the **combined** stream (a PTY merges stdout/stderr). Otherwise use `portal_exec` (faster, multi-host). |
+| `portal_shell` | Only when you need **cwd/env to persist across calls** (`cd`/`export`/venv) — one sticky interactive shell (bash/zsh) per host, with optional `commands=[…]` multi-step (state carried across steps). Output is the **combined** stream (a PTY merges stdout/stderr). Otherwise use `portal_exec` (faster, multi-host). |
 | `portal_job` | **Background** long tasks. `submit` returns a `job_id` instantly (remote `nohup` + tmp files, **keeps running even if the connection drops**), `poll` fetches incremental output / status, `cancel` kills, `list` lists. Job table is best-effort persisted, bounded, TTL-swept; the background path does **not** support sudo/secrets (use `portal_exec`). |
 | `portal_local_exec` | Run on the **MCP server's own machine** (not over SSH). Larger threat surface, disabled by default — the operator must set `PORTAL_ALLOW_LOCAL_EXEC=1`. Only for tasks that genuinely belong on the server host. |
 | `portal_close_shell` | Close a host's sticky `portal_shell` session (the next `portal_shell` reopens). Rarely needed — only to reset a dirtied session. |
 
-> **★ Two layers of "reuse" — don't conflate them**: *connection reuse* = asyncssh's TCP/channel pool, shared by **every** tool, purely for **speed** (~280ms first connect, ~10-30ms per call after); *session reuse* = the one sticky `bash -i` per host that only `portal_shell` uses, for **state continuity**. The bash session rides on a pooled channel; the two are orthogonal. And because the session is implicit plumbing, its state table lives in `portal_audit(view="sessions")` rather than carrying its own `list` the way tunnel/host/job do.
+> **★ Two layers of "reuse" — don't conflate them**: *connection reuse* = asyncssh's TCP/channel pool, shared by **every** tool, purely for **speed** (~280ms first connect, ~10-30ms per call after); *session reuse* = the one sticky interactive shell (bash/zsh) per host that only `portal_shell` uses, for **state continuity**. That shell session rides on a pooled channel; the two are orthogonal. And because the session is implicit plumbing, its state table lives in `portal_audit(view="sessions")` rather than carrying its own `list` the way tunnel/host/job do.
 
 ### File editing / search / transfer
 
@@ -202,7 +202,7 @@ Rule of thumb: **don't mix `portal_*` and bash `ssh`/`scp` in the same task**, o
 
 | Tool | Signature |
 | --- | --- |
-| `portal_shell` | `(host, command, timeout=3600.0)` |
+| `portal_shell` | `(host, command='', commands=None, stop_on_error=True, timeout=3600.0)` |
 | `portal_exec` | `(host='', command='', commands=None, group_tag='', timeout=3600.0, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` |
 | `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, signal='TERM')` |
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` |
@@ -224,7 +224,7 @@ Rule of thumb: **don't mix `portal_*` and bash `ssh`/`scp` in the same task**, o
 | `connection_manager.py` | connection pool + host registry shared by every tool |
 | `shell_engine.py` | `portal_exec` (one-shot `ssh_exec`) |
 | `remote_bash.py` | `portal_shell` / `portal_close_shell` + the one-shot sudo/secrets paths |
-| `session_manager.py` | persistent `bash -i` sessions (cwd/env, exit codes) |
+| `session_manager.py` | persistent interactive-shell sessions (bash/zsh; cwd/env, exit codes, OSC 133 protocol) |
 | `job_manager.py` | `portal_job` (background submit/poll/cancel/list) |
 | `local_exec.py` | `portal_local_exec` |
 | `remote_text_editor.py` | `portal_read`, `portal_patch` (+ orphan tmp sweep) |
@@ -846,7 +846,7 @@ Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphra
 
 Resolution order: **agent memory cache (2) → `sudo_password_command` (1) → error** (telling you to run `portal sudo set` or configure `sudo_password_command`).
 
-Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` executing `sudo -S -k -p '' -- bash -c <cmd>`; it does **not** reuse the persistent `bash -i` session (`sudo -S` reads stdin, which collides with the sentinel protocol). Consequently a sudo command does **not** inherit `cd` / `export` state from prior `portal_shell` calls — bake any `cd … && …` into the same command. `-k` forces fresh auth each time; `-p ''` suppresses the prompt. Genuinely interactive sudo (needs a TTY, or a password change) still can't go through `portal_shell` — have the user run `ssh -t host sudo …`.
+Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` executing `sudo -S -k -p '' -- bash -c <cmd>`; it does **not** reuse the persistent `portal_shell` session (`sudo -S` reads the password from stdin, which the persistent PTY has no channel to feed — a bare sudo there is auto-Ctrl-C'd and the session is preserved). Consequently a sudo command does **not** inherit `cd` / `export` state from prior `portal_shell` calls — bake any `cd … && …` into the same command. `-k` forces fresh auth each time; `-p ''` suppresses the prompt. Genuinely interactive sudo (needs a TTY, or a password change) still can't go through `portal_shell` — have the user run `ssh -t host sudo …`.
 
 ### Named-secret injection: `secrets=[…]` + `portal secret set`
 

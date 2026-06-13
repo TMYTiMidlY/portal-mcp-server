@@ -30,9 +30,9 @@ from mcp.server.fastmcp.exceptions import ToolError
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-TEST_HOST = os.environ.get("PORTAL_TEST_HOST", "10.144.18.10")
-TEST_PORT = int(os.environ.get("PORTAL_TEST_PORT", "2222"))
-TEST_USER = os.environ.get("PORTAL_TEST_USER", "timidly")
+TEST_HOST = os.environ.get("PORTAL_TEST_HOST", "127.0.0.1")
+TEST_PORT = int(os.environ.get("PORTAL_TEST_PORT", "22"))
+TEST_USER = os.environ.get("PORTAL_TEST_USER", os.environ.get("USER", "root"))
 TEST_KEY = os.environ.get("PORTAL_TEST_KEY_PATH", os.path.expanduser("~/.ssh/id_ed25519"))
 
 

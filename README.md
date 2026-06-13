@@ -53,7 +53,7 @@
 
 - **跨工具连接复用**：所有 `portal_*` 工具共享同一进程内的 asyncssh 连接池；一次握手长期复用，单次调用摊销到 channel 创建（~10–30 ms）。
 - **Windows 上同样快**：不依赖 OpenSSH `ControlMaster`，连接池是纯 Python 对象，三大平台获得一致的复用性能。
-- **持久 bash 会话**：`portal_shell` 为每台 host 维护一个 `bash -i`，cwd / env 跨调用保留；agent 不需要每条命令重建上下文。
+- **持久 shell 会话**：`portal_shell` 为每台 host 维护一个交互式 shell（bash/zsh），cwd / env 跨调用保留，还能用 `commands=[…]` 在同一会话里顺序跑多步；agent 不需要每条命令重建上下文。
 - **hash 保护的远端编辑**：`portal_read` + `portal_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
 - **agent-first 的精简工具面**：`action` / `mode` 字段合并语义重复的入口，每个工具只提供一条 bash 难以廉价合成的保证，减少 agent 选工具的歧义。工具 schema（name + description + inputSchema）合计约占 **~8k tokens**（≈ 200k 上下文窗口的 **~4%**；`tiktoken o200k_base` 估算）。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
@@ -70,7 +70,7 @@
 | **SSH 复用 · Windows** | ❌ **不工作**——微软移植的 Win32-OpenSSH 自 v0.0.3.0 起 `ControlMaster` 失败（`muxclient socket(): Unknown error`），[issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) 自 2017 年起 open 至今（依赖 Unix domain socket fd 共享，Win 没有等价原语） | ✅ **和 Linux 同等性能**——连接池是纯 Python dict，asyncssh 不需要任何 OS 级 socket 共享 |
 | **首次连接 / 后续命令延迟** | 首次 ~200–500ms；**无复用时每条命令都是新 TCP+auth ~300ms**（Win 默认场景）；有 ControlMaster 时后续 ~10–30ms | 首次 ~200–500ms，**后续 ~10–30ms（三平台一致）**——只开 channel |
 | **跨"工具"复用** | `ssh` 和 `scp` 复用要求两边 `ControlPath` 完全一致；实际多数项目各开各的，scp 和 ssh 并不共享 master | ✅ 所有 `portal_*` 工具（bash / read / patch / transfer / tunnel ...）天然共享同一条 TCP |
-| **持久 shell 状态** | 每次 `ssh host cmd` 是新 shell，`cd` / `export` / venv 激活 **全部丢失**；agent 必须每条命令重复 `cd /path && source venv/bin/activate && ...` | ✅ `portal_shell` 维护粘性 `bash -i`，cwd / env / venv 跨调用保留 |
+| **持久 shell 状态** | 每次 `ssh host cmd` 是新 shell，`cd` / `export` / venv 激活 **全部丢失**；agent 必须每条命令重复 `cd /path && source venv/bin/activate && ...` | ✅ `portal_shell` 维护粘性交互式 shell（bash/zsh），cwd / env / venv 跨调用保留 |
 | **远端文件编辑（safe edit）** | 三种都不安全：① `scp` 拉到本地→改→`scp` 推回（无并发检测，并发改 silently 丢；非原子）；② `ssh host "sed -i ..."`（无 dry-run、无 rollback、行号易错）；③ `ssh host "cat > file"`（并发覆盖、写一半连接断就半截文件） | ✅ `portal_read` 返回 SHA-256 + 行范围 hash；`portal_patch` 校验 hash → 写入 `*.mcp_tmp.*` → `posix_rename` 原子替换 → 写后再 rehash。**并发改 / 中途断连 / 行号漂移全部失败而非污染** |
 | **文件 / 目录传输** | `scp` 无增量、单文件失败整批挂；`rsync` 较好但每次 fork 新进程，**进度无法回传给 agent**，大文件传输期间 MCP client idle 超时会断 | ✅ `portal_transfer` 增量短路（size+mtime 或 sha256）、**MCP progress 心跳防 idle 超时**、单文件失败进 `failed[]` 不中断批量、`paths_json` 支持任意 local↔remote 文件对批传 |
 | **sudo 密码输入便利性** | 全是坑：① `ssh -t host sudo cmd` **每次弹密码**，agent 跑不了；② `echo $PASS \| ssh host "sudo -S cmd"`——**密码进 LLM 上下文**；③ `sshpass -p $PASS ssh ...`——**密码进 `ps` argv 和 LLM**；④ NOPASSWD sudoers——彻底放弃认证 | ✅ `portal_exec(use_sudo=True)`：密码源 = ① `sudo_password_command`（从密码管理器 `pass` / `op` / `bw` 现取，全自动）或 ② `portal sudo set <host>`（用户在另一终端 `getpass` 无回显输入一次，进 systemd `--user` 凭据 agent 内存 TTL）。**密码全程不进 LLM、不进 ps argv、不落盘** |
@@ -131,12 +131,12 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | 工具 | 什么时候用 |
 |---|---|
 | `portal_exec` | **默认主力**。无状态一次性，立刻拿结果（**分离的** stdout/stderr + exit code）。`host` 可单机 / 列表 / `group_tag`；`command` 单条或 `commands` 序列；多机默认并行，`serialize=True`(+`delay_s`) 走滚动；`use_sudo` / `secrets` 带外注入凭据。复用连接池，快。 |
-| `portal_shell` | 需要 **cwd/env 跨调用保留**（`cd`/`export`/venv）时才用——每 host 一个粘性 `bash -i`。输出是**合并**流（PTY 把 stdout/stderr 并了）。否则用 `portal_exec`（更快、可多机）。 |
+| `portal_shell` | 需要 **cwd/env 跨调用保留**（`cd`/`export`/venv）时才用——每 host 一个粘性交互式 shell（bash/zsh），可选 `commands=[…]` 多步（状态跨步延续）。输出是**合并**流（PTY 把 stdout/stderr 并了）。否则用 `portal_exec`（更快、可多机）。 |
 | `portal_job` | **后台**长任务。`submit` 秒回 `job_id`（远端 `nohup`+tmp 文件，**连接断了也接着跑**），`poll` 取增量输出 / 状态，`cancel` 杀，`list` 列。job 表内存态、有上限、TTL 清理；后台**不支持** sudo/secrets（用 `portal_exec`）。 |
 | `portal_local_exec` | 在 **MCP server 自己机器**上跑（不走 SSH）。威胁面更大，默认禁用，须 operator 设 `PORTAL_ALLOW_LOCAL_EXEC=1`。仅用于确属本机的任务。 |
 | `portal_close_shell` | 关掉某 host 的粘性 `portal_shell` 会话（下次 `portal_shell` 自动重开）。罕用，仅用于重置脏会话。 |
 
-> **★ 两层"复用"别搞混**：**连接复用**=asyncssh 的 TCP/channel 池，**所有**工具共享，纯为**速度**（首连 ~280ms，之后每 call ~10-30ms）；**会话复用**=只有 `portal_shell` 用的那个每 host 一个粘性 `bash -i`，为**状态连续**。bash 会话骑在池化 channel 上，两者正交。也正因为会话是隐式 plumbing，它的状态表归 `portal_audit(view="sessions")`，而不像 tunnel/host/job 那样自带 `list`。
+> **★ 两层"复用"别搞混**：**连接复用**=asyncssh 的 TCP/channel 池，**所有**工具共享，纯为**速度**（首连 ~280ms，之后每 call ~10-30ms）；**会话复用**=只有 `portal_shell` 用的那个每 host 一个粘性交互式 shell（bash/zsh），为**状态连续**。shell 会话骑在池化 channel 上，两者正交。也正因为会话是隐式 plumbing，它的状态表归 `portal_audit(view="sessions")`，而不像 tunnel/host/job 那样自带 `list`。
 
 ### 文件编辑 / 搜索 / 传输
 
@@ -194,7 +194,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 | 工具 | 签名 |
 | --- | --- |
-| `portal_shell` | `(host, command, timeout=3600.0)` |
+| `portal_shell` | `(host, command='', commands=None, stop_on_error=True, timeout=3600.0)` |
 | `portal_exec` | `(host='', command='', commands=None, group_tag='', timeout=3600.0, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` |
 | `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, signal='TERM')` |
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` |
@@ -216,7 +216,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | `connection_manager.py` | 所有工具共用的连接池 + host 注册表 |
 | `shell_engine.py` | `portal_exec`（一次性 `ssh_exec`） |
 | `remote_bash.py` | `portal_shell` / `portal_close_shell` + sudo/secrets 一次性路径 |
-| `session_manager.py` | 持久 `bash -i` 会话（cwd/env、exit code） |
+| `session_manager.py` | 持久交互式 shell 会话（bash/zsh；cwd/env、exit code，OSC 133 协议） |
 | `job_manager.py` | `portal_job`（后台 submit/poll/cancel/list） |
 | `local_exec.py` | `portal_local_exec` |
 | `remote_text_editor.py` | `portal_read`、`portal_patch`（+ 孤儿 tmp 清扫） |
@@ -851,7 +851,7 @@ ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；
 
 取密码顺序：**agent 内存缓存（1b）→ `sudo_password_command`（1a）→ 报错**（提示去 `portal sudo set` 或配 `sudo_password_command`）。
 
-实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `bash -i` 会话（`sudo -S` 读 stdin 会和 sentinel 协议打架）。因此 sudo 命令**不继承** 之前 `portal_shell` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_shell` 处理不了，让用户 `ssh -t host sudo ...`。
+实现要点：`use_sudo` 走一次性 `conn.run(input=pw, ...)` 执行 `sudo -S -k -p '' -- bash -c <cmd>`，**不**复用持久 `portal_shell` 会话（`sudo -S` 要从 stdin 读密码，而持久会话的 PTY 没有喂密码的通道——裸 sudo 在那里会被自动 Ctrl-C 软取消、并保留会话）。因此 sudo 命令**不继承** 之前 `portal_shell` 调用里 `cd` / `export` 出来的 cwd / env；需要的话在同一条命令里自带 `cd ... && ...`。`-k` 强制每次重新认证，`-p ''` 抑制 prompt 文本。交互式 sudo（要 TTY、要改密码）仍然 `portal_shell` 处理不了，让用户 `ssh -t host sudo ...`。
 
 ### 命名 secret 注入：`secrets=[…]` + `portal secret set`
 
