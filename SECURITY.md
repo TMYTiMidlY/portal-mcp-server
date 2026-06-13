@@ -49,6 +49,7 @@ The defences below are layered:
 | Prompt-layer rules    | Agent system prompt / `AGENTS.md` | The agent is expected to default writes to remote `/tmp/`, ask before touching `$HOME` or project source, and never mix `portal_*` calls with raw `ssh`/`scp` in the same task. See the README's *Agent-side conventions* section. |
 | Server-side policy    | `policies.yaml` (default `~/.config/portal-mcp-server/policies.yaml`; override via `PORTAL_POLICIES_YAML`) | Host allowlist, command blocklist / allowlist, per-host rate limit |
 | Per-tool gate         | `cli.py:_gate*`                | Every state-changing tool runs the policy on every call                      |
+| Semantic command gate (opt-in) | `safety_net.py` → [`cc-safety-net`](https://github.com/kenryu42/cc-safety-net) | When `policies.safety_net.enabled`, every gated command is *also* run through cc-safety-net's bypass-resistant analyzer (unwraps `bash -c` / interpreter one-liners, real `rm` path analysis, destructive-git rules, custom rulebooks) before it executes. **Fail-closed** by default. Covers `portal_exec` / `portal_local_exec` / `portal_shell` / `portal_job`, whose commands never reach the agent's own `bash` PreToolUse hook. |
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
 | Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
 | Audit log             | `audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`; override the directory via `PORTAL_LOG_DIR`) | Every state-changing op recorded; fail-closed by default                     |
@@ -77,6 +78,20 @@ For machine-level enforcement, add explicit patterns to
 - **Command blocklist** — fnmatch patterns matched case-insensitively
 - **Command allowlist** — if non-empty, commands must match at least one
 - **Per-host rate limit** — sliding-window, default 10 req/s per host
+- **Semantic safety net (opt-in)** — when `safety_net.enabled: true`, each
+  command is additionally analyzed by
+  [`cc-safety-net`](https://github.com/kenryu42/cc-safety-net) via
+  `explain --json`; a destructive verdict blocks it *before* the allowlist
+  verdict (defense in depth). This catches pattern-blocklist bypasses (flag
+  reordering, `bash -c "…"`, `python -c "…"`, extra whitespace) and applies the
+  same rules as the Copilot-CLI PreToolUse hook — which only inspects the
+  agent's own `bash` tool and so never sees commands issued through `portal_*`
+  MCP tools. **Fail-closed** by default: if the checker can't produce a verdict
+  (binary missing, timeout, crash) the command is refused with an actionable
+  message. Requires Node.js + `cc-safety-net`; configure under
+  `policies.safety_net` (see [`examples/policies.yaml`](./examples/policies.yaml)).
+  Note: this layer blocks destructive git/rm/interpreter patterns; it does
+  **not** replicate the Copilot-CLI's own shell-expansion sanitizer.
 
 Every state-changing entry point runs the gate; there are no side doors:
 

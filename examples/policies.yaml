@@ -48,3 +48,38 @@ policies:
   # ── Rate limiting ──────────────────────────────────────────────
   # Maximum requests per second per host (sliding window).
   rate_limit_rps: 20
+
+  # ── Semantic Safety Net (cc-safety-net) ────────────────────────
+  # OPT-IN. The crude `command_blocklist` above is fnmatch-only and easy to
+  # bypass (flag reorder, `bash -c "..."`, `python -c "..."`, extra spaces).
+  # This layer hands every command to cc-safety-net's *semantic* analyzer
+  # before it runs, catching destructive git / rm / interpreter one-liners that
+  # patterns miss — the same engine the Copilot-CLI PreToolUse hook uses, which
+  # would otherwise NEVER see commands run through portal_exec / local_exec /
+  # portal_shell (those are MCP tools, not the agent's `bash` tool).
+  #
+  # Requires Node.js + cc-safety-net reachable via the `command` below.
+  # Disabled unless `enabled: true`.
+  #
+  # safety_net:
+  #   enabled: true
+  #   # How to invoke the checker. Default below auto-fetches via npx (@latest
+  #   # is refreshed against the registry per run). Pin a version or point at a
+  #   # local binary for offline determinism, e.g. ["cc-safety-net"] or
+  #   # ["/usr/local/bin/node", "/path/to/dist/bin/cc-safety-net.js"].
+  #   command: ["npx", "-y", "cc-safety-net@latest"]
+  #   # fail_closed: if the checker can't produce a verdict (binary missing,
+  #   # timeout, crash), REFUSE the command (true, default) with a "not executed,
+  #   # fix your safety_net config" message, or allow it through (false).
+  #   fail_closed: true
+  #   # Working dir used when loading PROJECT-scoped custom rulebooks
+  #   # (.cc-safety-net/rules/). null = the server's own cwd. Built-in rules and
+  #   # user rulebooks (~/.cc-safety-net/rules/) load regardless.
+  #   rulebook_cwd: null
+  #   # Mode flags passed through as environment variables. See cc-safety-net:
+  #   #   CC_SAFETY_NET_STRICT / PARANOID / PARANOID_RM /
+  #   #   PARANOID_INTERPRETERS / WORKTREE
+  #   env:
+  #     CC_SAFETY_NET_PARANOID_RM: "1"
+  #   # Per-command checker timeout (seconds).
+  #   timeout_s: 15

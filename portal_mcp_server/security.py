@@ -19,15 +19,20 @@ logger = logging.getLogger("portal_mcp.security")
 class SecurityPolicy:
     def __init__(self, policies_yaml: str | os.PathLike | None = None):
         from .paths import policies_yaml_path
+        from .safety_net import SafetyNetChecker
         self.host_allowlist: list[str] = []       # empty = all allowed
         self.command_blocklist: list[str] = []    # patterns of blocked commands
         self.command_allowlist: list[str] = []    # if set, only these allowed
         self.rate_limit_rps: float = 10.0         # requests per second per host
         self._rate_counters: dict[str, list[float]] = defaultdict(list)
+        # Optional semantic gate (cc-safety-net). Disabled until policies.yaml
+        # enables it, so a server with no config keeps its permissive defaults.
+        self.safety_net = SafetyNetChecker(enabled=False)
         path = str(policies_yaml) if policies_yaml else str(policies_yaml_path())
         self._load(path)
 
     def _load(self, path: str):
+        from .safety_net import SafetyNetChecker
         p = Path(path)
         if not p.exists():
             logger.warning(f"policies.yaml not found at {p}, using permissive defaults")
@@ -39,7 +44,11 @@ class SecurityPolicy:
         self.command_blocklist = pol.get("command_blocklist", [])
         self.command_allowlist = pol.get("command_allowlist", [])
         self.rate_limit_rps = float(pol.get("rate_limit_rps", 10.0))
-        logger.info("Security policies loaded")
+        self.safety_net = SafetyNetChecker.from_config(pol.get("safety_net"))
+        logger.info(
+            "Security policies loaded (safety_net=%s)",
+            "on" if self.safety_net.enabled else "off",
+        )
 
     def check_host(self, host_name: str) -> Optional[str]:
         """Returns error string if host is blocked, None if allowed."""
@@ -56,6 +65,13 @@ class SecurityPolicy:
         for pattern in self.command_blocklist:
             if fnmatch.fnmatch(cmd_lower, pattern.lower()):
                 return f"Command blocked by policy: matches '{pattern}'"
+        # Semantic Safety Net layer (cc-safety-net), opt-in. Runs as
+        # defense-in-depth BEFORE the allowlist short-circuit, so a
+        # semantically destructive command (e.g. `bash -c 'git reset --hard'`)
+        # is caught even when an allowlist would otherwise wave it through.
+        sn_err = self.safety_net.check(command)
+        if sn_err:
+            return sn_err
         if self.command_allowlist:
             for pattern in self.command_allowlist:
                 if fnmatch.fnmatch(cmd_lower, pattern.lower()):

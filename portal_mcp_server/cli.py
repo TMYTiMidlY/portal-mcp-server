@@ -698,6 +698,11 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
             "command_blocklist": pol.command_blocklist,
             "command_allowlist": pol.command_allowlist or ["* (all commands permitted)"],
             "rate_limit_rps": pol.rate_limit_rps,
+            "safety_net": {
+                "enabled": pol.safety_net.enabled,
+                "command": pol.safety_net.command,
+                "fail_closed": pol.safety_net.fail_closed,
+            },
         }, indent=2)
     if view == "snapshot":
         mgr = get_manager()
@@ -713,6 +718,7 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
                 "host_allowlist_count": len(get_policy().host_allowlist),
                 "command_blocklist_count": len(get_policy().command_blocklist),
                 "rate_limit_rps": get_policy().rate_limit_rps,
+                "safety_net_enabled": get_policy().safety_net.enabled,
             },
         }
         return json.dumps(snap, indent=2)

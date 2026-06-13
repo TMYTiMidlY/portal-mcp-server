@@ -56,7 +56,7 @@
 - **持久 shell 会话**：`portal_shell` 为每台 host 维护一个交互式 shell（bash/zsh），cwd / env 跨调用保留，还能用 `commands=[…]` 在同一会话里顺序跑多步；agent 不需要每条命令重建上下文。
 - **hash 保护的远端编辑**：`portal_read` + `portal_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
 - **agent-first 的精简工具面**：`action` / `mode` 字段合并语义重复的入口，每个工具只提供一条 bash 难以廉价合成的保证，减少 agent 选工具的歧义。工具 schema（name + description + inputSchema）合计约占 **~8k tokens**（≈ 200k 上下文窗口的 **~4%**；`tiktoken o200k_base` 估算）。
-- **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed。
+- **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed；可选接入 [cc-safety-net](https://github.com/kenryu42/cc-safety-net) 语义级 command gate（opt-in，能脱 `bash -c` 壳 / 拦解释器单行 / 破坏性 git/rm，覆盖 `portal_exec`/`local_exec`/`shell`/`job` 这些绕过 agent `bash` PreToolUse hook 的执行路径，默认 fail-closed）。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
 
@@ -920,7 +920,7 @@ hosts:
 ## 安全
 
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
-- **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel(action=close)` 也走 gate；多机 gate 两阶段）
+- **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel(action=close)` 也走 gate；多机 gate 两阶段）。可选的 [cc-safety-net](https://github.com/kenryu42/cc-safety-net) 语义闸（`policies.safety_net.enabled`）在同一处叠加：把命令交给 `cc-safety-net explain --json` 做抗绕过分析，命中破坏性 git/rm/解释器单行即拦——这正是 Copilot-CLI PreToolUse hook 用的那套规则，而该 hook 只看 agent 自己的 `bash` 工具、看不到 `portal_*` MCP 命令。默认 fail-closed（检查器跑不起来就拒绝执行）。
 - **认证**：默认且推荐 SSH key；密码登录支持但只走 `hosts.yaml` 的 `password_command`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
 - **审计**：所有状态变更写 `$PORTAL_LOG_DIR/audit.jsonl`（默认 `~/.local/state/portal-mcp-server/log/audit.jsonl`）；默认 fail-closed（`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open）
 - **hash 保护编辑**：`portal_read` + `portal_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
