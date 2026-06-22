@@ -183,7 +183,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 - **默认沙箱 `/tmp/`**——改 `$HOME` 或源码前先确认
 - **不混用工具**——一次任务要么走 `portal_*`，要么走 bash 里的 `ssh`/`scp`，混用会绕过 hash 校验或打断 sudo 流
 - **多机用 `portal_exec(host=[...])`**，不要在 bash 里循环 `ssh`
-- **sudo 三选一**——① host 配 `sudo_password_command`（密码管理器拉，全自动）；② 用户 `portal sudo set <host>` 预塞密码再 `portal_exec(..., use_sudo=True)`；③ 真要交互式 prompt 的让用户 `ssh -t host sudo ...`
+- **sudo 三选一**——① host 配 `sudo_password_command`（密码管理器拉，全自动）；② 用户 `portal sudo set <host>` 预塞密码再 `portal_exec(..., use_sudo=True)`；③ 真要交互式 prompt 的让用户 `ssh -t host sudo ...`。若某台密码登录 host 的 sudo 密码明确等于 SSH 登录密码，可在 `hosts.yaml` 显式设 `sudo_password_same_as_ssh: true`，之后 `portal ssh set <host>` 会同时预塞 sudo 缓存；默认不启用。
 
 <details>
 <summary>📋 完整签名与源码位置</summary>
@@ -351,7 +351,7 @@ pytest                        # 应全绿（live SSH 测试默认 skip）
 要让 MCP client 直接跑这个本地 checkout，可安装成固定可执行文件：
 
 ```bash
-uv tool install --force .      # --force 覆盖旧 tool，确保用当前 checkout
+uv tool install --force --editable .  # 指向当前 checkout；源码改动立即生效
 ```
 
 不想用 uv 也可以走标准 pip editable install：
@@ -364,14 +364,15 @@ pip install -e .
 
 ### 短命令别名 `portal`
 
-`uv tool install portal-mcp-server`（或上面的 `uv tool install --force .`）之后，PATH 里同时出现两个等价的 entry point：
+`uv tool install portal-mcp-server`（或上面的 `uv tool install --force --editable .`）之后，PATH 里同时出现两个等价的 entry point：
 
 ```bash
 portal agent install --now           # 安装并启动 systemd --user 凭据 agent
 portal agent uninstall               # 停用并移除 agent 用户级 unit/config
 portal-mcp-server sudo set web01     # 全名
 portal sudo set web01                # 短名（推荐手敲场景）
-portal ssh set web01
+portal ssh set web01                 # SSH 登录密码
+portal passphrase set web01          # SSH 私钥 passphrase
 portal secret set GITHUB_TOKEN
 ```
 
@@ -391,7 +392,7 @@ portal secret set GITHUB_TOKEN
 >
 > 没有 agent（其它平台）时的替代方案：用 `hosts.yaml` 的 `password_command` / `passphrase_command` / `sudo_password_command`，或 `secrets.yaml` 的 `command:` 字段，从系统密码管理器（Keychain、`pass`、`secret-tool`、`gopass`、1Password CLI 等）按需读取——见下文「[认证](#认证)」。MCP server 本身（`portal_shell` 等所有远端工具）在 Windows / macOS / Linux 都正常工作。
 
-`portal ssh set` / `portal sudo set` / `portal secret set` 的无回显交互值不再塞进某个 MCP server 进程自己的内存，而是进入一个 per-user、systemd socket-activated 的**凭据 agent**（credential agent）。**首次跑 `portal {ssh,sudo,secret} set` 时如果 agent 还没起，会自动执行下面这条安装（等价 `portal agent install --now`）、把安装输出打给你看，然后再让你输入** —— 所以下面这步通常不用手动做，列在这里是为了让你知道背后发生了什么、以及如何显式预装：
+`portal ssh set` / `portal passphrase set` / `portal sudo set` / `portal secret set` 的无回显交互值不再塞进某个 MCP server 进程自己的内存，而是进入一个 per-user、systemd socket-activated 的**凭据 agent**（credential agent）。**首次跑 `portal {ssh,passphrase,sudo,secret} set` 时如果 agent 还没起，会自动执行下面这条安装（等价 `portal agent install --now`）、把安装输出打给你看，然后再让你输入** —— 所以下面这步通常不用手动做，列在这里是为了让你知道背后发生了什么、以及如何显式预装：
 
 ```bash
 portal agent install --now
@@ -399,7 +400,7 @@ portal agent install --now
 
 这会写入 `~/.config/systemd/user/portal-credential-agent.{socket,service}`。`.socket` 和 `.service` 同名配对，按 systemd 默认约定 socket unit 收到第一次连接时拉起同名 service unit，并把 listening fd 通过 `LISTEN_PID` / `LISTEN_FDS` 环境变量传给 service（socket activation）；`.socket` 监听 systemd user manager 的 `%t/portal-mcp-server/credentials.sock`，由 systemd 创建和移除；安装命令同时把 systemd specifier（`%t`）解析展开后的绝对 socket 路径写进 `~/.config/portal-mcp-server/agent.json`，让 MCP client 直接读这份路径（或显式的 `PORTAL_CREDENTIAL_AGENT_SOCKET`），不必自己猜运行时目录——GUI app 拉起的子进程的 `XDG_RUNTIME_DIR` 不一定对，这个 cache 是必要的。
 
-> **使用顺序**：`portal {secret,sudo,ssh} set` 会按需自动安装并启动凭据 agent（见上），所以一般直接 `set` 即可。**但**让 MCP server（IDE / agent 里那个）能读到凭据，agent 必须在 MCP server 启动**之前或之后重载**一次：若你是先开着 IDE 才第一次 `set`，安装完请重载 MCP/plugin 或重启 agent（Claude Code 里 reload MCP/plugin，Copilot CLI 里 `/restart`，或直接重启对应 IDE/agent）。想完全手动可控也可以先 `portal agent install --now` 再开 IDE。
+> **使用顺序**：`portal {secret,sudo,ssh,passphrase} set` 会按需自动安装并启动凭据 agent（见上），所以一般直接 `set` 即可。**但**让 MCP server（IDE / agent 里那个）能读到凭据，agent 必须在 MCP server 启动**之前或之后重载**一次：若你是先开着 IDE 才第一次 `set`，安装完请重载 MCP/plugin 或重启 agent（Claude Code 里 reload MCP/plugin，Copilot CLI 里 `/restart`，或直接重启对应 IDE/agent）。想完全手动可控也可以先 `portal agent install --now` 再开 IDE。
 
 常驻的是 systemd 的 socket unit，本身只是一条本用户可访问的本地监听端点；credential agent service 会在第一次连接时被 socket 激活，用内存保存 TTL 凭据。停止 service 会清掉内存凭据，socket 仍可继续按需拉起它。完全卸载：
 
@@ -418,9 +419,9 @@ portal ssh    confirm web01          # 二次输入比对，匹配才更新（�
 portal ssh    clear web01            # 清掉单条
 ```
 
-`sudo` / `secret` 子命令树结构完全一致（key 名分别是 `host` / `name`）。
+`passphrase` / `sudo` / `secret` 子命令树结构完全一致（key 名分别是 `host` / `host` / `name`）。
 
-> **设计原则：plaintext 永不离开 agent 内存**。整套 CLI **故意没有 `show plaintext` / `dump` 这种动词**：`show` 只回 sha256[:16] 指纹 + TTL，`list` 同理，`confirm` 是让你重新输入一遍跟内存里的比对。明文只交给同 uid 的真消费者——asyncssh（SSH 握手）、`sudo -S`（stdin）、`$env` 注入（subprocess env）。terminal scrollback / 截图 / OBS / asciinema / 远程 view session / stdout pipe 全是泄露面，明文 echo 会把无回显输入的所有保护清零。业内同类工具（ssh-agent `-L` 只列指纹 / gpg-agent 无导出 passphrase / vault agent 走 template / polkit-agent 纯 GUI）全是同一套姿态。需要把值导出去用，应该走 `password_command` / `secrets.yaml` 的 `command:` 从密码管理器临时拉，**不要**让 credential agent 回吐明文。
+> **设计原则：plaintext 永不离开 agent 内存**。整套 CLI **故意没有 `show plaintext` / `dump` 这种动词**：`show` 只回 sha256[:16] 指纹 + TTL，`list` 同理，`confirm` 是让你重新输入一遍跟内存里的比对。明文只交给同 uid 的真消费者——asyncssh（SSH 握手 / 本地 key 解锁）、`sudo -S`（stdin）、`$env` 注入（subprocess env）。terminal scrollback / 截图 / OBS / asciinema / 远程 view session / stdout pipe 全是泄露面，明文 echo 会把无回显输入的所有保护清零。业内同类工具（ssh-agent `-L` 只列指纹 / gpg-agent 无导出 passphrase / vault agent 走 template / polkit-agent 纯 GUI）全是同一套姿态。需要把值导出去用，应该走 `password_command` / `passphrase_command` / `secrets.yaml` 的 `command:` 从密码管理器临时拉，**不要**让 credential agent 回吐明文。
 
 ## 接入方式
 
@@ -682,26 +683,27 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 
 ## 认证
 
-按你的认证方式跳——优先 SSH key，passphrase 走 ssh-agent；密码登录支持但需要走 `password_command`，命令行明文密码从不进 LLM。
+按你的认证方式跳——优先 SSH key，passphrase 优先走 ssh-agent；密码登录支持 `password_command` 或 `portal ssh set`，命令行明文密码从不进 LLM。
 
 ### 凭据流总览
 
-口令/密钥类凭据一共四条流，各自的"密码管理器派（命令源）"和"无回显交互派（getpass + systemd --user 凭据 agent）"如下（**按当前实现**）：
+口令/密钥类凭据一共五条流，各自的"密码管理器派（命令源）"和"无回显交互派（getpass + systemd --user 凭据 agent）"如下（**按当前实现**）：
 
 | 凭据流 | 命令源（密码管理器派） | 无回显交互入口（getpass 派） | 缓存 key | 缓存语义 | 触发点 |
 |---|---|---|---|---|---|
 | **A. 远程 SSH 登录密码** | `password_command`（hosts.yaml） | ✅ `portal ssh set <host>` | host | agent 内存 TTL（默认 900s，仅交互入口；命令源每次现取） | `auth: password` 连接时 / 密钥失败时自动 fallback |
-| **B. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `portal sudo set <host>` | host | agent 内存 TTL（默认 900s） | `portal_exec(use_sudo=True)` |
-| **C. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `portal secret set <name>` | name | agent 内存 TTL（默认 900s，`--ttl` 可调） | `portal_exec(secrets=[…])` |
-| **D. secret 注入·本地** | 同 C（共用 `secrets.yaml`） | 同 C（共用 `portal secret set`） | 同 C | 同 C | `portal_local_exec(secrets=[…])` |
+| **B. SSH key passphrase** | `passphrase_command`（hosts.yaml） | ✅ `portal passphrase set <host>` | host | agent 内存 TTL（默认 900s） | 本地解锁加密私钥 |
+| **C. 远程 sudo 执行** | `sudo_password_command`（hosts.yaml） | ✅ `portal sudo set <host>` | host | agent 内存 TTL（默认 900s） | `portal_exec(use_sudo=True)` |
+| **D. secret 注入·远程** | `secrets.yaml` 的 `command`（每次现取） | ✅ `portal secret set <name>` | name | agent 内存 TTL（默认 900s，`--ttl` 可调） | `portal_exec(secrets=[…])` |
+| **E. secret 注入·本地** | 同 D（共用 `secrets.yaml`） | 同 D（共用 `portal secret set`） | 同 D | 同 D | `portal_local_exec(secrets=[…])` |
 
 几点要知道：
 
-- **C 和 D 是同一套凭据管道**——共用 `secrets.yaml` + `portal secret set` + 同一个 per-user credential agent + 同一个按 name 的 TTL 缓存，区别只在消费它的工具不同（远程走 SSH stdin 注入 / 本地走 subprocess env）。
-- **A、B、C 的交互入口共用一个 per-user agent socket**，但 agent 内部按 `ssh` / `sudo` / `secret` kind 分开 key 空间：A 的密码进 `asyncssh.connect()` 做 SSH 握手，B 的密码在握手后喂 `sudo -S`，C/D 作为环境变量注入命令。
+- **D 和 E 是同一套凭据管道**——共用 `secrets.yaml` + `portal secret set` + 同一个 per-user credential agent + 同一个按 name 的 TTL 缓存，区别只在消费它的工具不同（远程走 SSH stdin 注入 / 本地走 subprocess env）。
+- **A、B、C、D 的交互入口共用一个 per-user agent socket**，但 agent 内部按 `ssh` / `passphrase` / `sudo` / `secret` kind 分开 key 空间：A 的密码进 `asyncssh.connect()` 做 SSH 握手，B 的 passphrase 只用于本地解锁私钥，C 的密码在握手后喂 `sudo -S`，D/E 作为环境变量注入命令。
 - **A 的回落顺序**：`auth: password` 主动登录走 `cache（portal ssh set）→ password_command → 错误`；纯密钥 host 在 asyncssh 抛 `PermissionDenied` 时自动 retry 一次密码路径（同一条 chain），有 cache 或 `password_command` 才 retry，否则原异常透传——免得"配置缺失"的报错盖掉"密钥真不对"的真因。
 - **交互入口（getpass 派）= per-user agent 内存 TTL 缓存**：默认 900 秒、TTL 内可复用、到期自动清、agent 重启即丢、从不落盘。**命令源（密码管理器派）= 每次现取**，无 TTL。
-- **明文永不离开 agent 内存**：CLI 故意没有 `show plaintext` 动词；`portal {ssh,sudo,secret} show <key>` 只回 sha256[:16] 指纹 + 剩余 TTL，`list` 汇总，`confirm` 二次输入比对。明文只交给同 uid 的真消费者（asyncssh / `sudo -S` / `$env` 注入）。完整 rationale 见上文 [凭据 agent](#凭据-agentlinux-systemd--macos-launchd--windows-计划任务) 段。
+- **明文永不离开 agent 内存**：CLI 故意没有 `show plaintext` 动词；`portal {ssh,passphrase,sudo,secret} show <key>` 只回 sha256[:16] 指纹 + 剩余 TTL，`list` 汇总，`confirm` 二次输入比对。明文只交给同 uid 的真消费者（asyncssh / 本地 key 解锁 / `sudo -S` / `$env` 注入）。完整 rationale 见上文 [凭据 agent](#凭据-agentlinux-systemd--macos-launchd--windows-计划任务) 段。
 
 #### 四套凭据机制：实现与为什么
 
@@ -710,7 +712,7 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 | 凭据类型 | 实现 | 为什么这么选 |
 |---|---|---|
 | **SSH 登录密码** | asyncssh `password=` 参数（SSH 协议级），源：`password_command` / `portal ssh set` 缓存 | SSH 协议原生支持密码认证，直接走协议帧最干净 |
-| **SSH key passphrase** | asyncssh `passphrase=` 参数，源：ssh-agent → `portal ssh set` 缓存 → `passphrase_command`；或 `use_ssh_agent` 纯走 agent | 本地解密 key，passphrase 不出当前进程。从用户视角"给这台 host 一个密码"和登录密码是同一件事，所以**复用同一套 `portal ssh set <host>`**，连接时按 host 的 auth 模式自动分派成登录密码 or passphrase |
+| **SSH key passphrase** | asyncssh `passphrase=` 参数，源：ssh-agent → `portal passphrase set` 缓存 → `passphrase_command`；或 `use_ssh_agent` 纯走 agent | 本地解密 key，passphrase 不出当前进程。它和 SSH 登录密码分开缓存，避免把本地私钥解锁口令误当成远端登录密码或 sudo 密码 |
 | **sudo 密码** | `sudo -S` + 喂 stdin（`conn.run(input=pw)`），源：`sudo_password_command` / `portal sudo set` 缓存 | sudo 只认 `-S`/`-A`/tty，不读 env。`-S` 安全暴露面最窄：密码寿命极短（读完即弃）、无远端落地物、不进 env（对比 `-A` askpass 要落临时 helper 文件 + helper 进程 env 含密码）。代价：sudo 命令本体的 stdin 被密码占用、提前 EOF（curl/CLI flag-reading 工具无影响） |
 | **secrets**（API tokens） | `bash -s` + stdin 喂 `export VAR=…\n<cmd>\n`，源：`secrets.yaml` `command` / `portal secret set` 缓存 | 工具普遍读 env（`GH_TOKEN`/`AWS_*`）；更纯的 SSH 协议级 env 帧被 sshd `AcceptEnv` 白名单（默认只 `LANG`/`LC_*`）卡住到不了远端，只能这么 workaround。值短暂在 bash stdin 解析的脚本串里，但 bash 即用即弃、不进 argv（不在 `ps`）、不进 log，比 `--token=xxx` 走 argv 窄得多 |
 
@@ -721,7 +723,7 @@ key-only 登录是最安全的基线。**一旦你给某台 host 配了 SSH 登�
 | 配置方式 | 存活/暴露 | 风险定性 |
 |---|---|---|
 | **永久（密码管理器命令）** `sudo_password_command` / `password_command` / `secrets.yaml` 的 `command:` | 每次连接**现取**、无 TTL，只要你的密码库（`pass`/`op`/`bw`）处于解锁态就一直可用 | 暴露窗口 = 密码库解锁时长。命令写在 hosts.yaml/secrets.yaml（**配置文件，别进 git**），值不落盘但 agent 随时能取 |
-| **临时（无回显 set）** `portal {ssh,sudo,secret} set <key>` | 进 per-user 凭据 agent **内存**，默认 900s TTL，到期自动清、agent 重启即丢、**从不落盘** | 暴露窗口 = TTL。blast radius 最小，**优先用这条**；只在确需无人值守自动化时才上密码管理器命令 |
+| **临时（无回显 set）** `portal {ssh,passphrase,sudo,secret} set <key>` | 进 per-user 凭据 agent **内存**，默认 900s TTL，到期自动清、agent 重启即丢、**从不落盘** | 暴露窗口 = TTL。blast radius 最小，**优先用这条**；只在确需无人值守自动化时才上密码管理器命令 |
 
 要点：
 
@@ -797,16 +799,22 @@ headless / CI 跑不动 ssh-agent 时，可在 `hosts.yaml` 写 `passphrase_comm
 
 运行时行为：`password_command` 10 秒超时，结尾换行剥掉一个，stderr 永不进日志（防泄密），非 0 退出 / 空输出 / 非 UTF-8 输出全部硬失败。设计细节（为什么 `shell=True`、为什么强制 `client_keys=[]`、为什么 stderr 不进日志…）见 **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**。
 
-### 加密私钥的 passphrase：`portal ssh set` / `passphrase_command` / `use_ssh_agent`
+### 加密私钥的 passphrase：`portal passphrase set` / `passphrase_command` / `use_ssh_agent`
 
-从用户视角，"给这台 host 一个密码"——无论它解锁的是 SSH 登录还是私钥文件——是同一件事。所以 passphrase **复用和 SSH 登录密码完全一样的一套**：同一个 `portal ssh set <host>` 入口、同一套 hosts.yaml 字段语义。连接时按 host 的 auth 模式自动分派（`auth: password` → 当登录密码；key auth + 加密 key → 当 passphrase）。
+passphrase 是**本地私钥解锁口令**，不是远端 SSH 登录密码，也不是 sudo 密码。它有独立的交互入口和 agent kind，避免把私钥 passphrase 误用于远端认证。
 
 完整 passphrase 优先级链（按顺序尝试）：
 
 1. **ssh-agent**（`$SSH_AUTH_SOCK`，用户已 `ssh-add` 解锁过的 key）—— **首选**，最常用、key 永不出 agent
-2. **agent 缓存**（`portal ssh set <host>` 临时无回显输入，TTL 缓存）—— 临时用一阵子
+2. **agent 缓存**（`portal passphrase set <host>` 临时无回显输入，TTL 缓存）—— 临时用一阵子
 3. **`passphrase_command`**（密码管理器拉）—— headless / CI
 4. asyncssh 默认加载 key 文件
+
+```bash
+portal passphrase set encrypted-key-host
+portal passphrase confirm encrypted-key-host
+portal passphrase show encrypted-key-host
+```
 
 ```yaml
 hosts:
@@ -836,6 +844,19 @@ ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；
        user: deploy
        sudo_password_command: pass show sudo/prod-box   # 或 op read / bw get / printf "$ENV"
    ```
+
+   如果这台机器的 sudo 密码**明确就是同一个用户的 SSH 登录密码**，也可以不用单独的 sudo 命令源，而是在 host 上显式声明：
+
+   ```yaml
+   hosts:
+     legacy-host:
+       host: 10.0.0.40
+       user: admin
+       auth: password
+       sudo_password_same_as_ssh: true
+   ```
+
+   之后 `portal ssh set legacy-host` 会把同一个无回显输入同时缓存到 `ssh` 和 `sudo` 两个 kind。默认是 `false`，不写这个字段时仍然必须单独 `portal sudo set legacy-host` 或配置 `sudo_password_command`。这个开关只复用 **SSH 登录密码**，不会复用 `portal passphrase set` 里的私钥 passphrase。
 
 2. **临时塞入（1b，交互一次）**——在**另一个终端**（不是 agent 对话）跑：
 
@@ -924,7 +945,7 @@ hosts:
 
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`portal_host(register)` 按目标 IP 而非别名 gate；`portal_tunnel(action=close)` 也走 gate；多机 gate 两阶段）。可选的 [cc-safety-net](https://github.com/kenryu42/cc-safety-net) 语义闸（`policies.safety_net.enabled`）在同一处叠加：把命令交给 `cc-safety-net explain --json` 做抗绕过分析，命中破坏性 git/rm/解释器单行即拦——这正是 Copilot-CLI PreToolUse hook 用的那套规则，而该 hook 只看 agent 自己的 `bash` 工具、看不到 `portal_*` MCP 命令。默认 fail-closed（检查器跑不起来就拒绝执行）。
-- **认证**：默认且推荐 SSH key；密码登录支持但只走 `hosts.yaml` 的 `password_command`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
+- **认证**：默认且推荐 SSH key；密码登录支持 `hosts.yaml` 的 `password_command` 或 `portal ssh set`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
 - **审计**：所有状态变更写 `$PORTAL_LOG_DIR/audit.jsonl`（默认 `~/.local/state/portal-mcp-server/log/audit.jsonl`）；默认 fail-closed（`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open）
 - **hash 保护编辑**：`portal_read` + `portal_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
 - **远端 bash history 风险（异常远端配置）**：`portal_exec(secrets=…)` 的注入依赖远端 bash **非交互模式默认关 history**（bash 上游设计，与 `ssh`/`ansible`/CI shell step 等所有 SSH 命令执行工具相同前提）。若远端管理员**强制**了 `BASH_ENV` + `set -o history`，或在 `/etc/bash.bashrc` 删了 `[[ $- != *i* ]] && return` 守卫，则**任何**走 SSH 的 secret 注入工具（含本工具、`ssh`、`ansible`、CI runner）都可能让 secret 值进 `~/.bash_history`。这不是本项目独有弱点，是 Unix/SSH 生态的普遍前提。部署前在你的远端验证 `bash -s <<< 'echo test'` 不写 history。
@@ -1002,8 +1023,11 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
 ### 怎么更新到最新版
 
 ```bash
-# uvx 缓存清理 + 重新拉取
+# 临时 uvx 运行：刷新缓存并重新拉取 PyPI 最新版
 uvx portal-mcp-server@latest --help
+
+# 持久安装到 PATH 的 uv tool：升级已安装 tool
+uv tool upgrade portal-mcp-server
 ```
 
 然后重启 MCP client。

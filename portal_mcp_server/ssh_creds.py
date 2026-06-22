@@ -1,10 +1,11 @@
 """ssh_creds — out-of-band SSH login password provisioning.
 
 Symmetric to :mod:`sudo_creds` but for the *SSH login* password (the one
-asyncssh feeds during connection setup), not the sudo password (the one fed to
-``sudo -S`` on stdin after a session is open). Same threat model: the agent
-(LLM) must never see the value, so the password reaches asyncssh through a
-side channel and is never an MCP tool parameter.
+asyncssh feeds to the remote server during connection setup), not the private
+key passphrase and not the sudo password (the one fed to ``sudo -S`` on stdin
+after a session is open). Same threat model: the agent (LLM) must never see the
+value, so the password reaches asyncssh through a side channel and is never an
+MCP tool parameter.
 
 Two sources, both keeping the value out of the model:
 

@@ -75,6 +75,15 @@ def test_named_pipe_ssh_password_round_trip(pipe_agent):
     assert ssh_creds.fetch_ssh_password_from_agent("web01") == "live-secret"
 
 
+def test_named_pipe_passphrase_round_trip(pipe_agent):
+    from portal_mcp_server import passphrase_creds
+
+    passphrase_creds.clear_passphrase()
+    resp = passphrase_creds.send_passphrase("web01", "key-secret", ttl=60)
+    assert resp.get("status") == "ok", resp
+    assert passphrase_creds.fetch_passphrase_from_agent("web01") == "key-secret"
+
+
 def test_named_pipe_secret_round_trip(pipe_agent):
     from portal_mcp_server import credential_agent, secrets_store
 

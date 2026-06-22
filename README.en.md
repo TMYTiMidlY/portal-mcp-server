@@ -191,7 +191,7 @@ Rule of thumb: **don't mix `portal_*` and bash `ssh`/`scp` in the same task**, o
 - **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
 - **Don't mix tools within one task** — pick `portal_*` (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
 - **Use the multi-host tool** — `portal_exec(host=[...])` / `group_tag=...`, not a bash loop of `ssh host1; ssh host2; …`.
-- **Sudo, three ways** — when sudo is needed: ① prefer a host-level `sudo_password_command` (pulled from a password manager, fully automatic); ② or have the user pre-seed the password with `portal sudo set <host>` into the per-user credential agent from another terminal, then `portal_exec(..., use_sudo=True)`; ③ for genuinely interactive prompts (password change, first-time TTY check), have the user run `ssh -t host sudo …`. `use_sudo` runs a one-shot exec and does **not** inherit `cwd` / env from prior `portal_shell` calls.
+- **Sudo, three ways** — when sudo is needed: ① prefer a host-level `sudo_password_command` (pulled from a password manager, fully automatic); ② or have the user pre-seed the password with `portal sudo set <host>` into the per-user credential agent from another terminal, then `portal_exec(..., use_sudo=True)`; ③ for genuinely interactive prompts (password change, first-time TTY check), have the user run `ssh -t host sudo …`. If a password-auth host's sudo password is explicitly the same as its SSH login password, set `sudo_password_same_as_ssh: true` in `hosts.yaml`; after that, `portal ssh set <host>` also seeds the sudo cache. The default remains separate prompts. `use_sudo` runs a one-shot exec and does **not** inherit `cwd` / env from prior `portal_shell` calls.
 
 <details>
 <summary>📋 Full signatures & source map</summary>
@@ -358,7 +358,7 @@ pytest                        # should be all green (live SSH tests skip by defa
 To point an MCP client at this local checkout, install it as a fixed executable:
 
 ```bash
-uv tool install --force .      # --force overwrites the old tool with this checkout
+uv tool install --force --editable .  # point at this checkout; source edits apply immediately
 ```
 
 If you'd rather not use uv, plain pip editable install works:
@@ -371,14 +371,15 @@ pip install -e .
 
 ### Short alias `portal`
 
-After `uv tool install portal-mcp-server` (or the `uv tool install --force .` above), two equivalent entry points are on your `PATH`:
+After `uv tool install portal-mcp-server` (or the `uv tool install --force --editable .` above), two equivalent entry points are on your `PATH`:
 
 ```bash
 portal agent install --now           # install/start the systemd --user credential agent
 portal agent uninstall               # disable/remove agent user units/config
 portal-mcp-server sudo set web01     # full name
 portal sudo set web01                # short name (recommended for typing)
-portal ssh set web01
+portal ssh set web01                 # SSH login password
+portal passphrase set web01          # SSH private-key passphrase
 portal secret set GITHUB_TOKEN
 ```
 
@@ -398,7 +399,7 @@ The `uvx portal-mcp-server xxx` form still requires the full name (`uvx` does no
 >
 > Where there's no agent at all (other platforms), the alternative: use the `password_command` / `passphrase_command` / `sudo_password_command` fields in `hosts.yaml`, or the `command:` field in `secrets.yaml`, to pull credentials on demand from the system password manager (Keychain, `pass`, `secret-tool`, `gopass`, 1Password CLI, etc.) — see [Authentication](#authentication) below. The MCP server itself (`portal_shell` and every remote tool) runs fine on Windows / macOS / Linux.
 
-No-echo interactive values from `portal ssh set` / `portal sudo set` / `portal secret set` no longer live in one MCP server process. They go into a per-user, systemd socket-activated **credential agent**. Before using those interactive credential commands, explicitly install and start the user socket:
+No-echo interactive values from `portal ssh set` / `portal passphrase set` / `portal sudo set` / `portal secret set` no longer live in one MCP server process. They go into a per-user, systemd socket-activated **credential agent**. Before using those interactive credential commands, explicitly install and start the user socket:
 
 ```bash
 portal agent install --now
@@ -406,7 +407,7 @@ portal agent install --now
 
 This writes `~/.config/systemd/user/portal-credential-agent.{socket,service}`. The `.socket` and `.service` units are paired by default: when the socket unit receives its first connection, systemd starts the same-named service and hands it the listening fd via `LISTEN_PID` / `LISTEN_FDS` (socket activation). The `.socket` listens on the systemd user manager path `%t/portal-mcp-server/credentials.sock`, with creation/removal owned by systemd. The installer also records the systemd-specifier-expanded absolute socket path in `~/.config/portal-mcp-server/agent.json`, so MCP clients can read it directly (or honour an explicit `PORTAL_CREDENTIAL_AGENT_SOCKET`) instead of guessing the runtime directory — a `XDG_RUNTIME_DIR` derived from a GUI app's child process isn't always correct, so this cache is necessary.
 
-> **Order of operations**: `portal {secret,sudo,ssh} set` auto-installs and starts the credential agent on first use (it runs the equivalent of `portal agent install --now`, prints the install output, then takes the no-echo input), so you can usually just run `set` directly. **But** for the MCP server (the one inside your IDE/agent) to read the credentials, the agent must be reloaded once relative to the MCP server's start: if your IDE was already running when you first `set`, reload the MCP/plugin integration or restart it afterwards (reload MCP/plugin in Claude Code, `/restart` in Copilot CLI, or restart the IDE/agent). For fully manual control you can also `portal agent install --now` before launching the IDE.
+> **Order of operations**: `portal {secret,sudo,ssh,passphrase} set` auto-installs and starts the credential agent on first use (it runs the equivalent of `portal agent install --now`, prints the install output, then takes the no-echo input), so you can usually just run `set` directly. **But** for the MCP server (the one inside your IDE/agent) to read the credentials, the agent must be reloaded once relative to the MCP server's start: if your IDE was already running when you first `set`, reload the MCP/plugin integration or restart it afterwards (reload MCP/plugin in Claude Code, `/restart` in Copilot CLI, or restart the IDE/agent). For fully manual control you can also `portal agent install --now` before launching the IDE.
 
 What stays enabled is the systemd socket unit: a same-user local listening endpoint. The credential agent service is socket-activated on first connection and holds TTL credentials in memory. Stopping the service clears the in-memory credentials while the socket can still activate it again. To remove the units and config:
 
@@ -425,9 +426,9 @@ portal ssh    confirm web01          # prompt twice, cache only if both entries 
 portal ssh    clear web01            # drop a single entry
 ```
 
-The `sudo` / `secret` subcommand trees mirror this shape (key noun is `host` / `name` respectively).
+The `passphrase` / `sudo` / `secret` subcommand trees mirror this shape (key noun is `host` / `host` / `name` respectively).
 
-> **Design principle — plaintext never leaves the agent's memory.** The CLI intentionally has **no `show plaintext` / `dump` verb** on any of `portal ssh` / `portal sudo` / `portal secret`. `show` returns sha256[:16] + TTL only, `list` shows the same per cached key, `confirm` re-prompts and accepts only if the two no-echo entries match. The plaintext is fed only to same-uid consumers: asyncssh (SSH handshake), `sudo -S` (stdin), `$env` injection (subprocess env). Terminal scrollback, screenshots, OBS overlays, asciinema, remote view-session software and stdout pipes are all leak surfaces — printing the plaintext to a TTY would zero out everything the no-echo prompt was protecting. Same posture as ssh-agent (`-L` prints fingerprints, never private keys), gpg-agent (no passphrase export verb), vault agent (writes secrets to a template target file, not the TTY), polkit-agent (GUI-only). To export a stored value, drive a `password_command` / `secrets.yaml` `command:` from your password manager rather than asking the credential agent to print it.
+> **Design principle — plaintext never leaves the agent's memory.** The CLI intentionally has **no `show plaintext` / `dump` verb** on any of `portal ssh` / `portal passphrase` / `portal sudo` / `portal secret`. `show` returns sha256[:16] + TTL only, `list` shows the same per cached key, `confirm` re-prompts and accepts only if the two no-echo entries match. The plaintext is fed only to same-uid consumers: asyncssh (SSH handshake / local key unlock), `sudo -S` (stdin), `$env` injection (subprocess env). Terminal scrollback, screenshots, OBS overlays, asciinema, remote view-session software and stdout pipes are all leak surfaces — printing the plaintext to a TTY would zero out everything the no-echo prompt was protecting. Same posture as ssh-agent (`-L` prints fingerprints, never private keys), gpg-agent (no passphrase export verb), vault agent (writes secrets to a template target file, not the TTY), polkit-agent (GUI-only). To export a stored value, drive a `password_command` / `passphrase_command` / `secrets.yaml` `command:` from your password manager rather than asking the credential agent to print it.
 
 ## Client integration
 
@@ -689,26 +690,27 @@ Only relevant when running `tests/`; regular MCP deployments do not need these. 
 
 ## Authentication
 
-Pick the path for your setup — SSH keys preferred, encrypted keys via ssh-agent; password auth is supported but goes through `password_command`, so plaintext credentials never reach the LLM.
+Pick the path for your setup — SSH keys preferred, encrypted keys via ssh-agent; password auth is supported via `password_command` or `portal ssh set`, so plaintext credentials never reach the LLM.
 
 ### Credential-flow overview
 
-There are four credential flows, each with a "password-manager style" (command source) and/or a "no-echo interactive style" (getpass + systemd --user credential agent). **As currently implemented:**
+There are five credential flows, each with a "password-manager style" (command source) and/or a "no-echo interactive style" (getpass + systemd --user credential agent). **As currently implemented:**
 
 | Credential flow | Command source (password-manager style) | No-echo interactive entry (getpass style) | Cache key | Cache semantics | Trigger |
 |---|---|---|---|---|---|
 | **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `portal ssh set <host>` | host | agent in-memory TTL (default 900s, interactive entry only; command source fetched per connection) | on connect for `auth: password` / auto fallback when key auth refused |
-| **B. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent in-memory TTL (default 900s) | `portal_exec(use_sudo=True)` |
-| **C. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `portal secret set <name>` | name | agent in-memory TTL (default 900s, `--ttl` configurable) | `portal_exec(secrets=[…])` |
-| **D. Secret injection · local** | same as C (shares `secrets.yaml`) | same as C (shares `portal secret set`) | same as C | same as C | `portal_local_exec(secrets=[…])` |
+| **B. SSH key passphrase** | `passphrase_command` (hosts.yaml) | ✅ `portal passphrase set <host>` | host | agent in-memory TTL (default 900s) | local encrypted-key unlock |
+| **C. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent in-memory TTL (default 900s) | `portal_exec(use_sudo=True)` |
+| **D. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `portal secret set <name>` | name | agent in-memory TTL (default 900s, `--ttl` configurable) | `portal_exec(secrets=[…])` |
+| **E. Secret injection · local** | same as D (shares `secrets.yaml`) | same as D (shares `portal secret set`) | same as D | same as D | `portal_local_exec(secrets=[…])` |
 
 Things to know:
 
-- **C and D are one and the same credential pipeline** — they share `secrets.yaml` + `portal secret set` + the same per-user credential agent + the same name-keyed TTL cache; only the consuming tool differs (remote injects via SSH stdin, local via subprocess env).
-- **A, B, and C share one per-user agent socket**, but the agent keeps separate `ssh` / `sudo` / `secret` key spaces. A's password goes into `asyncssh.connect()` during the SSH handshake; B's password is fed to `sudo -S` after the handshake; C/D are injected as environment variables.
+- **D and E are one and the same credential pipeline** — they share `secrets.yaml` + `portal secret set` + the same per-user credential agent + the same name-keyed TTL cache; only the consuming tool differs (remote injects via SSH stdin, local via subprocess env).
+- **A, B, C, and D share one per-user agent socket**, but the agent keeps separate `ssh` / `passphrase` / `sudo` / `secret` key spaces. A's password goes into `asyncssh.connect()` during the SSH handshake; B's passphrase unlocks a local private key; C's password is fed to `sudo -S` after the handshake; D/E are injected as environment variables.
 - **A's resolution chain**: explicit `auth: password` login goes `cache (portal ssh set) → password_command → error`. Pure key hosts retry that same chain *once* when asyncssh raises `PermissionDenied`, but **only when a source is available**; with no cache and no `password_command` the original `PermissionDenied` propagates — so a stale config never masks the real "your key is rejected" failure.
 - **Interactive entries (getpass style) = per-user agent in-memory TTL cache**: default 900s, reusable within the TTL, auto-cleared on expiry, gone on agent restart, never written to disk. **Command sources (password-manager style) = fetched each time**, no TTL.
-- **Plaintext never leaves the credential agent's memory**: there is intentionally no `show plaintext` verb. `portal {ssh,sudo,secret} show <key>` returns a sha256[:16] fingerprint + remaining TTL, `list` summarises every cached entry, and `confirm` re-prompts and compares two no-echo entries. The plaintext is fed only to same-uid consumers (asyncssh, `sudo -S`, `$env` injection). Full rationale in the [Credential agent (Linux systemd / macOS launchd / Windows scheduled task)](#credential-agent-linux-systemd--macos-launchd--windows-scheduled-task) section above.
+- **Plaintext never leaves the credential agent's memory**: there is intentionally no `show plaintext` verb. `portal {ssh,passphrase,sudo,secret} show <key>` returns a sha256[:16] fingerprint + remaining TTL, `list` summarises every cached entry, and `confirm` re-prompts and compares two no-echo entries. The plaintext is fed only to same-uid consumers (asyncssh, local key unlock, `sudo -S`, `$env` injection). Full rationale in the [Credential agent (Linux systemd / macOS launchd / Windows scheduled task)](#credential-agent-linux-systemd--macos-launchd--windows-scheduled-task) section above.
 
 #### The four credential mechanisms: implementation & why
 
@@ -717,7 +719,7 @@ The four credentials use four **different** mechanisms — not arbitrary; each c
 | Credential | Implementation | Why this way |
 |---|---|---|
 | **SSH login password** | asyncssh `password=` (SSH-protocol level), source: `password_command` / `portal ssh set` cache | SSH natively supports password auth; the protocol frame is the cleanest path |
-| **SSH key passphrase** | asyncssh `passphrase=`, source: ssh-agent → `portal ssh set` cache → `passphrase_command`; or `use_ssh_agent` for pure agent | Decrypts the key locally; the passphrase never leaves the process. From the user's view "give this host a password" is the same act as a login password, so it **reuses the same `portal ssh set <host>`** and is dispatched to login-password vs passphrase by the host's auth mode at connect time |
+| **SSH key passphrase** | asyncssh `passphrase=`, source: ssh-agent → `portal passphrase set` cache → `passphrase_command`; or `use_ssh_agent` for pure agent | Decrypts the key locally; the passphrase never leaves the process. It is cached separately from the SSH login password, so a local key unlock phrase cannot be mistaken for a remote login or sudo password |
 | **sudo password** | `sudo -S` fed via stdin (`conn.run(input=pw)`), source: `sudo_password_command` / `portal sudo set` cache | sudo only honours `-S`/`-A`/tty, not env. `-S` has the narrowest exposure: shortest password lifetime (read once, discarded), no remote on-disk artifact, no env exposure (vs `-A` askpass which drops a temp helper file + a helper process whose env holds the password). Cost: the sudo command's own stdin is consumed by the password and hits EOF early (curl/CLI flag-readers are unaffected) |
 | **secrets** (API tokens) | `bash -s` + stdin feeding `export VAR=…\n<cmd>\n`, source: `secrets.yaml` `command` / `portal secret set` cache | tools generally read env (`GH_TOKEN`/`AWS_*`); the purer SSH-protocol env frame is blocked by sshd's `AcceptEnv` allowlist (default just `LANG`/`LC_*`), so it can't reach the remote — hence this workaround. The value sits briefly in the script string parsed on bash's stdin, but bash is use-and-discard, the value never hits argv (not in `ps`), never hits a log — far narrower than `--token=xxx` on argv |
 
@@ -728,7 +730,7 @@ Key-only login is the safest baseline. **The moment you configure an SSH login p
 | Config method | Lifetime / exposure | Risk profile |
 |---|---|---|
 | **Permanent (password-manager command)** `sudo_password_command` / `password_command` / `secrets.yaml` `command:` | **fetched on each connect**, no TTL; usable as long as your store (`pass`/`op`/`bw`) is unlocked | exposure window = how long your store stays unlocked. The command lives in hosts.yaml/secrets.yaml (**config files — keep them out of git**); the value never hits disk but the agent can fetch it anytime |
-| **Temporary (no-echo set)** `portal {ssh,sudo,secret} set <key>` | held in the per-user credential agent's **memory**, default 900s TTL, auto-cleared, gone on agent restart, **never on disk** | exposure window = the TTL. Smallest blast radius — **prefer this**; reach for a password-manager command only when you genuinely need unattended automation |
+| **Temporary (no-echo set)** `portal {ssh,passphrase,sudo,secret} set <key>` | held in the per-user credential agent's **memory**, default 900s TTL, auto-cleared, gone on agent restart, **never on disk** | exposure window = the TTL. Smallest blast radius — **prefer this**; reach for a password-manager command only when you genuinely need unattended automation |
 
 Key points:
 
@@ -803,9 +805,22 @@ When asyncssh raises `PermissionDenied` for a key-mode host (the default — no 
 
 Runtime behaviour: `password_command` runs with a 10-second timeout, exactly one trailing newline stripped, stderr never logged (leak defence), and non-zero exit / empty output / non-UTF-8 output all hard-failing. Design rationale (why `shell=True`, why `client_keys=[]` is forced, why stderr never reaches the logs, …) lives in **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**.
 
-### Encrypted-key passphrases: `passphrase_command`
+### Encrypted-key passphrases: `portal passphrase set` / `passphrase_command` / `use_ssh_agent`
 
-The same mechanism, applied to private-key passphrases:
+The passphrase is a **local private-key unlock phrase**, not the remote SSH login password and not the sudo password. It has a dedicated interactive entry and credential-agent kind.
+
+Resolution order:
+
+1. **ssh-agent** (`$SSH_AUTH_SOCK`, already unlocked via `ssh-add`) — preferred
+2. **agent cache** (`portal passphrase set <host>`, no echo, TTL cache)
+3. **`passphrase_command`** (password manager) — headless / CI
+4. asyncssh's default key loading
+
+```bash
+portal passphrase set encrypted-key-host
+portal passphrase confirm encrypted-key-host
+portal passphrase show encrypted-key-host
+```
 
 ```yaml
 hosts:
@@ -831,6 +846,19 @@ Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphra
        user: deploy
        sudo_password_command: pass show sudo/prod-box   # or op read / bw get / printf "$ENV"
    ```
+
+   If this host's sudo password is **explicitly the same as the same user's SSH login password**, you can opt in on the host instead of configuring a separate sudo command source:
+
+   ```yaml
+   hosts:
+     legacy-host:
+       host: 10.0.0.40
+       user: admin
+       auth: password
+       sudo_password_same_as_ssh: true
+   ```
+
+   After that, `portal ssh set legacy-host` writes the same no-echo input into both the `ssh` and `sudo` credential kinds. The default is `false`: without this field, you must still run `portal sudo set legacy-host` separately or configure `sudo_password_command`. This only reuses the **SSH login password**; it never reuses the private-key passphrase from `portal passphrase set`.
 
 2. **Seed it once (interactive)** — in a **separate terminal** (not the agent chat):
 
@@ -975,8 +1003,11 @@ This is expected. The connection pool lives inside the MCP server process. When 
 ### How to update to the latest version
 
 ```bash
-# Clear uvx cache and re-fetch
+# Temporary uvx run: refresh the cache and re-fetch the latest PyPI build
 uvx portal-mcp-server@latest --help
+
+# Persistent PATH install: upgrade the installed uv tool
+uv tool upgrade portal-mcp-server
 ```
 
 Then restart the MCP client.

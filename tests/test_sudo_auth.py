@@ -43,6 +43,27 @@ def test_sudo_password_command_is_a_command_not_a_value():
     assert not hasattr(cfg, "sudo_password")
 
 
+def test_hosts_yaml_can_opt_into_sudo_password_same_as_ssh(tmp_path):
+    from portal_mcp_server.connection_manager import ConnectionManager
+
+    yml = tmp_path / "hosts.yaml"
+    yml.write_text(
+        "hosts:\n"
+        "  web01:\n"
+        "    host: 1.2.3.4\n"
+        "    auth: password\n"
+        "    sudo_password_same_as_ssh: true\n"
+        "  web02:\n"
+        "    host: 1.2.3.5\n"
+    )
+    m = ConnectionManager(hosts_yaml=yml)
+
+    assert m._registry["web01"].sudo_password_same_as_ssh is True
+    assert m.should_cache_ssh_password_as_sudo("web01") is True
+    assert m.should_cache_ssh_password_as_sudo("web02") is False
+    assert m.should_cache_ssh_password_as_sudo("missing") is False
+
+
 # ────────────────────────────────────────────────────────────────────────────
 #  In-memory TTL cache
 # ────────────────────────────────────────────────────────────────────────────

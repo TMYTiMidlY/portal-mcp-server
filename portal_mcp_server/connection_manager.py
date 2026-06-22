@@ -137,6 +137,10 @@ class HostConfig:
     # alternative source is the per-user credential agent populated
     # out-of-band by ``portal sudo set`` (see sudo_creds.py).
     sudo_password_command: Optional[str] = None
+    # Explicit operator opt-in: when true, ``portal ssh set <host>`` also
+    # caches that same login password under the sudo credential kind. Default
+    # stays false so sudo normally requires its own prompt/source.
+    sudo_password_same_as_ssh: bool = False
     # ── Selected ssh_config-style connection options (forwarded to asyncssh
     # in ``_build_connect_kwargs`` for explicit, non-use_ssh_config hosts) ──
     # ProxyJump: "user@jump:port" or a bare alias. -> asyncssh ``tunnel``.
@@ -239,6 +243,8 @@ class ConnectionManager:
             password_command = cfg.get("password_command")
             passphrase_command = cfg.get("passphrase_command")
             sudo_password_command = cfg.get("sudo_password_command")
+            sudo_password_same_as_ssh = bool(
+                cfg.get("sudo_password_same_as_ssh", False))
             if auth == "password" and not password_command:
                 msg = (
                     "declares 'auth: password' but has no 'password_command' "
@@ -278,6 +284,7 @@ class ConnectionManager:
                 password_command=password_command,
                 passphrase_command=passphrase_command,
                 sudo_password_command=sudo_password_command,
+                sudo_password_same_as_ssh=sudo_password_same_as_ssh,
                 proxy_jump=cfg.get("proxy_jump"),
                 keepalive_interval=(int(cfg["keepalive_interval"])
                                     if cfg.get("keepalive_interval") is not None
@@ -439,6 +446,15 @@ class ConnectionManager:
             out.append(entry)
         return out
 
+    def should_cache_ssh_password_as_sudo(self, host_name: str) -> bool:
+        """Whether ``portal ssh set`` should also seed the sudo cache.
+
+        This is deliberately config-only. Unknown hosts and ssh-config-only
+        aliases default to false unless they have an explicit hosts.yaml entry.
+        """
+        cfg = self._registry.get(host_name)
+        return bool(cfg and cfg.sudo_password_same_as_ssh)
+
     def config_warnings(self) -> dict[str, list[str]]:
         """host -> config warnings collected at registry load time."""
         return {k: list(v) for k, v in self._config_warnings.items()}
@@ -565,20 +581,21 @@ class ConnectionManager:
         return None
 
     async def _resolve_ssh_passphrase(self, cfg: HostConfig) -> Optional[str]:
-        """Key-passphrase chain — the symmetric twin of
-        :meth:`_resolve_ssh_password`. From the user's point of view "the
-        password for this host" is the same idea whether it unlocks the SSH
-        login or decrypts a key file, so it shares the SAME per-host side
-        channel: credential-agent cache (populated by ``portal ssh set
-        <host>``) → ``passphrase_command`` in hosts.yaml. Returns ``None`` when
-        neither is set (asyncssh then relies on the ssh-agent or an
-        unencrypted key).
+        """Key-passphrase chain.
+
+        This intentionally uses a different credential-agent kind from the SSH
+        login password: a passphrase unlocks a local private key, while a login
+        password is sent to the remote SSH server. Order: local cache →
+        credential-agent cache populated by ``portal passphrase set <host>`` →
+        ``passphrase_command`` in hosts.yaml. Returns ``None`` when neither is
+        set (asyncssh then relies on the ssh-agent or an unencrypted key).
         """
-        from .ssh_creds import get_cached_password, fetch_ssh_password_from_agent
-        pp = get_cached_password(cfg.name)
+        from .passphrase_creds import (
+            get_cached_passphrase, fetch_passphrase_from_agent)
+        pp = get_cached_passphrase(cfg.name)
         if pp is not None:
             return pp
-        pp = await asyncio.to_thread(fetch_ssh_password_from_agent, cfg.name)
+        pp = await asyncio.to_thread(fetch_passphrase_from_agent, cfg.name)
         if pp is not None:
             return pp
         if cfg.passphrase_command:
@@ -675,8 +692,8 @@ class ConnectionManager:
             if default_keys:
                 kwargs["client_keys"] = default_keys
 
-        # Encrypted private keys: resolve a passphrase through the same side
-        # channel as the SSH login password (agent cache → passphrase_command).
+        # Encrypted private keys: resolve a passphrase through its own side
+        # channel (agent cache → passphrase_command).
         # Skipped for the pure-agent path (the agent already holds the
         # decrypted key, so no passphrase is needed here).
         if cfg.use_ssh_agent is not True:

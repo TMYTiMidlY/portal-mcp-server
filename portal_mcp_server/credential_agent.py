@@ -5,7 +5,8 @@ owns the filesystem socket and activation lifecycle; this process only keeps a
 TTL memory cache and serves same-uid JSON requests over the activated socket.
 
 The wire protocol is line-oriented JSON over a Unix stream socket. Every
-request has a ``kind`` ∈ ``{"secret", "sudo", "ssh"}`` and an ``op``:
+request has a ``kind`` ∈ ``{"passphrase", "secret", "sudo", "ssh"}`` and
+an ``op``:
 
   set        store ``value`` (or ``password``) for ``key``; resets TTL.
   get        return plaintext value for ``key`` or ``{status: missing}``.
@@ -17,11 +18,12 @@ request has a ``kind`` ∈ ``{"secret", "sudo", "ssh"}`` and an ``op``:
 
 **Design principle — plaintext never leaves the agent.** The agent will hand
 the plaintext value back to a same-uid peer ONLY via ``get`` — the path used by
-the SSH connect loop and the ``$SECRET`` env injection. Human-facing CLI verbs
-(``portal ssh show`` / ``list`` / ``confirm``) use ``fingerprint`` / ``list``
-and never carry plaintext back to a TTY, so terminal scrollback, screenshots
-and recordings cannot leak a stored credential. Same rule as ssh-agent,
-gpg-agent, vault agent, polkit-agent.
+the SSH connect loop, key-passphrase unlock, sudo stdin and the ``$SECRET`` env
+injection. Human-facing CLI verbs (``portal ssh show`` / ``list`` /
+``confirm`` and their sibling subcommands) use ``fingerprint`` / ``list`` and
+never carry plaintext back to a TTY, so terminal scrollback, screenshots and
+recordings cannot leak a stored credential. Same rule as ssh-agent, gpg-agent,
+vault agent, polkit-agent.
 """
 from __future__ import annotations
 
@@ -64,7 +66,7 @@ LAUNCHD_LABEL = "com.tmytimidly.portal-credential-agent"
 
 DEFAULT_TTL_SEC = 15 * 60
 _LISTEN_FDS_START = 3
-_VALID_KINDS = {"secret", "sudo", "ssh"}
+_VALID_KINDS = {"passphrase", "secret", "sudo", "ssh"}
 
 
 def _fingerprint(value: str) -> str:

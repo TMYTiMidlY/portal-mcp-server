@@ -38,7 +38,7 @@ def test_no_module_function_returns_or_logs_passwords():
 
 
 def test_cli_set_verb_uses_getpass_and_has_no_password_arg():
-    """`portal ssh set <host>` (and the matching sudo/secret verbs) must
+    """`portal ssh set <host>` (and the matching passphrase/sudo/secret verbs) must
     read the value via ``getpass.getpass`` on stdin — never as a positional
     or option, since process argv lands in shell history and ``ps``. The
     shared verb implementation is :func:`cli._kind_set_cli`; pin both
@@ -84,31 +84,37 @@ def test_clear_all():
     assert ssh_creds._get_cached("b") is None
 
 
-def test_caches_are_independent_of_sudo_and_secrets():
-    """The three side-channels (`portal ssh set`, `portal sudo set`,
-    `portal secret set`) must keep independent caches so clearing one
+def test_caches_are_independent_of_sudo_passphrase_and_secrets():
+    """The side-channels (`portal ssh set`, `portal passphrase set`,
+    `portal sudo set`, `portal secret set`) must keep independent caches so clearing one
     cannot accidentally drop another, and so a value pushed under the
-    same key on one channel is not visible on another. Pin that the three
+    same key on one channel is not visible on another. Pin that the
     modules each hold their own dict."""
-    from portal_mcp_server import ssh_creds, sudo_creds, secrets_store
+    from portal_mcp_server import (
+        passphrase_creds, ssh_creds, sudo_creds, secrets_store)
     ssh_creds.clear_ssh_password()
+    passphrase_creds.clear_passphrase()
     sudo_creds.clear_sudo_password()
     secrets_store.clear_secret()
 
     ssh_creds.cache_ssh_password("web01", "ssh-value", ttl=60)
+    passphrase_creds.cache_passphrase("web01", "passphrase-value", ttl=60)
     sudo_creds.cache_sudo_password("web01", "sudo-value", ttl=60)
     secrets_store.cache_secret("web01", "secret-value", ttl=60)
 
     assert ssh_creds._get_cached("web01") == "ssh-value"
+    assert passphrase_creds._get_cached("web01") == "passphrase-value"
     assert sudo_creds._get_cached("web01") == "sudo-value"
     assert secrets_store._get_cached("web01") == "secret-value"
 
     ssh_creds.clear_ssh_password()
     assert ssh_creds._get_cached("web01") is None
-    # The other two are untouched.
+    # The other caches are untouched.
+    assert passphrase_creds._get_cached("web01") == "passphrase-value"
     assert sudo_creds._get_cached("web01") == "sudo-value"
     assert secrets_store._get_cached("web01") == "secret-value"
 
+    passphrase_creds.clear_passphrase()
     sudo_creds.clear_sudo_password()
     secrets_store.clear_secret()
 
@@ -418,11 +424,13 @@ def test_control_socket_roundtrip(agent_socket):
 
 
 def test_live_credentials_share_one_agent_socket(agent_socket):
-    """The three side-channels share the per-user systemd agent socket."""
-    from portal_mcp_server import ssh_creds, sudo_creds, secrets_store
+    """The side-channels share the per-user systemd agent socket."""
+    from portal_mcp_server import (
+        passphrase_creds, ssh_creds, sudo_creds, secrets_store)
 
     paths = {
         ssh_creds.control_socket_path(),
+        passphrase_creds.control_socket_path(),
         sudo_creds.control_socket_path(),
         secrets_store.control_secrets_socket_path(),
     }

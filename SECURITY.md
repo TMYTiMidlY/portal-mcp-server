@@ -53,7 +53,7 @@ The defences below are layered:
 | Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
 | Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
 | Audit log             | `audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`; override the directory via `PORTAL_LOG_DIR`) | Every state-changing op recorded; fail-closed by default                     |
-| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` or out-of-band `portal ssh set` — plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `portal sudo set`); no MCP tool accepts a password parameter (SSH or sudo) |
+| Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` or out-of-band `portal ssh set`; encrypted-key passphrases use `passphrase_command` or out-of-band `portal passphrase set`; plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `portal sudo set`); no MCP tool accepts a password/passphrase parameter |
 | Strict host-key check | `connection_manager.py`        | Defaults to OpenSSH-equivalent `StrictHostKeyChecking`                       |
 
 ### Default constraint: sandbox `/tmp/`
@@ -205,7 +205,7 @@ choice is deliberate:
 
 - **Exactly one trailing newline is stripped** (`\r\n` or `\n`). Almost every secret-store CLI (`pass`, `cat`, `echo`) appends one. A blanket `.rstrip()` would eat passwords that legitimately end in whitespace; stripping zero would break the common case. Stripping exactly one is the only choice that's correct for both.
 - **`client_keys=[]` is forced when `auth: password`.** Otherwise asyncssh would try `~/.ssh/id_ed25519` etc. before or instead of the password. If a key happens to work, the operator never learns their `password_command` was misconfigured. Forcing the key list to empty gives a clean failure mode: either the password works or auth fails loudly.
-- **`passphrase_command` follows the same rules** with one tweak: when no `passphrase_command` is set we *do not* inject `kwargs["passphrase"] = None`. That used to actively block asyncssh's ssh-agent fallback for encrypted keys.
+- **`passphrase_command` follows the same rules** with one tweak: when no `portal passphrase set` cache entry and no `passphrase_command` is set we *do not* inject `kwargs["passphrase"] = None`. That used to actively block asyncssh's ssh-agent fallback for encrypted keys.
 
 ##### What's intentionally not done
 
@@ -219,8 +219,8 @@ choice is deliberate:
   reconnect; caching its output in process memory would create another
   exposure surface (heap dumps, Python `__dict__` walks) for marginal
   CPU savings on a code path that already runs rarely. The
-  `portal ssh set` side-channel *does* cache (see below) because it has
-  no on-demand command to re-run.
+  `portal ssh set` and `portal passphrase set` side-channels *do* cache
+  because they have no on-demand command to re-run.
 
 #### SSH login interactive password — out-of-band credential agent side-channel
 
@@ -242,8 +242,9 @@ reasons:
 > a named pipe. Deliberately **not** a Windows Service: a default-LocalSystem
 > service would put your cached secrets in SYSTEM's trust boundary (admin-
 > readable), defeating the same-user isolation. On any host without the agent,
-> use `password_command` / `sudo_password_command` (and `secrets.yaml`'s
-> `command:`) to pull credentials from the system password manager instead.
+> use `password_command` / `passphrase_command` / `sudo_password_command` in
+> `hosts.yaml` and `command:` in `secrets.yaml` to pull credentials from the
+> system password manager instead.
 
 - **`auth: password` hosts that can't or shouldn't pre-stage a
   `password_command`** (no password manager available; rotating
@@ -299,10 +300,10 @@ Bounds on the agent memory cache (identical model to `portal sudo set`):
   `command:` from your password manager rather than asking the agent
   to print.
 
-The three interactive side-channels share one per-user agent socket, but the
-agent keeps separate `sudo`, `ssh`, and `secret` key spaces. Different
-cache-key dimensions (sudo / SSH by host, secret by name) and different
-injection points remain separate in the resolver code.
+The interactive side-channels share one per-user agent socket, but the agent
+keeps separate `ssh`, `passphrase`, `sudo`, and `secret` key spaces. Different
+cache-key dimensions (SSH / passphrase / sudo by host, secret by name) and
+different injection points remain separate in the resolver code.
 
 #### Sudo auth — same boundary, credential agent side-channel
 
@@ -320,6 +321,12 @@ trace. The password is resolved server-side from one of two sources:
   *separate* terminal (not the agent) that prompts with
   `getpass.getpass` (no echo) and pushes the password into the per-user
   credential agent over the systemd --user socket.
+- **Explicit same-as-SSH opt-in** — when a host in `hosts.yaml` sets
+  `sudo_password_same_as_ssh: true`, `portal ssh set <host>` also writes
+  the same SSH login password into the `sudo` credential kind with the
+  same TTL. This is intentionally config-only and defaults to false. It
+  does **not** read or reuse `portal passphrase set`; private-key
+  passphrases remain a separate local-key-unlock credential.
 
 **Why a TTL agent cache here, when SSH password auth deliberately
 avoids one** (see directly above): SSH auth has a natural per-connection

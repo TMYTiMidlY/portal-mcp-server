@@ -1405,28 +1405,29 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
 #   portal agent status                   ping the agent + count entries
 #   portal agent clear                    clear the entire cache
 #
-#   portal ssh    set HOST     [--ttl N]  prompt (no echo) and cache SSH login pw
-#   portal ssh    confirm HOST [--ttl N]  prompt twice, compare, then cache
-#   portal ssh    show HOST               fingerprint + TTL (NO plaintext)
-#   portal ssh    clear HOST              drop one entry
-#   portal ssh    list                    list keys + fingerprint + TTL
+#   portal ssh        set HOST     [--ttl N]  cache SSH login password
+#   portal passphrase set HOST     [--ttl N]  cache SSH key passphrase
+#   portal ssh        confirm HOST [--ttl N]  prompt twice, compare, then cache
+#   portal ssh        show HOST               fingerprint + TTL (NO plaintext)
+#   portal ssh        clear HOST              drop one entry
+#   portal ssh        list                    list keys + fingerprint + TTL
 #
-#   portal sudo   {set,confirm,show,clear,list}   same shape, sudo password
-#   portal secret {set,confirm,show,clear,list}   same shape, named secret
+#   portal sudo       {set,confirm,show,clear,list}   same shape, sudo password
+#   portal secret     {set,confirm,show,clear,list}   same shape, named secret
 #
 # Design principle — *plaintext never leaves the agent's memory*. There is no
 # `show plaintext` command, no `dump` command. Every human-facing verb
 # returns either a fingerprint (sha256[:16]) + TTL or the plaintext is fed
-# directly to a same-uid client process (the SSH connect loop, sudo stdin,
-# $env injection). Same posture as ssh-agent / gpg-agent / vault agent /
+# directly to a same-uid client process (the SSH connect loop, key unlock,
+# sudo stdin, $env injection). Same posture as ssh-agent / gpg-agent / vault agent /
 # polkit-agent: any echo to a TTY is one screenshot / scrollback / asciinema
 # / OBS overlay away from a leak, so the agent simply refuses to do it.
 # Sanity-check a stored credential with `confirm` (re-type and compare) or
-# `show` (compare fingerprints); export with a `password_command` from your
+# `show` (compare fingerprints); export with a command source from your
 # password manager instead of asking the agent to echo.
 
-_CREDENTIAL_SUBCOMMANDS = ("agent", "ssh", "sudo", "secret")
-_CREDENTIAL_KINDS = ("ssh", "sudo", "secret")
+_CREDENTIAL_SUBCOMMANDS = ("agent", "ssh", "passphrase", "sudo", "secret")
+_CREDENTIAL_KINDS = ("ssh", "passphrase", "sudo", "secret")
 
 
 def _agent_missing_message(path=None) -> str:
@@ -1496,13 +1497,19 @@ def _ensure_agent_for_write(path_func):
 
 def _kind_key_noun(kind: str) -> str:
     """User-facing label for the credential kind's key argument."""
-    return {"ssh": "host", "sudo": "host", "secret": "name"}[kind]
+    return {
+        "ssh": "host",
+        "passphrase": "host",
+        "sudo": "host",
+        "secret": "name",
+    }[kind]
 
 
 def _kind_prompt(kind: str, key: str) -> str:
     """getpass prompt for a kind/key."""
     return {
-        "ssh": f"SSH password or key passphrase for host '{key}': ",
+        "ssh": f"SSH login password for host '{key}': ",
+        "passphrase": f"SSH key passphrase for host '{key}': ",
         "sudo": f"sudo password for host '{key}': ",
         "secret": f"value for secret '{key}': ",
     }[kind]
@@ -1510,9 +1517,47 @@ def _kind_prompt(kind: str, key: str) -> str:
 
 def _kind_label(kind: str) -> str:
     """Human label for the credential kind (singular)."""
-    return {"ssh": "SSH password/passphrase",
-            "sudo": "sudo password",
-            "secret": "secret"}[kind]
+    return {
+        "ssh": "SSH login password",
+        "passphrase": "SSH key passphrase",
+        "sudo": "sudo password",
+        "secret": "secret",
+    }[kind]
+
+
+def _store_credential_value(credential_agent, kind: str, key: str,
+                            value: str, ttl: int) -> str | None:
+    try:
+        resp = credential_agent.store(kind, key, value, ttl=ttl)
+    except (OSError, RuntimeError) as e:
+        return f"Failed to reach credential agent: {e}"
+    if resp.get("status") != "ok":
+        return f"Error: {resp.get('error', 'unknown')}"
+    return None
+
+
+def _should_cache_ssh_password_as_sudo(host: str) -> bool:
+    try:
+        return get_manager().should_cache_ssh_password_as_sudo(host)
+    except Exception:
+        logger.debug("could not inspect host sudo/ssh password policy for %s",
+                     host, exc_info=True)
+        return False
+
+
+def _maybe_cache_ssh_password_as_sudo(args, credential_agent,
+                                      value: str) -> int:
+    if args.kind != "ssh" or not _should_cache_ssh_password_as_sudo(args.key):
+        return 0
+    error = _store_credential_value(
+        credential_agent, "sudo", args.key, value, args.ttl)
+    if error:
+        print(f"Failed to also cache sudo password for '{args.key}': {error}",
+              file=sys.stderr)
+        return 1
+    print(f"sudo password also cached for '{args.key}' "
+          f"(same as SSH login password, expires in {_format_ttl(args.ttl)}).")
+    return 0
 
 
 def _format_ttl(seconds: int) -> str:
@@ -1711,11 +1756,11 @@ def _build_agent_subparser(sub):
 
     p_clear = asub.add_parser(
         "clear",
-        help="Clear ALL cached credentials (ssh, sudo, secret).")
+        help="Clear ALL cached credentials (ssh, passphrase, sudo, secret).")
     p_clear.set_defaults(func=_agent_clear_cli)
 
 
-# ── portal {ssh,sudo,secret} ─────────────────────────────────────────
+# ── portal {ssh,passphrase,sudo,secret} ──────────────────────────────
 
 def _kind_set_cli(args) -> int:
     import getpass
@@ -1727,17 +1772,14 @@ def _kind_set_cli(args) -> int:
     if not value:
         print("Empty value, aborted.", file=sys.stderr)
         return 1
-    try:
-        resp = credential_agent.store(args.kind, args.key, value, ttl=args.ttl)
-    except (OSError, RuntimeError) as e:
-        print(f"Failed to reach credential agent: {e}", file=sys.stderr)
-        return 1
-    if resp.get("status") != "ok":
-        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+    error = _store_credential_value(
+        credential_agent, args.kind, args.key, value, args.ttl)
+    if error:
+        print(error, file=sys.stderr)
         return 1
     print(f"{_kind_label(args.kind)} cached for "
           f"'{args.key}' (expires in {_format_ttl(args.ttl)}).")
-    return 0
+    return _maybe_cache_ssh_password_as_sudo(args, credential_agent, value)
 
 
 def _kind_confirm_cli(args) -> int:
@@ -1754,17 +1796,14 @@ def _kind_confirm_cli(args) -> int:
     if first != again:
         print("Values differ; nothing cached.", file=sys.stderr)
         return 1
-    try:
-        resp = credential_agent.store(args.kind, args.key, first, ttl=args.ttl)
-    except (OSError, RuntimeError) as e:
-        print(f"Failed to reach credential agent: {e}", file=sys.stderr)
-        return 1
-    if resp.get("status") != "ok":
-        print(f"Error: {resp.get('error', 'unknown')}", file=sys.stderr)
+    error = _store_credential_value(
+        credential_agent, args.kind, args.key, first, args.ttl)
+    if error:
+        print(error, file=sys.stderr)
         return 1
     print(f"{_kind_label(args.kind)} cached for "
           f"'{args.key}' (entries matched, expires in {_format_ttl(args.ttl)}).")
-    return 0
+    return _maybe_cache_ssh_password_as_sudo(args, credential_agent, first)
 
 
 def _kind_show_cli(args) -> int:
@@ -1841,11 +1880,14 @@ def _build_kind_subparser(sub, kind: str):
 
     noun = _kind_key_noun(kind)
     descriptions = {
-        "ssh": "Manage the cached SSH credential for a host — used as the "
-               "login password for `auth: password` hosts, or as the private-"
-               "key passphrase for key-auth hosts (same per-host slot; the "
-               "connection picks the right use). Cached in the per-user "
+        "ssh": "Manage the cached SSH login password for a host — used for "
+               "`auth: password` hosts, or as the explicit password fallback "
+               "after key authentication is refused. Cached in the per-user "
                "credential agent's memory only.",
+        "passphrase": "Manage cached SSH private-key passphrases for a host. "
+                      "This unlocks a local encrypted key file and is separate "
+                      "from the SSH login password. Cached in the per-user "
+                      "credential agent's memory only.",
         "sudo": "Manage cached sudo passwords. Fed to `sudo -S` on stdin "
                 "when an MCP call sets use_sudo=True. Cached in the "
                 "per-user credential agent's memory only.",
@@ -1862,7 +1904,7 @@ def _build_kind_subparser(sub, kind: str):
                     "Use `confirm` to sanity-check (re-type and compare), "
                     "`show` to view sha256 fingerprint + TTL, or `list` "
                     "for an overview. The plaintext is only ever handed to "
-                    "the same-uid SSH/sudo/$env consumer.",
+                    "the same-uid SSH/key-unlock/sudo/$env consumer.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ksub = p.add_subparsers(dest="verb", required=True, metavar="<verb>")
@@ -1904,15 +1946,16 @@ def _build_kind_subparser(sub, kind: str):
 
 
 def _credential_main(argv: list[str]) -> int:
-    """Subcommand dispatcher for `portal agent / ssh / sudo / secret`.
+    """Subcommand dispatcher for credential-agent CLI verbs.
 
     argv[0] is the subcommand name (one of _CREDENTIAL_SUBCOMMANDS).
     """
     import argparse
     parser = argparse.ArgumentParser(
         prog="portal",
-        description="Portal credential agent CLI — manage cached SSH / sudo / "
-                    "secret values held by the per-user agent process.",
+        description="Portal credential agent CLI — manage cached SSH login "
+                    "passwords, key passphrases, sudo passwords and secrets "
+                    "held by the per-user agent process.",
     )
     sub = parser.add_subparsers(dest="subcmd", required=True, metavar="<subcmd>")
     _build_agent_subparser(sub)
@@ -1938,7 +1981,7 @@ def main() -> None:
 
     Dispatch:
       * `portal <cred-subcmd> ...` — credential agent CLI
-        (cred-subcmd ∈ {agent, ssh, sudo, secret})
+        (cred-subcmd ∈ {agent, ssh, passphrase, sudo, secret})
       * everything else — start the MCP server (default stdio transport).
     """
     import argparse
@@ -1969,10 +2012,11 @@ def main() -> None:
         description="portal-mcp-server — Agent-feels-local SSH orchestration MCP server.\n\n"
                     "Without any subcommand this starts the MCP server. The credential\n"
                     "agent CLI lives under these subcommands (use `<subcmd> --help`):\n"
-                    "  portal agent  install / uninstall / run / status / clear\n"
-                    "  portal ssh    set / confirm / show / clear / list  <host>\n"
-                    "  portal sudo   set / confirm / show / clear / list  <host>\n"
-                    "  portal secret set / confirm / show / clear / list  <name>",
+                    "  portal agent      install / uninstall / run / status / clear\n"
+                    "  portal ssh        set / confirm / show / clear / list  <host>\n"
+                    "  portal passphrase set / confirm / show / clear / list  <host>\n"
+                    "  portal sudo       set / confirm / show / clear / list  <host>\n"
+                    "  portal secret     set / confirm / show / clear / list  <name>",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     from . import server_info as _si

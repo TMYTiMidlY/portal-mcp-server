@@ -124,7 +124,7 @@ def _reset_singletons():
         _jm._job_mgr = None
     except Exception:
         pass
-    # Clear the three credential caches (sudo / ssh / named-secret).
+    # Clear credential caches (sudo / ssh / key passphrase / named-secret).
     # Each is consulted on the SSH connect path or by command execution, so a
     # leaked entry from one test can silently override another test's
     # `password_command` / value resolution. Clearing here is cheap and makes
@@ -132,6 +132,7 @@ def _reset_singletons():
     for mod_name, clearer in (
         ("portal_mcp_server.sudo_creds", "clear_sudo_password"),
         ("portal_mcp_server.ssh_creds", "clear_ssh_password"),
+        ("portal_mcp_server.passphrase_creds", "clear_passphrase"),
         ("portal_mcp_server.secrets_store", "clear_secret"),
     ):
         try:

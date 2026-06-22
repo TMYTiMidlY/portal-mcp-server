@@ -252,15 +252,17 @@ def credential_agent_platform() -> str:
 def credential_agent_unsupported_hint() -> str:
     """Actionable message for platforms without an automated agent install.
 
-    The credential *agent* (the no-echo `portal {ssh,sudo,secret} set` path)
-    needs an OS service manager to auto-start. Where we don't have one wired up,
-    the agent's purpose — keeping a value out of the LLM — is still fully
-    achievable via the command-source credentials, which this message points at.
+    The credential *agent* (the no-echo
+    `portal {ssh,passphrase,sudo,secret} set` path) needs an OS service manager
+    to auto-start. Where we don't have one wired up, the agent's purpose —
+    keeping a value out of the LLM — is still fully achievable via the
+    command-source credentials, which this message points at.
     """
     return (
         f"The interactive credential agent has no automated install on this "
         f"platform ({sys.platform}). The MCP server and every remote portal_* "
-        f"tool still work — only the no-echo `portal {{ssh,sudo,secret}} set` "
+        f"tool still work — only the no-echo "
+        f"`portal {{ssh,passphrase,sudo,secret}} set` "
         f"caching path needs an OS service manager (systemd on Linux, launchd "
         f"on macOS, a logon scheduled task on Windows). Instead, drive "
         f"credentials from command sources: `password_command` / "

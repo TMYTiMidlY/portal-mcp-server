@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -109,6 +110,70 @@ def test_set_does_not_reinstall_when_socket_present(monkeypatch, tmp_path):
                         fake_install)
     assert cli._ensure_agent_for_write(lambda: present) == present
     assert called["install"] is False
+
+
+# ── explicit ssh-login-password → sudo cache convenience ────────────────────
+
+def test_ssh_set_does_not_cache_sudo_by_default(monkeypatch):
+    calls = []
+
+    def fake_store(kind, key, value, ttl=0):
+        calls.append((kind, key, value, ttl))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli, "_ensure_agent_for_write", lambda _path: None)
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
+    monkeypatch.setattr("portal_mcp_server.credential_agent.store", fake_store)
+    monkeypatch.setattr(cli, "_should_cache_ssh_password_as_sudo",
+                        lambda _host: False)
+
+    args = SimpleNamespace(kind="ssh", key="web01", ttl=60)
+    assert cli._kind_set_cli(args) == 0
+    assert calls == [("ssh", "web01", "pw", 60)]
+
+
+def test_ssh_set_caches_sudo_when_host_opts_in(monkeypatch, capsys):
+    calls = []
+
+    def fake_store(kind, key, value, ttl=0):
+        calls.append((kind, key, value, ttl))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli, "_ensure_agent_for_write", lambda _path: None)
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
+    monkeypatch.setattr("portal_mcp_server.credential_agent.store", fake_store)
+    monkeypatch.setattr(cli, "_should_cache_ssh_password_as_sudo",
+                        lambda host: host == "web01")
+
+    args = SimpleNamespace(kind="ssh", key="web01", ttl=60)
+    assert cli._kind_set_cli(args) == 0
+    assert calls == [
+        ("ssh", "web01", "pw", 60),
+        ("sudo", "web01", "pw", 60),
+    ]
+    assert "sudo password also cached" in capsys.readouterr().out
+
+
+def test_ssh_confirm_caches_sudo_when_host_opts_in(monkeypatch):
+    calls = []
+    prompts = iter(["pw", "pw"])
+
+    def fake_store(kind, key, value, ttl=0):
+        calls.append((kind, key, value, ttl))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli, "_ensure_agent_for_write", lambda _path: None)
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: next(prompts))
+    monkeypatch.setattr("portal_mcp_server.credential_agent.store", fake_store)
+    monkeypatch.setattr(cli, "_should_cache_ssh_password_as_sudo",
+                        lambda _host: True)
+
+    args = SimpleNamespace(kind="ssh", key="web01", ttl=60)
+    assert cli._kind_confirm_cli(args) == 0
+    assert calls == [
+        ("ssh", "web01", "pw", 60),
+        ("sudo", "web01", "pw", 60),
+    ]
 
 
 # ── multi-step under sudo: commands[] runs separately; newlines never collapsed
