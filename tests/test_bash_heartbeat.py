@@ -119,6 +119,27 @@ def test_heartbeat_interval_invalid_falls_back(monkeypatch, bad):
 
 
 # ────────────────────────────────────────────────────────────────────────────
+#  _default_command_timeout env parsing (PORTAL_DEFAULT_TIMEOUT)
+# ────────────────────────────────────────────────────────────────────────────
+
+def test_default_command_timeout_uses_builtin_when_unset(monkeypatch):
+    monkeypatch.delenv("PORTAL_DEFAULT_TIMEOUT", raising=False)
+    # One unified built-in (1h) for every exec tool.
+    assert cli._default_command_timeout() == cli._BUILTIN_TIMEOUT == 3600.0
+
+
+def test_default_command_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("PORTAL_DEFAULT_TIMEOUT", "120")
+    assert cli._default_command_timeout() == 120.0
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "0", "-3"])
+def test_default_command_timeout_invalid_falls_back(monkeypatch, bad):
+    monkeypatch.setenv("PORTAL_DEFAULT_TIMEOUT", bad)
+    assert cli._default_command_timeout() == 3600.0
+
+
+# ────────────────────────────────────────────────────────────────────────────
 #  schema plumbing — injected ctx must not leak to the client
 # ────────────────────────────────────────────────────────────────────────────
 

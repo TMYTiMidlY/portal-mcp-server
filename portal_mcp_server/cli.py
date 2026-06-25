@@ -186,6 +186,33 @@ def _heartbeat_interval() -> float:
     return v if v > 0 else 5.0
 
 
+# Single built-in per-command timeout (seconds), shared by every exec tool
+# (portal_exec / portal_shell / portal_local_exec) when the agent omits the
+# `timeout` argument AND PORTAL_DEFAULT_TIMEOUT is unset. Deliberately generous
+# (1h) so a genuinely slow build/install isn't cut off mid-flight.
+_BUILTIN_TIMEOUT = 3600.0
+
+
+def _default_command_timeout() -> float:
+    """Resolve the default per-command timeout (seconds) for the exec tools.
+
+    Operators can override the default that applies when the agent omits the
+    `timeout` argument by setting PORTAL_DEFAULT_TIMEOUT (seconds) in the MCP
+    server's JSON ``env`` block — handy for lowering the conservative 1h
+    built-in so a hung command fails fast instead of pinning the call open
+    (heartbeats keep the client from aborting on its own). The per-call
+    `timeout` argument always wins over this. Falls back to the built-in when
+    the env var is unset, non-numeric, or non-positive. Read once at import,
+    so it becomes the schema default the agent sees.
+    """
+    raw = os.environ.get("PORTAL_DEFAULT_TIMEOUT", "")
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return _BUILTIN_TIMEOUT
+    return v if v > 0 else _BUILTIN_TIMEOUT
+
+
 async def _await_with_heartbeat(coro, ctx: "Context | None",
                                 interval: "float | None" = None):
     """Await ``coro`` while emitting periodic MCP progress notifications.
@@ -894,51 +921,46 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 async def portal_shell(host: str, command: str = "",
                        commands: "list[str] | None" = None,
                        stop_on_error: bool = True,
-                       timeout: float = 3600.0,
+                       timeout: float = _default_command_timeout(),
                        ctx: "Context | None" = None) -> str:
-    """Run a command (or a sequence) in the **persistent shell session** for one
-    host — cwd and environment (cd / export / venv activation) survive across
-    calls.
+    """Run a command (or a sequence) on ONE remote host in a **persistent shell
+    session**: cwd and environment (cd / export / venv activation) survive
+    across calls. Use it only when you need that continuity — otherwise
+    portal_exec is faster (no session setup) and can target many hosts; for a
+    long task to background and poll, use portal_job.
 
-    Use portal_shell only when you need that state continuity; otherwise use
-    portal_exec (it's faster — no session setup — and can target many hosts).
-    For a long task you want to background and poll, use portal_job.
-
-    Commands (pick one):
-      - command="uptime"                 : a single command. Returns a single
-        dict {host, session_id, command, exit_code, output, duration_s}.
-      - commands=["cd /tmp","source venv/bin/activate","pytest"] : a sequence
-        run in order in the SAME session, so cwd / export / shell functions
-        carry across steps. Returns {host, session_id, results:[…], duration_s}
-        with a per-step {command, exit_code, output}; stop_on_error=True
-        (default) halts at the first non-zero / unknown exit and adds
-        stopped_at. (This cross-step state continuity is what portal_exec's
-        multi-command path CANNOT do — it opens a fresh shell per step.)
+    Pick one:
+      - command="pytest"  → {host, session_id, command, exit_code, output,
+        duration_s}.
+      - commands=["cd /app","source .venv/bin/activate","pytest"]  → steps run
+        in order in the SAME session, so cwd / exports / venv carry across them
+        (what portal_exec's multi-command path cannot do). Returns {host,
+        session_id, results:[…]}; stop_on_error=True (default) halts at the
+        first failure and adds stopped_at.
 
     Behavior:
-      - Runs on bash (default) or zsh; any other login shell falls back to bash
-        (which must exist on the host, else the call is refused — use portal_exec).
-      - Each host keeps exactly ONE sticky session (host → session_id), reused
-        across calls. This "session reuse" (state) is a different layer from the
-        connection pool's "connection reuse" (speed) — see README §"Two layers
-        of reuse".
-      - Output is the combined stdout/stderr stream (a PTY merges them — use
-        portal_exec when you need them split). Very large output is capped and
-        flagged with truncated=true.
-      - Long, silent commands are fine: the call is held open until the command
-        exits or `timeout` (per command) elapses.
-      - sudo / secret injection are NOT available here (both are one-shot by
-        nature) — use portal_exec(use_sudo=True / secrets=[...]). A command that
-        wedges on an interactive prompt (sudo password, ssh first-connect,
-        passphrase, …) is auto-Ctrl-C'd and returns exit_code -1 +
-        error:"interactive_prompt_blocked" + session_preserved:true — the
-        session, cwd and env all survive, so the next non-interactive command
-        runs straight away. To run sudo, use portal_exec(use_sudo=True).
-        (NOPASSWD / already-cached sudo never prompts and runs normally.)
+      - bash or zsh; an unknown login shell falls back to bash (if bash is
+        missing the call is refused — use portal_exec).
+      - Output is the COMBINED stdout+stderr stream (use portal_exec when you
+        need them split). Oversize output is capped and flagged truncated=true.
+      - A command that wedges on an interactive prompt (sudo password, ssh
+        first-connect, passphrase, …) is auto-aborted, returning exit_code -1 +
+        error:"interactive_prompt_blocked" + session_preserved:true — cwd/env
+        survive, so the next command runs straight away.
 
-    ⚠️ Safety: by default, write operations should target /tmp/ on the remote
-       unless the user has explicitly approved a different path. This tool does
-       NOT enforce that — it's a convention for the agent's skill prompt.
+    ★ No sudo or secret injection here (both are one-shot by nature): to run as
+    root use portal_exec(use_sudo=True); for a command needing a secret use
+    portal_exec(secrets=[…]).
+
+    timeout (per command, seconds; default 1h, operator-lowerable via
+    PORTAL_DEFAULT_TIMEOUT): the call is held open until the command exits or
+    timeout elapses. Keepalive pings stop the client aborting a hung call, so
+    timeout is your real cut-off — for an exploratory / re-runnable command pass
+    a SMALL one first (e.g. 10–30) to fail fast, raising it only for genuinely
+    slow commands.
+
+    ⚠️ By convention, write operations should target /tmp/ on the remote unless
+    the user approved another path (not enforced here).
     """
     # command vs commands: exactly one, mirroring portal_exec.
     if commands is not None:
@@ -974,91 +996,71 @@ async def portal_shell(host: str, command: str = "",
 @mcp.tool()
 async def portal_exec(host: "str | list[str]" = "", command: str = "",
                       commands: "list[str] | None" = None,
-                      group_tag: str = "", timeout: float = 3600.0,
+                      group_tag: str = "",
+                      timeout: float = _default_command_timeout(),
                       use_sudo: bool = False,
                       secrets: "list[str] | None" = None,
                       serialize: bool = False, delay_s: float = 0.0,
                       stop_on_error: bool = True,
                       ctx: "Context | None" = None) -> str:
-    """Run a command on one or more remote hosts and **get the result
-    immediately** (exit code + split stdout/stderr). This is the default
-    workhorse: stateless and fast (it reuses the connection pool, with no
-    persistent-session setup).
+    """Run a shell command on one or more remote hosts over SSH and get the
+    result immediately (exit code + SEPARATE stdout/stderr). This is the default
+    way to execute ANYTHING on a remote machine — reach for it instead of
+    hand-rolling `ssh user@host …`; it reuses a warm connection pool and fans
+    out across hosts. Stateless: need cwd/exports to persist → portal_shell;
+    a long task to background and poll → portal_job.
 
-    Need cwd/export to persist across calls? Use portal_shell instead (single
-    host, stateful). Got a long task to background and poll? Use portal_job.
+    ★ sudo: to run a command as root, call this with use_sudo=True — NEVER put a
+    bare `sudo …` in the command or in portal_shell (there is no TTY and the
+    password can't be fed). The password is supplied out-of-band; you never pass
+    it. (For root on the server's OWN machine, sudo is not available — see
+    portal_local_exec.)
 
-    ★ sudo / privileged execution: whenever the user wants to run ANYTHING as
-    root / with sudo on a remote host, you MUST use this tool with
-    use_sudo=True — do NOT put a bare `sudo ...` in a plain command or in
-    portal_shell (there is no TTY and the password can't be fed). For a
-    privileged command on the server's OWN machine, use portal_local_exec.
+    ★ credentials: when a command needs a secret (API token, deploy key, …), do
+    NOT have the user paste it into the chat. They run
+    `portal secret set <name>` in their own terminal; you pass
+    secrets=["<name>"] and reference it as the uppercased env var ($NAME).
 
-    ★ credentials / API tokens: when a task needs a secret (API token, deploy
-    key, etc.), do NOT ask the user to paste it into the chat — have them run
-    `portal secret set <name>` in their own terminal, then pass secrets=[<name>]
-    here and reference it as the uppercased env var (see the `secrets` arg).
+    Targets (pick one): host="web01" | host=["web01","web02"] |
+    group_tag="prod" (all registered hosts carrying that tag).
 
-    Targets (pick one):
-      - host="web01"               : a single host.
-      - host=["web01","web02"]     : an explicit list of hosts.
-      - group_tag="prod"           : every registered host carrying that tag.
+    Commands (pick one): command="uptime" (a single command; a multi-line
+    string runs as one bash script) | commands=["apt update","apt upgrade"] (a
+    sequence, each with its own exit code, stopping at the first failure when
+    stop_on_error=True). Prefer the commands=[…] array over packing several
+    lines into one string — it can't be silently flattened and you get per-step
+    exit codes (matters most with use_sudo, where each entry runs as its own
+    sudo command).
 
-    Commands (pick one):
-      - command="uptime"                       : a single command. A multi-line
-        string is fine — it's run as one `bash -c` script (newlines are
-        preserved and act as statement separators), so the whole thing executes
-        as written.
-      - commands=["apt update","apt upgrade"]  : a sequence run in order on
-        each host (stops at the first non-zero exit when stop_on_error=True),
-        each with its own exit code in the result.
+    Multi-host fan-out is parallel by default; serialize=True (+ delay_s,
+    stop_on_error) does a rolling, stop-on-first-failure rollout.
 
-    ★ For several steps, **prefer `commands=[...]` (a JSON array) over packing
-    multiple lines into one `command` string** — the array is unambiguous and
-    can't be silently flattened into a single space-joined line, and you get a
-    per-step exit code. This matters most with `use_sudo`: `commands=["systemctl
-    restart x","sleep 4","curl ..."]` runs each line as its own `sudo` command,
-    whereas a multi-line `command` that some caller flattened to
-    "systemctl restart x sleep 4 curl ..." would feed `systemctl` garbage args.
+    timeout (seconds, default 1h, operator-lowerable via PORTAL_DEFAULT_TIMEOUT):
+    the call is held open until the command finishes or timeout elapses.
+    Keepalive pings stop the client aborting a hung call, so timeout is your
+    real cut-off — for an exploratory / re-runnable command pass a SMALL one
+    first (e.g. 10–30) to fail fast, raising it only for commands you know are
+    slow; keep it generous for ones whose mid-flight kill is dangerous
+    (migrations, package upgrades).
 
-    Fan-out across multiple hosts is **parallel** by default. Set
-    serialize=True to run hosts one at a time (a rolling / zero-downtime
-    pattern), with delay_s seconds between hosts and stop_on_error to halt the
-    rollout on the first failing host.
+    use_sudo: run via `sudo -S`, with the password resolved out-of-band per host
+        (the per-user credential agent from `portal sudo set <host>`, or the
+        host's sudo_password_command) — never from you. Refused with guidance if
+        no source is set. Consumes the command's stdin (tools that read their
+        own stdin aren't supported under sudo). Cannot be combined with secrets.
 
-    Returns: a single result dict {host, command, exit_code, stdout, stderr,
-    elapsed_s} for one host + one command; otherwise a JSON list with one entry
-    per host (a multi-command host carries {host, results:[...]}). stdout and
-    stderr are kept SEPARATE (unlike portal_shell, whose PTY merges them).
+    secrets: a list of NAMES, not values (e.g. ["github_token"]); each is
+        resolved server-side, fed over SSH stdin (never on argv/audit), exported
+        as its uppercased env var ($GITHUB_TOKEN), and redacted to *** in the
+        output. Cannot be combined with use_sudo.
 
-    Long, silent commands are fine: the call is held open until the command
-    finishes or `timeout` elapses.
+    Returns one dict {host, command, exit_code, stdout, stderr, elapsed_s} for a
+    single host + command, else a JSON list (a multi-command host carries {host,
+    results:[…]}).
 
-    use_sudo: run via `sudo -S`, feeding a password obtained out-of-band (NEVER
-        passed by the agent). Sources, in order: the per-user credential agent
-        populated by `portal sudo set <host>` (temporary, no-echo, cached with a
-        TTL), or the host's `sudo_password_command` in hosts.yaml (permanent,
-        e.g. from a password manager). Resolved per host. If none is available
-        the command is refused with guidance on both options. The command's own
-        stdin is consumed by the password (curl/CLI flag-reading tools are
-        unaffected; tools that read stdin themselves are not supported under
-        sudo).
-
-    secrets: a list of named secrets (e.g. ["github_token"]) injected as env
-        vars for the run. You pass the NAME, never the value: the server
-        resolves each from secrets.yaml or the `portal secret set` cache and
-        exports it as the uppercased env var (github_token → $GITHUB_TOKEN).
-        Reference it as `$GITHUB_TOKEN`. The value is fed over SSH stdin (never
-        on argv/audit) and redacted to *** in the returned stdout/stderr.
-        Cannot be combined with use_sudo. (⚠️ On a misconfigured remote that
-        forces history in non-interactive bash, a secret could land in
-        ~/.bash_history — the same caveat applies to ssh/ansible/CI; see the
-        README security section.)
-
-    ★ High-risk reporting: when use_sudo or secrets is used the result carries
-    "high_risk": true and a "high_risk_note". This is a privileged / credentialed
-    action — briefly tell the user you ran it with their stored sudo password /
-    secret, or only do so with their explicit prior permission.
+    ★ When use_sudo or secrets is used the result is flagged "high_risk": briefly
+    tell the user you ran a privileged / credentialed command with their stored
+    sudo password / secret, or only do so with their explicit prior permission.
     """
     # ── Resolve target hosts (host str | host list | group_tag) ──
     if group_tag:
@@ -1192,37 +1194,31 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
 
 @mcp.tool()
 async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
-                            timeout: float = 600.0,
+                            timeout: float = _default_command_timeout(),
                             ctx: "Context | None" = None) -> str:
-    """Run a command on the **MCP server's own machine** (LOCAL), optionally
-    with named secrets injected as environment variables. This does NOT go over
-    SSH to a remote host — for that use portal_exec.
+    """Run a command on the **MCP SERVER's OWN machine** (local), NOT over SSH —
+    for anything on a remote host use portal_exec instead. Off by default (local
+    execution is a larger threat surface): the operator must set
+    PORTAL_ALLOW_LOCAL_EXEC=1 in the server process's env to enable it.
 
-    Because local execution is a larger threat surface (it touches the server's
-    filesystem, environment, and credential socket), it is DISABLED unless the
-    operator sets `PORTAL_ALLOW_LOCAL_EXEC=1` for the server process. Use it
-    only for tasks that genuinely belong on this host (e.g. a local script that
-    needs a local secret); anything on a remote host goes through portal_exec.
+    ★ credentials: if the command needs a secret, don't have the user paste it
+    into the chat — they run `portal secret set <name>` in their own terminal;
+    you pass secrets=["<name>"] and reference it as the uppercased env var
+    ($NAME), injected into the local child's env and redacted from output. This
+    lets a local script use an API token without the value ever entering this
+    conversation.
 
-    ★ credentials / API tokens: if the command needs a secret, do NOT ask the
-    user to paste it into the chat — have them run `portal secret set <name>` in
-    their own terminal, then pass secrets=[<name>] here (see the `secrets` arg).
+    No sudo here — for a privileged command, sudo is remote-only via
+    portal_exec(use_sudo=True).
 
-    secrets: same name-not-value semantics as portal_exec (pass the NAME only,
-        resolved from secrets.yaml / the `portal secret set` cache, never on
-        argv/audit, output redacted to ***) — but injected into the LOCAL child
-        process env. Reference it in `command` as `$GITHUB_TOKEN` (github_token
-        → $GITHUB_TOKEN).
+    timeout (seconds, default 1h, operator-lowerable via PORTAL_DEFAULT_TIMEOUT):
+    held open until the command exits or timeout elapses. Keepalive pings stop
+    the client aborting a hung call, so for an exploratory / re-runnable command
+    pass a SMALL one first (e.g. 10–30) to fail fast, raising it only for slow
+    commands.
 
-    timeout: seconds before the local command is killed (server-side); the call
-        is held open until the command exits or this elapses.
-
-    Use this to run a local command/script that needs an API token without the
-    token ever entering this conversation or being sent to the model backend.
-
-    ★ High-risk reporting: same as portal_exec — secrets makes the result carry
-    "high_risk": true; tell the user you ran a local command with their stored
-    credential, or only do so with their explicit prior permission.
+    ★ secrets flags the result "high_risk": briefly tell the user you ran a local
+    command with their stored credential, or only do so with prior permission.
     """
     if os.environ.get("PORTAL_ALLOW_LOCAL_EXEC", "").lower() not in (
         "1", "true", "yes", "on",

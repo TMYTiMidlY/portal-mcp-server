@@ -17,7 +17,7 @@ import os
 
 
 async def local_exec_with_env(command: str, env: dict,
-                              timeout: float = 600.0) -> dict:
+                              timeout: float = 3600.0) -> dict:
     """Run ``command`` in a shell with ``env`` overlaid on ``os.environ``.
 
     ``env`` maps already-resolved ``ENV_VAR_NAME -> value``. Returns
