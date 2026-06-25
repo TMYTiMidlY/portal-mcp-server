@@ -123,6 +123,112 @@ def secrets_yaml_path() -> Path:
     return _resolve("PORTAL_SECRETS_YAML", xdg_config_home() / "secrets.yaml")
 
 
+# ── OpenSSH client config discovery ──────────────────────────────────────────
+# Portal resolves hosts from hosts.yaml first, then falls back to the OpenSSH
+# client config. OpenSSH itself has NO environment variable for the config
+# path — the only relocation knob is the ``ssh -F <file>`` flag (verified
+# against openssh-portable ``ssh.c`` ``process_config_files``; ``ssh.c`` only
+# ``getenv``s SHELL/DISPLAY/TERM, never a config path), with the system-wide
+# ``/etc/ssh/ssh_config`` read as a fallback when ``-F`` is absent. Portal is a
+# long-lived daemon with no per-connection flag, so ``PORTAL_SSH_CONFIG`` is the
+# ``-F`` analogue and mirrors ``-F`` exactly:
+#   * unset          -> user ``~/.ssh/config`` + system ``/etc/ssh/ssh_config``
+#                       fallback (user wins, OpenSSH's "first value wins").
+#   * an absolute path -> read ONLY that file (system-wide config suppressed).
+#   * the literal ``none`` (any case) -> read NO config file at all, exactly
+#                       like ``ssh -F none``; host resolution then comes solely
+#                       from hosts.yaml.
+#
+# Parsing is delegated wholesale to asyncssh (Include-aware, multi-platform).
+# asyncssh's *discovery* is a single inline line — ``Path('~/.ssh/config')``
+# ``.expanduser()`` + ``os.access`` (connection.py) — with NO system-config
+# support and no reusable helper, so we reuse that exact user-config convention
+# and add the system fallback + ``-F``/``-F none`` handling asyncssh lacks.
+#
+# Note: OpenSSH derives the home dir from the passwd database (``getpwuid``),
+# deliberately ignoring ``$HOME``. We use ``Path.expanduser()`` (which honours
+# ``$HOME`` on POSIX) to match asyncssh's own ``expanduser('~')`` discovery —
+# the mechanism the rest of this server relies on.
+
+# Sentinel value of ``_ssh_config_override`` for ``PORTAL_SSH_CONFIG=none`` —
+# the ``ssh -F none`` analogue (read nothing). A real file literally named
+# "none" must be given as an absolute path; a bare/relative ``none`` is the
+# special token, matching OpenSSH.
+_SSH_CONFIG_NONE = "none"
+
+
+def _ssh_config_override() -> str | None:
+    """Validated ``PORTAL_SSH_CONFIG``, interpreted like OpenSSH's ``ssh -F``.
+
+    Returns the absolute path as a string, the literal ``"none"`` (the read-
+    nothing sentinel), or ``None`` when unset / empty / relative (the latter is
+    warned and ignored, like the other ``PORTAL_*`` overrides).
+    """
+    raw = os.environ.get("PORTAL_SSH_CONFIG")
+    if not raw:
+        return None
+    if raw.strip().lower() == _SSH_CONFIG_NONE:
+        return _SSH_CONFIG_NONE
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return str(candidate)
+    logger.warning(
+        "Ignoring non-absolute PORTAL_SSH_CONFIG=%r; only an absolute path or "
+        "the literal 'none' is accepted. Falling back to ~/.ssh/config.", raw,
+    )
+    return None
+
+
+def ssh_config_path() -> Path:
+    """User-level OpenSSH client config path for display/messages.
+
+    Returns the ``PORTAL_SSH_CONFIG`` path when it names a file, else the OpenSSH
+    default ``~/.ssh/config`` (also returned for ``PORTAL_SSH_CONFIG=none``,
+    which means "read nothing" — see :func:`ssh_config_files`).
+    """
+    ov = _ssh_config_override()
+    if ov and ov != _SSH_CONFIG_NONE:
+        return Path(ov)
+    return Path("~/.ssh/config").expanduser()
+
+
+def system_ssh_config_path() -> Path:
+    """System-wide OpenSSH client config, read as a fallback after the user one.
+
+    POSIX: ``/etc/ssh/ssh_config`` (OpenSSH ``SSHDIR/ssh_config``).
+    Windows: ``%PROGRAMDATA%\\ssh\\ssh_config`` (Win32-OpenSSH default).
+    """
+    if sys.platform == "win32":
+        base = os.environ.get("PROGRAMDATA", r"C:\ProgramData")
+        return Path(base) / "ssh" / "ssh_config"
+    return Path("/etc/ssh/ssh_config")
+
+
+def ssh_config_files() -> list[Path]:
+    """Existing, readable OpenSSH client config files in OpenSSH read order.
+
+    Fully mirrors ``ssh -F`` via ``PORTAL_SSH_CONFIG``:
+      * ``none`` -> ``[]`` (``ssh -F none``: no config at all; host resolution
+        falls back to hosts.yaml only).
+      * an absolute path -> ``[<path>]`` (``ssh -F <path>``: only that file; the
+        system-wide config is suppressed).
+      * unset -> user ``~/.ssh/config`` then system ``/etc/ssh/ssh_config`` so
+        (per OpenSSH's "first obtained value wins") user settings take precedence.
+
+    Missing/unreadable files are dropped: asyncssh's loader opens each path
+    directly and raises on a missing file, so callers must pre-filter — exactly
+    what asyncssh's own default-config branch does with ``os.access``.
+    """
+    ov = _ssh_config_override()
+    if ov == _SSH_CONFIG_NONE:
+        return []
+    if ov:                                          # absolute path (ssh -F <path>)
+        candidates = [Path(ov)]
+    else:
+        candidates = [Path("~/.ssh/config").expanduser(), system_ssh_config_path()]
+    return [p for p in candidates if os.access(p, os.R_OK) and p.is_file()]
+
+
 def default_log_dir() -> Path:
     """Platform-native log directory (overridden by ``PORTAL_LOG_DIR``).
 

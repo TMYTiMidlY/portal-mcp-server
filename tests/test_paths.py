@@ -24,6 +24,7 @@ def _isolate_env(monkeypatch):
         "PORTAL_SECRETS_YAML",
         "PORTAL_LOG_DIR",
         "PORTAL_CREDENTIAL_AGENT_SOCKET",
+        "PORTAL_SSH_CONFIG",
         "XDG_CONFIG_HOME",
         "XDG_STATE_HOME",
     ):
@@ -142,3 +143,104 @@ def test_resolved_paths_are_under_platform_dirs(monkeypatch, tmp_path):
         # if the runner sets it that way, so we use a permissive check.
         match = re.search(re.escape(str(tmp_path)), str(p))
         assert match, f"{resolver.__name__} -> {p!r} does not contain {tmp_path!r}"
+
+
+# ── OpenSSH client config discovery ──────────────────────────────────────────
+
+def test_ssh_config_path_default(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert paths.ssh_config_path() == tmp_path / ".ssh" / "config"
+
+
+def test_ssh_config_path_override_absolute_is_honoured(monkeypatch, tmp_path):
+    target = tmp_path / "myconfig"
+    monkeypatch.setenv("PORTAL_SSH_CONFIG", str(target))
+    assert paths.ssh_config_path() == target
+
+
+def test_ssh_config_override_relative_is_rejected(monkeypatch, caplog, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PORTAL_SSH_CONFIG", "relative/config")
+    caplog.set_level(logging.WARNING, logger="portal_mcp_server.paths")
+    result = paths.ssh_config_path()
+    assert result == tmp_path / ".ssh" / "config"     # fell back to the default
+    assert any(
+        "PORTAL_SSH_CONFIG" in r.message and "non-absolute" in r.message
+        for r in caplog.records
+    ), f"expected a warning; got {[r.message for r in caplog.records]}"
+
+
+def test_ssh_config_files_user_then_system_in_order(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    user = home / ".ssh" / "config"
+    user.write_text("Host u\n")
+    monkeypatch.setenv("HOME", str(home))
+    system = tmp_path / "etc_ssh_config"
+    system.write_text("Host s\n")
+    monkeypatch.setattr(paths, "system_ssh_config_path", lambda: system)
+    assert paths.ssh_config_files() == [user, system]
+
+
+def test_ssh_config_files_skips_missing(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)        # no ~/.ssh/config written
+    monkeypatch.setenv("HOME", str(home))
+    system = tmp_path / "etc_ssh_config"
+    system.write_text("Host s\n")
+    monkeypatch.setattr(paths, "system_ssh_config_path", lambda: system)
+    assert paths.ssh_config_files() == [system]   # only the existing file
+
+
+def test_ssh_config_override_suppresses_system_like_dash_F(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "config").write_text("Host u\n")
+    monkeypatch.setenv("HOME", str(home))
+    system = tmp_path / "etc_ssh_config"
+    system.write_text("Host s\n")
+    monkeypatch.setattr(paths, "system_ssh_config_path", lambda: system)
+    alt = tmp_path / "alt"
+    alt.write_text("Host a\n")
+    monkeypatch.setenv("PORTAL_SSH_CONFIG", str(alt))
+    assert paths.ssh_config_files() == [alt]      # -F semantics: only the override
+
+
+def test_ssh_config_none_reads_nothing(monkeypatch, tmp_path):
+    """PORTAL_SSH_CONFIG=none == `ssh -F none`: no config file at all, even
+    though both the user and system files exist."""
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "config").write_text("Host u\n")
+    monkeypatch.setenv("HOME", str(home))
+    system = tmp_path / "etc_ssh_config"
+    system.write_text("Host s\n")
+    monkeypatch.setattr(paths, "system_ssh_config_path", lambda: system)
+    monkeypatch.setenv("PORTAL_SSH_CONFIG", "none")
+    assert paths.ssh_config_files() == []
+    # ssh_config_path (display only) still reports the conventional default.
+    assert paths.ssh_config_path() == home / ".ssh" / "config"
+
+
+def test_ssh_config_none_is_case_insensitive(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "config").write_text("Host u\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PORTAL_SSH_CONFIG", "NONE")
+    assert paths.ssh_config_files() == []
+
+
+def test_system_ssh_config_path_posix(monkeypatch):
+    from pathlib import Path
+    monkeypatch.setattr(paths.sys, "platform", "linux")
+    assert paths.system_ssh_config_path() == Path("/etc/ssh/ssh_config")
+
+
+def test_system_ssh_config_path_windows(monkeypatch):
+    monkeypatch.setattr(paths.sys, "platform", "win32")
+    monkeypatch.setenv("PROGRAMDATA", r"C:\ProgramData")
+    p = paths.system_ssh_config_path()
+    assert p.name == "ssh_config"
+    assert "ssh" in str(p) and "ProgramData" in str(p)
+

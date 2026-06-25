@@ -151,7 +151,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 | 工具 | action / 参数 | 用途 |
 |---|---|---|
-| `portal_host` | `action=list\|register\|remove` | 主机注册。`register` 要 `name`+`host`——或只给 `name`（若 `~/.ssh/config` 有同名 Host 别名，自动登记 `use_ssh_config` 叠加）。`tags` 喂 `portal_exec` 的 `group_tag`。`list` 可能带 per-host `warnings`（如 hosts.yaml↔ssh config 冲突），要转告用户。**无 password 参数**。 |
+| `portal_host` | `action=list\|register\|remove` | 主机注册。`register` 要 `name`+`host`——或只给 `name`（若 `~/.ssh/config` 有同名 Host 别名，自动登记 `use_ssh_config` 叠加）。`tags` 喂 `portal_exec` 的 `group_tag`。`list` 同时枚举 ssh config 里的 `Host` 别名并解析真实 `HostName`/`User`/`Port`，每条带 `source` 字段（`hosts.yaml`/`runtime`/`ssh-config`/`…+ssh-config`）；可能带 per-host `warnings`（如 hosts.yaml↔ssh config 冲突），要转告用户。**无 password 参数**。 |
 | `portal_tunnel` | `action=open\|close\|list`，`kind=local\|reverse\|socks` | 单入口 SSH 隧道（仿 `portal_host`）。`action` 选操作、`kind` 选隧道种类。`open` 走 host gate，`close` 按 `tunnel_id`（gate 在源 host）。 |
 
 ### introspection / 策略
@@ -290,7 +290,7 @@ portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有�
 
 - **单进程多连接、单连接多 session**：连接池就是 Python dict，没有进程边界、没有 fd 共享需求——也是为什么 portal 能在 Win 上做到和 Linux 一致的复用性能（OpenSSH master/child 模型在 Win 没法工作）。
 - **协议层完整覆盖**：local/remote/dynamic 端口转发、SFTP、SCP、X11 fwd、TUN/TAP——OpenSSH 能干的协议层动作 asyncssh 全都能干。
-- **OpenSSH 兼容**：原生解析 `~/.ssh/config`、`known_hosts`、`authorized_keys`、ssh-agent / Pageant。
+- **OpenSSH 兼容**：原生解析 `~/.ssh/config`、`known_hosts`、`authorized_keys`、ssh-agent / Pageant。portal 的 host 别名探测与 `portal_host(action=list)` 对 ssh config 的枚举/解析也**直接架在 asyncssh 的 `SSHClientConfig` 解析器上**（跟 `Include`、多端适配），不是手写扫描。
 - **仅依赖 PyCA `cryptography`**：装上 Python 就能跑，无 C 依赖、无 OS 特定 IPC。
 
 对比"用 subprocess 调 `ssh` / `scp`"：免去每命令 ~50–100 ms 的 fork、不需要协调多进程之间共享 SSH 复用（这正是 ControlMaster 在 Win 上挂的根因）、错误处理 / 重试 / 超时都是 Python 异步原语，而不是解析 stderr 字符串。
@@ -582,6 +582,7 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 | 文件路径 | `PORTAL_HOSTS_YAML` | 主机注册 YAML |
 | 文件路径 | `PORTAL_POLICIES_YAML` | 安全策略 YAML |
 | 文件路径 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML（`portal_exec` / `portal_local_exec` 的 `secrets=` 参数解析源） |
+| 文件路径 | `PORTAL_SSH_CONFIG` | OpenSSH 客户端 config 路径（`ssh -F` 等价物，详见下方"文件路径"节） |
 | 文件路径 | `PORTAL_LOG_DIR` | audit + server log 目录 |
 | 安全与认证 | `PORTAL_AUDIT_FAIL_OPEN` | audit 写盘失败时是否 fail-open |
 | 安全与认证 | `PORTAL_AUDIT_MAX_BYTES` | `audit.jsonl` 轮转阈值（字节，默认 10 MiB） |
@@ -611,7 +612,10 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 | `PORTAL_HOSTS_YAML` | 主机注册 YAML | `~/.config/portal-mcp-server/hosts.yaml` |
 | `PORTAL_POLICIES_YAML` | 安全策略 YAML | `~/.config/portal-mcp-server/policies.yaml` |
 | `PORTAL_SECRETS_YAML` | 命名密钥 YAML | `~/.config/portal-mcp-server/secrets.yaml` |
+| `PORTAL_SSH_CONFIG` | OpenSSH 客户端 config 路径 | `~/.ssh/config` |
 | `PORTAL_LOG_DIR` | audit + server log 目录 | `~/.local/state/portal-mcp-server/log/` |
+
+> `PORTAL_SSH_CONFIG` 是 portal 版的 `ssh -F`：OpenSSH 本身**不读任何环境变量**改 config 路径，只能靠 `-F`；portal 是常驻 daemon，没有逐次连接的命令行参数，故用此变量，并**完全仿照 `-F`**：设成**绝对路径**就**只读这一个文件**（和 `-F <file>` 一样，连系统级 `/etc/ssh/ssh_config` 也一并抑制）；设成字面量 **`none`（大小写不限）就一个 config 文件都不读**（等价 `ssh -F none`，主机解析全靠 hosts.yaml）；**不设**时读用户级 `~/.ssh/config` + 系统级 `/etc/ssh/ssh_config`（Windows 为 `%PROGRAMDATA%\ssh\ssh_config`）作 fallback，用户级优先（OpenSSH 的"先取到的值生效"）。绝对路径/`none` 之外的相对值告警并忽略。解析整段复用 asyncssh 的 config 解析器（`Include` 原生跟进、多端 `~` 展开）；asyncssh 自身的"找 config"只有一行 `~/.ssh/config`、不读系统级，故系统级 fallback 与 `-F`/`-F none` 这层是 portal 自己补的。
 
 路径解析优先级：**环境变量 > XDG 目录**（`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` 受 spec 支持）。当前工作目录 **不** 参与解析——`portal-mcp-server` 是用户级常驻服务，不是项目工具，cwd-relative 自动加载会让任意工作目录默默劫持你的真实配置（`ssh` / `gh` / `docker` / `kubectl` / `rclone` 等用户级 CLI 均不这么做）。
 
@@ -926,7 +930,14 @@ ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；
 > **这条引导靠什么到达 agent？** 全靠**每个 `portal_*` 工具自己的 description**——MCP client 一定会把工具描述喂给模型，所以"任务需要 token 时先引导用户 `portal secret set`、而不是索取明文"这句就直接写在 `portal_exec` / `portal_local_exec` 描述的顶部。
 > MCP 协议另有一个 **server 级 `instructions` 字段**（`initialize` 响应里返回，本可放一段全局凭据纪律），但规范把它定义为 *“a ‘hint’ to the model … this information **MAY** be added to the system prompt”*（[InitializeResult.instructions](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle)，字段可选）——**可选、client 用不用全凭自己**。实测（2026-06）**Copilot CLI / Codex CLI / Claude Code 三家都不把它注入模型上下文**，故 portal **不依赖** server 级 instructions，凭据引导一律落在工具描述里。
 
-### hosts.yaml 与 `~/.ssh/config`：优先级 + 叠加
+### host 查找：hosts.yaml + OpenSSH ssh config
+
+**默认查找顺序**：解析一个 host 名时，portal 按两步走，第一步命中即止——
+
+1. **hosts.yaml**（先）：从 XDG 配置目录读（`~/.config/portal-mcp-server/hosts.yaml`，可用 `PORTAL_HOSTS_YAML` 覆盖；解析规则见[环境变量 → 文件路径](#文件路径)）。
+2. **OpenSSH 客户端 ssh config**（后）：hosts.yaml 里没有该名时，再按 **OpenSSH 自己的逻辑**找——默认用户级 `~/.ssh/config` + 系统级 `/etc/ssh/ssh_config` fallback，**行为逐字对齐 `ssh -F`**。这一步的解析**直接复用 asyncssh 提供的 ssh config 解析器**（`SSHClientConfig`，原生跟 `Include`、`%` token 展开、多端 `~` 展开），portal 不自己手写扫描。
+
+第 2 步由 `PORTAL_SSH_CONFIG` 控制（详见[环境变量 → 文件路径](#文件路径)）：设绝对路径只读该文件、不设则用户级 + 系统级 fallback、设 **`none` 则完全禁用第 2 步的 ssh config 查找**，host 解析只剩 hosts.yaml。`portal_host(action="list")` 会把两步的来源都列出来，每条带 `source` 字段标明出处。
 
 **优先级（无字段级 merge）**：同名 host 一旦在 `hosts.yaml` 出现，就**完全覆盖** ssh config，根本不查 ssh config——不存在"hosts.yaml 补 sudo，连接参数继承 ssh config 的 ProxyJump"这种混合。两个 footgun，server 都会发 warning（经 `portal_host(action=list)` 的 `warnings` 透出，因为 stdio server 的 stderr 用户看不见）：
 
@@ -944,6 +955,14 @@ hosts:
 ```
 
 `portal_host(action="register", name="web01")` 只给 `name` 时，会自动查 ssh config——有同名 alias 就自动登记成上面这种叠加。
+
+**`list` 会枚举 ssh config**：`portal_host(action="list")` 不只列 `hosts.yaml`/运行时注册的 host，也会用 asyncssh 的解析器（`Include` 原生跟进）**枚举 ssh config 里的所有 `Host` 别名**（排除 `*`/`?`/`!` 通配），并解析出真实 `HostName`/`User`/`Port`。每条带一个 `source` 字段标明来源：
+
+- `hosts.yaml` / `runtime` —— 来自 hosts.yaml 文件 / 运行时 `register`，连接参数即字段本身；
+- `ssh-config` —— 只在 ssh config 里（用户级或系统级 fallback）的别名；
+- `hosts.yaml+ssh-config` / `runtime+ssh-config` —— `use_ssh_config: true` 叠加：元数据（tags/sudo…）来自声明处，`host`/`user`/`port` 解析自 ssh config。
+
+读哪些 ssh config 文件由 `PORTAL_SSH_CONFIG` 决定（`ssh -F` 等价物，详见[环境变量 → 文件路径](#文件路径)）：默认用户级 `~/.ssh/config` + 系统级 `/etc/ssh/ssh_config` fallback；设成绝对路径则只读该文件（抑制系统级）；设成 `none` 则一个都不读（等价 `ssh -F none`，只剩 hosts.yaml）。
 
 **字段对照 + 渐进补全**：基础字段全有（`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`），常用高级字段 `proxy_jump`（→ asyncssh `tunnel`）、`keepalive_interval`（→ ServerAliveInterval）、`forward_agent`（→ agent 转发）现已**原生支持**；其余 ssh config 字段走 `use_ssh_config: true` 叠加。
 

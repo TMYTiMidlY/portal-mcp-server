@@ -157,7 +157,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 
 | Tool | action / params | Purpose |
 |---|---|---|
-| `portal_host` | `action=list\|register\|remove` | Host registry. `register` needs `name`+`host` — or just `name` (if `~/.ssh/config` has a matching Host alias, it's registered with `use_ssh_config` overlay). `tags` feed `portal_exec`'s `group_tag`. `list` may carry per-host `warnings` (e.g. a hosts.yaml↔ssh-config conflict) — relay them to the user. **No password parameter.** |
+| `portal_host` | `action=list\|register\|remove` | Host registry. `register` needs `name`+`host` — or just `name` (if `~/.ssh/config` has a matching Host alias, it's registered with `use_ssh_config` overlay). `tags` feed `portal_exec`'s `group_tag`. `list` also enumerates `Host` aliases from ssh config (resolving real `HostName`/`User`/`Port`); every entry carries a `source` field (`hosts.yaml`/`runtime`/`ssh-config`/`…+ssh-config`) and may carry per-host `warnings` (e.g. a hosts.yaml↔ssh-config conflict) — relay them to the user. **No password parameter.** |
 | `portal_tunnel` | `action=open\|close\|list`, `kind=local\|reverse\|socks` | Single-entry SSH tunnels (mirrors `portal_host`). `action` picks the operation, `kind` the tunnel type. `open` goes through the host gate; `close` takes a `tunnel_id` (gated on the source host). |
 
 ### Introspection / policy
@@ -297,7 +297,7 @@ portal-mcp-server runs an asyncssh connection pool inside its own server process
 
 - **One process, many connections, many sessions per connection** — the pool is a Python dict; no process boundaries, no fd sharing required. That's also why portal gets the same reuse performance on Windows as on Linux (the OpenSSH master/child model just doesn't work on Windows).
 - **Full protocol coverage** — local/remote/dynamic port forwarding, SFTP, SCP, X11 forwarding, TUN/TAP — anything OpenSSH does at the protocol layer, asyncssh does too.
-- **OpenSSH-compatible** — natively parses `~/.ssh/config`, `known_hosts`, `authorized_keys`, ssh-agent / Pageant.
+- **OpenSSH-compatible** — natively parses `~/.ssh/config`, `known_hosts`, `authorized_keys`, ssh-agent / Pageant. portal's host-alias detection and the ssh-config enumeration behind `portal_host(action=list)` are built **directly on asyncssh's `SSHClientConfig` parser** (Include-aware, cross-platform), not a hand-rolled scanner.
 - **Only depends on PyCA `cryptography`** — install Python and you're done; no C deps, no OS-specific IPC.
 
 Versus "shell out to `ssh` / `scp`": no ~50–100 ms fork per command, no need to coordinate SSH reuse across OS processes (the root cause of the Windows ControlMaster failure), and error handling / retries / timeouts are first-class Python async primitives rather than stderr-string parsing.
@@ -576,6 +576,7 @@ All configurable knobs in portal-mcp-server are passed as environment variables,
 | File paths | `PORTAL_HOSTS_YAML` | Host registry YAML |
 | File paths | `PORTAL_POLICIES_YAML` | Security policy YAML |
 | File paths | `PORTAL_SECRETS_YAML` | Named secrets YAML (source for `secrets=` in `portal_exec` / `portal_local_exec`) |
+| File paths | `PORTAL_SSH_CONFIG` | OpenSSH client config path (the `ssh -F` analogue — see "File paths" below) |
 | File paths | `PORTAL_LOG_DIR` | Audit + server log directory |
 | Security & auth | `PORTAL_AUDIT_FAIL_OPEN` | Whether audit-write failure is fail-open |
 | Security & auth | `PORTAL_AUDIT_MAX_BYTES` | `audit.jsonl` rotation threshold in bytes (default 10 MiB) |
@@ -605,7 +606,10 @@ Detailed breakdown below.
 | `PORTAL_HOSTS_YAML` | Host registry YAML | `~/.config/portal-mcp-server/hosts.yaml` |
 | `PORTAL_POLICIES_YAML` | Security policy YAML | `~/.config/portal-mcp-server/policies.yaml` |
 | `PORTAL_SECRETS_YAML` | Named secrets YAML | `~/.config/portal-mcp-server/secrets.yaml` |
+| `PORTAL_SSH_CONFIG` | OpenSSH client config path | `~/.ssh/config` |
 | `PORTAL_LOG_DIR` | Audit + server log directory | `~/.local/state/portal-mcp-server/log/` |
+
+> `PORTAL_SSH_CONFIG` is portal's `ssh -F`: OpenSSH has **no env var** for the config path (only `-F`), and portal is a daemon with no per-connection flag, so this variable **fully mirrors `-F`**: an **absolute path** reads **only that file** (suppressing the system-wide `/etc/ssh/ssh_config`, like `-F <file>`); the literal **`none`** (any case) reads **no config file at all** (`ssh -F none` — host resolution comes solely from hosts.yaml); **unset** reads user `~/.ssh/config` + system `/etc/ssh/ssh_config` (`%PROGRAMDATA%\ssh\ssh_config` on Windows) as a fallback, user wins. Relative values (other than `none`) are warned and ignored. Parsing is delegated wholesale to asyncssh (Include-aware, multi-platform `~` expansion); asyncssh's own discovery is a single `~/.ssh/config` line with no system-config support, so the system fallback and `-F`/`-F none` layer are portal's.
 
 Resolution order: **env var > XDG directory** (`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` honored per the spec). The current working directory is **not** consulted — `portal-mcp-server` is a long-lived user-level daemon, not a project tool, and a cwd-relative auto-load would let any directory the server happens to be launched from silently override your real config (no mainstream user-level CLI — `ssh`, `gh`, `docker`, `kubectl`, `rclone`, … — does this).
 
@@ -927,6 +931,15 @@ So "waiting" surfaces only as a normal conversational turn handoff: the `getpass
 
 > **How does this guidance reach the agent?** Entirely through **each `portal_*` tool's own description** — an MCP client always feeds tool descriptions to the model, so "when a task needs a token, steer the user to `portal secret set` instead of asking for plaintext" is written at the top of the `portal_exec` / `portal_local_exec` descriptions.
 > MCP also defines a **server-level `instructions` field** (returned in the `initialize` response — a natural home for a global credential discipline), but the spec frames it as *“a ‘hint’ to the model … this information **MAY** be added to the system prompt”* ([InitializeResult.instructions](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle), an optional field) — **optional, entirely at the client's discretion**. Empirically (2026-06) **Copilot CLI / Codex CLI / Claude Code all ignore it** (none inject it into the model context), so portal does **not** rely on server-level instructions; the credential guidance lives in the per-tool descriptions instead.
+
+### Host resolution: hosts.yaml, then ssh config
+
+**Default lookup order** — resolving a host name is a two-step walk; the first hit wins:
+
+1. **hosts.yaml** (first) — read from the XDG config dir (`~/.config/portal-mcp-server/hosts.yaml`, override with `PORTAL_HOSTS_YAML`; see [Environment variables → File paths](#file-paths)).
+2. **OpenSSH client ssh config** (next) — when the name isn't in hosts.yaml, found via **OpenSSH's own logic**: user `~/.ssh/config` + system `/etc/ssh/ssh_config` fallback, **byte-for-byte aligned with `ssh -F`**. This step's parsing is delegated wholesale to **asyncssh's `SSHClientConfig` parser** (Include-aware, `%`-token and cross-platform `~` expansion) — portal doesn't hand-roll a scanner.
+
+Step 2 is controlled by `PORTAL_SSH_CONFIG` (see [File paths](#file-paths)): an absolute path reads only that file, unset reads user + system, and **`none` disables step 2 entirely** — host resolution then comes solely from hosts.yaml. `portal_host(action="list")` lists hosts from both steps, each tagged with a `source` field.
 
 ## Security
 

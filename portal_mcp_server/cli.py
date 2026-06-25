@@ -373,7 +373,14 @@ async def portal_host(action: Literal["list", "register", "remove"], name: str =
     """Manage the SSH host registry.
 
     ## Modes
-    - action="list": list all registered hosts.
+    - action="list": list all known hosts. Includes hosts.yaml / runtime-
+        registered entries AND every `Host` alias discoverable in the OpenSSH
+        client config (`~/.ssh/config` + system-wide fallback; or only
+        `$PORTAL_SSH_CONFIG` when it is an absolute path; or none of them when
+        it is "none" — the `ssh -F none` analogue), resolving real
+        HostName/User/Port. Each entry has a `source` field: "hosts.yaml",
+        "runtime", "ssh-config", or a "…+ssh-config" overlay (metadata from the
+        declared origin, connection params from ssh config).
         Example: portal_host(action="list")
     - action="register": add a host to the registry. Pass `host` (ip/hostname),
         or just `name` if ~/.ssh/config has a matching Host alias (registers a

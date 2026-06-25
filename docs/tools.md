@@ -8,10 +8,19 @@ writes, credential non-leakage, the security gate, real structured output).
 Anything that was just "a packaged script" (playbook, ping, rolling-as-a-tool,
 a standalone tmp janitor) was removed and folded into a primitive.
 
-Every tool that targets a host accepts a `host` parameter. The host can be:
+Every tool that targets a host accepts a `host` parameter. Host resolution
+checks hosts.yaml / the runtime registry first (loaded from the XDG config dir,
+`$PORTAL_HOSTS_YAML` to override), then falls back to the OpenSSH client config,
+whose parsing reuses asyncssh's `SSHClientConfig` (Include-aware). So the host
+can be:
 - a name registered via `portal_host(action="register", ...)`, **or**
-- a `Host` alias from `~/.ssh/config` (auto-resolved on first use; explicit
-  registration is only needed for tag-based grouping).
+- a `Host` alias from the OpenSSH client config (auto-resolved on first use;
+  explicit registration is only needed for tag-based grouping). The config files
+  read mirror `ssh -F`: `$PORTAL_SSH_CONFIG=<abs path>` reads only that file,
+  `$PORTAL_SSH_CONFIG=none` reads no config at all (hosts.yaml only), and unset
+  reads `~/.ssh/config` plus the system-wide `/etc/ssh/ssh_config` fallback
+  (`%PROGRAMDATA%\ssh\ssh_config` on Windows). `portal_host(action="list")`
+  enumerates these aliases and labels each entry's `source`.
 
 All state-changing tools write to `$PORTAL_LOG_DIR/audit.jsonl` (default
 `~/.local/state/portal-mcp-server/log/audit.jsonl`). Read-only tools
@@ -129,7 +138,7 @@ skipped).
 | Tool | Signature | Purpose |
 |---|---|---|
 | `portal_tunnel` | `(action=open\|close\|list, kind=local\|reverse\|socks, host="", tunnel_id="", local_port=0, local_bind="127.0.0.1", remote_host="", remote_port=0)` | `open`: open a tunnel through `host` — `kind=local` forwards `localhost:local_port → remote_host:remote_port`; `kind=reverse` exposes `local_bind:local_port` as `host:remote_port`; `kind=socks` is a SOCKS5 proxy. `close`: close by `tunnel_id` (gated on the originating host). `list`: all active tunnels. |
-| `portal_host` | `(action=list\|register\|remove, name="", host="", user="root", port=22, key_path="", tags="")` | Manage the runtime host registry. `register` needs `name`+`host` — or just `name` if `~/.ssh/config` has a matching `Host` alias (it auto-registers a `use_ssh_config` overlay). `tags` (comma-separated) feed `portal_exec`'s `group_tag`. `list` may include a per-host `warnings` array (e.g. a hosts.yaml↔ssh-config conflict) — relay those to the user. **No password parameter — key/side-channel auth only.** |
+| `portal_host` | `(action=list\|register\|remove, name="", host="", user="root", port=22, key_path="", tags="")` | Manage the runtime host registry. `register` needs `name`+`host` — or just `name` if `~/.ssh/config` has a matching `Host` alias (it auto-registers a `use_ssh_config` overlay). `tags` (comma-separated) feed `portal_exec`'s `group_tag`. `list` also enumerates `Host` aliases from the ssh config (resolving real `HostName`/`User`/`Port`) and tags each entry with a `source` field (`hosts.yaml`/`runtime`/`ssh-config`/`…+ssh-config`); it may include a per-host `warnings` array (e.g. a hosts.yaml↔ssh-config conflict) — relay those to the user. **No password parameter — key/side-channel auth only.** |
 
 ---
 

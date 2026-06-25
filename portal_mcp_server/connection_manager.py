@@ -14,6 +14,7 @@ from typing import AsyncIterator, Optional
 from dataclasses import dataclass, field
 
 import asyncssh
+from asyncssh.config import SSHClientConfig
 import yaml
 
 logger = logging.getLogger("portal_mcp.connections")
@@ -48,6 +49,42 @@ DEFAULT_MAX_CONN_AGE = 3600.0
 # this codebase. Bumping it to ``'replace'`` would lose information; keep
 # ``'backslashreplace'`` so the original bytes can still be reconstructed.
 DEFAULT_DECODE_ERRORS = "backslashreplace"
+
+
+class _SSHConfigAliasHarvester(SSHClientConfig):
+    """Collect every explicitly-defined ``Host`` alias from OpenSSH client
+    config, reusing asyncssh's own parser so ``Include`` directives, the
+    tokenizer, and glob expansion all behave exactly like a real connection.
+
+    asyncssh resolves options for a *single* host and discards the ``Host``
+    patterns, so it exposes no "enumerate all hosts" API. The option dispatch
+    table (``_handlers``) captures the base ``_match_host`` *function* at
+    class-definition time, so overriding the method alone is ignored — we must
+    re-point ``_handlers['host']`` at our collector. ``Include`` is added to
+    ``_conditionals`` so included files are always followed regardless of the
+    (sentinel-driven, irrelevant) match state. ``_default_path`` is left at
+    asyncssh's ``~/.ssh`` default, which matches OpenSSH's relative-``Include``
+    base for user configs (verified against openssh-portable ``readconf.c``).
+    """
+
+    _conditionals = SSHClientConfig._conditionals | {"include"}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.harvested: list[str] = []
+
+    def _collect_host(self, option, args):
+        # ``args`` holds the raw Host patterns; capture them before the base
+        # implementation clears the list, then defer to the real matching logic.
+        self.harvested.extend(args)
+        SSHClientConfig._match_host(self, option, args)
+
+    _handlers = {**SSHClientConfig._handlers, "host": ("Host", _collect_host)}
+
+
+def _is_concrete_alias(token: str) -> bool:
+    """True for a real Host alias (not a ``*``/``?`` wildcard or ``!`` negation)."""
+    return bool(token) and not (set("*?") & set(token)) and not token.startswith("!")
 
 
 async def _exec_secret_command(cmd: str, *, label: str) -> str:
@@ -154,6 +191,11 @@ class HostConfig:
     # (omit client_keys, authenticate with the keys the agent holds); ``False``
     # = hard-disable the agent (key files only). See ``_build_connect_kwargs``.
     use_ssh_agent: Optional[bool] = None
+    # Where this entry was declared, surfaced by ``list_hosts``: "hosts.yaml"
+    # (the config file), "runtime" (a ``portal_host`` register call), or
+    # "ssh-config" (auto-resolved from the OpenSSH client config). Combined with
+    # ``use_ssh_config`` to produce the list's ``source`` label.
+    source: str = "hosts.yaml"
 
 
 @dataclass
@@ -295,6 +337,7 @@ class ConnectionManager:
                 use_ssh_agent=(bool(cfg["use_ssh_agent"])
                                if cfg.get("use_ssh_agent") is not None
                                else None),
+                source="hosts.yaml",
             )
         logger.info(f"Loaded {len(self._registry)} hosts from registry")
 
@@ -310,21 +353,53 @@ class ConnectionManager:
                                "ProxyJump", "ProxyCommand")
     _SSH_CONFIG_SENTINEL = "zz-portal-mcp-sentinel-9d3f-no-such-host"
 
-    def _ssh_config_signature(self, ssh_config: Path, name: str) -> tuple:
-        """Resolve the marker options for ``name`` via asyncssh's own parser.
+    def _ssh_config_files(self) -> list[Path]:
+        """OpenSSH client config files to consult, in precedence order.
 
-        Parse-only (``SSHClientConfig.load``) — unlike the full
-        connection-options path it does NOT load IdentityFile keys, so an
-        absent/encrypted key can't make detection throw. ``Include`` directives
-        are followed natively. ``user``/``port`` are passed as ``()`` (asyncssh's
-        "unspecified") so the config's own User/Port directives resolve.
+        Delegates to :func:`paths.ssh_config_files`: ``PORTAL_SSH_CONFIG`` acts
+        as the ``ssh -F`` analogue, else user ``~/.ssh/config`` + system-wide
+        ``/etc/ssh/ssh_config`` fallback. Only existing, readable files are
+        returned so asyncssh's loader never trips over a missing path.
+        """
+        from .paths import ssh_config_files
+        return ssh_config_files()
+
+    def _parse_ssh_config(self, config: SSHClientConfig,
+                          files: list[Path]) -> None:
+        """Parse ``files`` into ``config`` in order, each with its own directory
+        as the relative-``Include`` base.
+
+        Mirrors ``SSHClientConfig.load`` but sets ``_default_path`` per file so a
+        relative ``Include`` resolves against that file's directory — matching
+        OpenSSH, which anchors user-config includes at ``~/.ssh`` and
+        system-config includes at ``/etc/ssh`` (openssh-portable ``readconf.c``).
+        """
+        for path in files:
+            config._default_path = path.parent
+            config.parse(path)
+        config.loaded = True
+
+    def _load_ssh_config(self, files: list[Path], name: str) -> SSHClientConfig:
+        """asyncssh ``SSHClientConfig`` resolved for ``name`` across ``files``.
+
+        Parse-only — unlike the full connection path it does NOT load
+        IdentityFile keys, so an absent/encrypted key can't make detection throw.
+        ``user``/``port`` are passed as ``()`` (asyncssh's "unspecified") so the
+        config's own User/Port directives resolve.
         """
         import getpass
-        from asyncssh.config import SSHClientConfig
-        cfg = SSHClientConfig.load(
-            None, [str(ssh_config)], False, False, False,
-            getpass.getuser(), (), name, (),
-        )
+        cfg = SSHClientConfig(None, False, False, False,
+                              getpass.getuser(), (), name, ())
+        self._parse_ssh_config(cfg, files)
+        return cfg
+
+    def _ssh_config_signature(self, files: list[Path], name: str) -> tuple:
+        """Resolve the marker options for ``name`` via asyncssh's own parser.
+
+        ``Include`` directives are followed natively and ``files`` are parsed in
+        OpenSSH precedence order (user before system).
+        """
+        cfg = self._load_ssh_config(files, name)
         out = []
         for key in self._SSH_CONFIG_MARKER_OPTS:
             try:
@@ -334,44 +409,119 @@ class ConnectionManager:
         return tuple(out)
 
     def has_ssh_config_alias(self, name: str) -> bool:
-        """True if ``name`` is an explicitly configured ``Host`` in ~/.ssh/config.
+        """True if ``name`` is an explicitly configured ``Host`` in the OpenSSH
+        client config (user config + system fallback; ``PORTAL_SSH_CONFIG`` aware).
 
         Uses asyncssh's config parser so ``Include`` directives are followed (the
         old hand-rolled line scan missed them). A name counts as explicit when
         its resolved marker options differ from a never-defined sentinel host —
         i.e. something more than a ``Host *`` wildcard matched it. Falls back to a
-        regex line scan (no Include) only if asyncssh can't parse the file.
+        regex line scan (no Include) only if asyncssh can't parse the files.
         """
-        ssh_config = Path("~/.ssh/config").expanduser()
-        if not ssh_config.exists():
+        files = self._ssh_config_files()
+        if not files:
             return False
         try:
-            sentinel = self._ssh_config_signature(
-                ssh_config, self._SSH_CONFIG_SENTINEL)
-            candidate = self._ssh_config_signature(ssh_config, name)
+            sentinel = self._ssh_config_signature(files, self._SSH_CONFIG_SENTINEL)
+            candidate = self._ssh_config_signature(files, name)
         except Exception:
             logger.debug("asyncssh ssh-config parse failed; regex fallback",
                          exc_info=True)
-            return self._regex_ssh_config_alias(name)
+            return self._regex_ssh_config_alias(name, files)
         return candidate != sentinel
 
-    def _regex_ssh_config_alias(self, name: str) -> bool:
-        """Degraded fallback (does NOT follow Include); used only when asyncssh
-        cannot parse ~/.ssh/config."""
-        ssh_config = Path("~/.ssh/config").expanduser()
+    def enumerate_ssh_config_aliases(
+            self, files: Optional[list[Path]] = None) -> list[str]:
+        """Every explicitly-defined ``Host`` alias across the OpenSSH client config.
+
+        Reuses asyncssh's parser via :class:`_SSHConfigAliasHarvester` (so
+        ``Include`` is followed and tokenizing/globbing match a real connection),
+        excluding wildcard/negated patterns. Order is preserved and de-duped.
+        Falls back to a regex scan (no Include) if asyncssh can't parse a file.
+        """
+        if files is None:
+            files = self._ssh_config_files()
+        if not files:
+            return []
+        import getpass
         try:
-            content = ssh_config.read_text()
-        except OSError:
-            return False
-        for line in content.splitlines():
-            s = line.strip()
-            if not s or s.startswith("#"):
+            harvester = _SSHConfigAliasHarvester(
+                None, False, False, False, getpass.getuser(), (),
+                self._SSH_CONFIG_SENTINEL, ())
+            self._parse_ssh_config(harvester, files)
+            raw: list[str] = harvester.harvested
+        except Exception:
+            logger.debug("asyncssh ssh-config harvest failed; regex fallback",
+                         exc_info=True)
+            raw = self._regex_harvest_aliases(files)
+        names: list[str] = []
+        seen: set[str] = set()
+        for tok in raw:
+            if _is_concrete_alias(tok) and tok not in seen:
+                seen.add(tok)
+                names.append(tok)
+        return names
+
+    def _resolve_ssh_config_fields(self, name: str,
+                                   files: Optional[list[Path]] = None) -> dict:
+        """Resolve real HostName/User/Port for an ssh-config alias via asyncssh.
+
+        Returns connection params as a real ssh connection would see them:
+        ``host`` falls back to the alias name (OpenSSH uses the alias as the
+        HostName when none is set), ``user`` to the local login user, ``port`` to
+        22. Resilient: any parse failure yields the alias-name defaults.
+        """
+        import getpass
+        if files is None:
+            files = self._ssh_config_files()
+        host: str = name
+        user: Optional[str] = None
+        port: object = 22
+        if files:
+            try:
+                cfg = self._load_ssh_config(files, name)
+                host = cfg.get("Hostname") or name
+                user = cfg.get("User")
+                port = cfg.get("Port") or 22
+            except Exception:
+                logger.debug("ssh-config field resolve failed for %r", name,
+                             exc_info=True)
+        if not user:
+            try:
+                user = getpass.getuser()
+            except Exception:
+                user = "root"
+        return {"host": host, "user": user, "port": int(port)}
+
+    def _regex_ssh_config_alias(self, name: str,
+                                files: Optional[list[Path]] = None) -> bool:
+        """Degraded fallback (does NOT follow Include); used only when asyncssh
+        cannot parse the config files."""
+        if files is None:
+            files = self._ssh_config_files()
+        return name in set(self._regex_harvest_aliases(files))
+
+    def _regex_harvest_aliases(self, files: list[Path]) -> list[str]:
+        """Degraded enumeration (no Include) for when asyncssh can't parse a file.
+
+        Returns concrete alias tokens (wildcards/negations excluded) across all
+        files, in order.
+        """
+        out: list[str] = []
+        for path in files:
+            try:
+                content = path.read_text()
+            except OSError:
                 continue
-            m = re.match(r"^Host\s+(.+)$", s, re.IGNORECASE)
-            if m and name in [p for p in m.group(1).split()
-                              if p not in ("*", "?")]:
-                return True
-        return False
+            for line in content.splitlines():
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                m = re.match(r"^Host\s+(.+)$", s, re.IGNORECASE)
+                if m:
+                    out.extend(p for p in m.group(1).split()
+                               if _is_concrete_alias(p))
+        return out
 
     def _overlay_warnings(self, name: str, use_ssh_config: bool) -> list[str]:
         """Warnings about hosts.yaml <-> ~/.ssh/config interactions.
@@ -420,6 +570,7 @@ class ConnectionManager:
             known_hosts=known_hosts,
             strict_host_key_checking=strict_host_key_checking,
             use_ssh_config=use_ssh_config,
+            source="runtime",
         )
         warns = self._overlay_warnings(name, use_ssh_config)
         if warns:
@@ -435,15 +586,58 @@ class ConnectionManager:
         logger.info(f"Registered host: {name} ({user}@{host}:{port})")
         return f"Host '{name}' registered: {user}@{host}:{port}"
 
+    @staticmethod
+    def _display_source(h: HostConfig) -> str:
+        """``list_hosts`` source label combining declaration origin and whether
+        the connection params are resolved from ssh config.
+
+        ``hosts.yaml`` / ``runtime`` / ``ssh-config`` for the plain cases; the
+        ``+ssh-config`` suffix (e.g. ``hosts.yaml+ssh-config``) marks a
+        ``use_ssh_config`` overlay whose metadata lives in the declared origin
+        but whose host/user/port come from the OpenSSH client config.
+        """
+        origin = h.source or "hosts.yaml"
+        if origin == "ssh-config":
+            return "ssh-config"
+        if h.use_ssh_config:
+            return f"{origin}+ssh-config"
+        return origin
+
     def list_hosts(self) -> list[dict]:
+        """All known hosts: the explicit registry (hosts.yaml + runtime) plus
+        every alias discoverable in the OpenSSH client config.
+
+        Each entry carries a ``source`` field. For ``use_ssh_config`` overlays
+        and ssh-config-only aliases the host/user/port are resolved from the ssh
+        config (the same files a real connection reads) rather than shown as the
+        placeholder alias name.
+        """
+        files = self._ssh_config_files()
         out = []
+        seen = set()
         for h in self._registry.values():
-            entry = {"name": h.name, "host": h.host, "port": h.port,
-                     "user": h.user, "tags": h.tags}
+            seen.add(h.name)
+            if h.use_ssh_config:
+                fields = self._resolve_ssh_config_fields(h.name, files)
+                host, user, port = fields["host"], fields["user"], fields["port"]
+            else:
+                host, user, port = h.host, h.user, h.port
+            entry = {"name": h.name, "host": host, "port": port,
+                     "user": user, "tags": h.tags,
+                     "source": self._display_source(h)}
             warns = self._config_warnings.get(h.name)
             if warns:
                 entry["warnings"] = warns
             out.append(entry)
+        # ssh-config aliases not already shadowed by a registry/hosts.yaml entry.
+        for name in self.enumerate_ssh_config_aliases(files):
+            if name in seen:
+                continue
+            seen.add(name)
+            fields = self._resolve_ssh_config_fields(name, files)
+            out.append({"name": name, "host": fields["host"],
+                        "port": fields["port"], "user": fields["user"],
+                        "tags": ["ssh-config"], "source": "ssh-config"})
         return out
 
     def should_cache_ssh_password_as_sudo(self, host_name: str) -> bool:
@@ -606,12 +800,19 @@ class ConnectionManager:
 
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
         if cfg.use_ssh_config:
-            # asyncssh resolves everything from ~/.ssh/config using the alias.
+            # asyncssh resolves HostName/User/Port/IdentityFile/ProxyJump from
+            # the OpenSSH client config using the alias. Pass our explicit file
+            # list (PORTAL_SSH_CONFIG override else user + system fallback) so
+            # connection and detection read exactly the same files. An empty
+            # list — PORTAL_SSH_CONFIG=none (ssh -F none) or no config present —
+            # is passed as-is so asyncssh reads NOTHING, rather than '() which
+            # would re-trigger its built-in ~/.ssh/config default.
             # Defer host-key behaviour to the same policy as explicit hosts.
             return dict(
                 host=cfg.name,
                 connect_timeout=cfg.connect_timeout,
                 known_hosts=self._known_hosts_arg(cfg),
+                config=[str(p) for p in self._ssh_config_files()],
             )
         kwargs = dict(
             host=cfg.host, port=cfg.port, username=cfg.user,
@@ -718,6 +919,7 @@ class ConnectionManager:
             host=host_name,  # placeholder; asyncssh ignores when use_ssh_config
             use_ssh_config=True,
             tags=["ssh-config"],
+            source="ssh-config",
         )
 
     async def get_connection(self, host_name: str) -> asyncssh.SSHClientConnection:
