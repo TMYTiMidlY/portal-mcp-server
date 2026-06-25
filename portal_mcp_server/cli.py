@@ -775,24 +775,46 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
 
 @mcp.tool()
 async def portal_read(host: str, path: str, start: int = 1,
-                      end: int | None = None, encoding: str = "utf-8") -> str:
+                      end: int | None = None, limit: int | None = None,
+                      encoding: str = "utf-8") -> str:
     """Read a file (or a 1-based line range) from a remote host with SHA-256 hashes.
 
-    Returns JSON with: content, file_hash, range_hash, start, end, total_lines.
-    The file_hash MUST be supplied to portal_patch; if the file changed in
-    between, portal_patch will refuse to overwrite.
+    Returns JSON with: content, file_hash, range_hash, start, end, total_lines,
+    truncated. The file_hash MUST be supplied to portal_patch; if the file
+    changed in between, portal_patch will refuse to overwrite.
+
+    The read is **paged** so a large file never has to come back as one
+    oversized blob: a single call returns at most ``limit`` lines (default
+    PORTAL_READ_MAX_LINES=2000) and at most PORTAL_READ_MAX_BYTES (default
+    16384) of content, whichever binds first — but always at least one line.
+    When the page stops before the requested end, ``truncated`` is true and
+    ``next_start`` gives the line to continue from (pass it back as ``start``).
+    Pages are cut on line boundaries, so ``range_hash`` stays valid for patching.
+
+    Usage:
+        * Whole file (auto-paged): call ``portal_read(host, path)``; if the result
+          has ``truncated: true``, call again with ``start=<next_start>`` and repeat
+          until ``truncated`` is false, concatenating each page's ``content`` in order.
+        * A specific range: ``portal_read(host, path, start=40, end=80)`` (still
+          paged if that range is huge).
+        * Just the first N lines: ``portal_read(host, path, limit=N)`` — handy to
+          peek the head of a big file without pulling it all.
 
     Args:
         host: SSH host alias (from ~/.ssh/config) or registered host name
         path: Absolute remote path
         start: 1-based starting line (default 1)
-        end: 1-based ending line, inclusive (default: end of file)
+        end: 1-based ending line of the requested range, inclusive
+            (default: end of file)
+        limit: max number of lines to return in this page (default: the
+            PORTAL_READ_MAX_LINES cap). The byte cap may shorten the page further.
         encoding: Text encoding (default utf-8)
     """
     err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
-    res = await _re_read(host, path, start=start, end=end, encoding=encoding)
+    res = await _re_read(host, path, start=start, end=end, limit=limit,
+                         encoding=encoding)
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 

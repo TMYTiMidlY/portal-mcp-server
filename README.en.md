@@ -207,7 +207,7 @@ Rule of thumb: **don't mix `portal_*` and bash `ssh`/`scp` in the same task**, o
 | `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal='TERM')` |
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` |
 | `portal_close_shell` | `(host)` |
-| `portal_read` | `(host, path, start=1, end=None, encoding='utf-8')` |
+| `portal_read` | `(host, path, start=1, end=None, limit=None, encoding='utf-8')` |
 | `portal_patch` | `(host, path, file_hash, patches_json, encoding='utf-8', auto_newline=False)` |
 | `portal_grep` | `(host, pattern, path='.', glob='', file_type='', output_mode='files_with_matches', ignore_case=False, before_context=0, after_context=0, context=0, head_limit=250, offset=0, multiline=False)` |
 | `portal_glob` | `(host, pattern, path='.')` |
@@ -463,6 +463,8 @@ To override hosts / policies / log paths, append an `env` block:
 }
 ```
 
+> 💡 **Consider also setting a smaller default timeout** `PORTAL_DEFAULT_TIMEOUT` (seconds). The built-in default is a conservative 1h, and while `portal_exec` / `portal_shell` run they emit keepalive heartbeats that stop the MCP client from aborting a hung call on its own — so `timeout` is effectively the only real cut-off. Setting e.g. `"PORTAL_DEFAULT_TIMEOUT": "120"` makes a hung command fail fast (instead of pinning the call open for the full window) when the agent forgets to pass an explicit `timeout`; the agent can still raise the per-call `timeout` for genuinely slow commands (builds / installs).
+
 ### Claude Code CLI
 
 Edit `<project>/.mcp.json` (same schema as above), or register via CLI / slash command:
@@ -584,6 +586,9 @@ All configurable knobs in portal-mcp-server are passed as environment variables,
 | Connection pool | `PORTAL_SSH_MAX_IDLE_TIME` | Idle-close timeout in seconds |
 | Connection pool | `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds |
 | Reliability | `PORTAL_BASH_HEARTBEAT_INTERVAL` | Keepalive heartbeat interval (s) while `portal_shell` runs |
+| Reliability | `PORTAL_DEFAULT_TIMEOUT` | Default per-command timeout (s) for `portal_exec` / `portal_shell` / `portal_local_exec` when the agent omits `timeout`; the per-call `timeout` overrides it |
+| Remote read | `PORTAL_READ_MAX_LINES` | Max lines `portal_read` returns per page when `limit` is omitted (default 2000) |
+| Remote read | `PORTAL_READ_MAX_BYTES` | Max bytes of content `portal_read` returns per page, so a large file doesn't blow past the MCP client's inline-output threshold (default 16384) |
 | Background jobs | `PORTAL_JOB_PERSIST` | Whether the `portal_job` table persists across restarts (default on; `0`/`false` to disable) |
 | Background jobs | `PORTAL_JOB_STATE_FILE` | Path of the persisted job table (default `<state>/jobs.json`) |
 | Background jobs | `PORTAL_JOB_MAX_LIVE` | Cap on concurrently live background jobs (default 50) |
@@ -645,6 +650,7 @@ Controls the in-process asyncssh connection pool. Defaults work well for most se
 | Variable | Meaning | Default |
 |---|---|---|
 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | How often (seconds) `portal_shell` / `portal_exec` / `portal_local_exec` emits an MCP progress notification as a keepalive while the command runs, so an output-silent command doesn't trip the client's idle timeout (JSON-RPC `-32001`). Independent of the server-side `timeout` parameter. Non-positive or invalid values fall back to the default | `5` (seconds) |
+| `PORTAL_DEFAULT_TIMEOUT` | Default per-command timeout (**in seconds**) used by `portal_exec` / `portal_shell` / `portal_local_exec` when the agent **omits** the `timeout` argument. All three share this one knob; the built-in default for each is a conservative 1h — because the keepalive heartbeats stop the client from aborting a hung call, `timeout` is effectively the only real cut-off. Lowering it (e.g. `120`) makes a hung command fail fast instead of pinning the call open for the whole window. **A `timeout` the agent passes explicitly always overrides this**; lowering the default doesn't stop the agent from raising it for slow commands. Read once at import (i.e. it takes effect from the MCP server process's `env` block). Non-positive / invalid values fall back to the built-in default | built-in `3600` (i.e. 1h) |
 
 ### Background jobs
 

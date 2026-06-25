@@ -199,7 +199,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal='TERM')` |
 | `portal_local_exec` | `(command, secrets=None, timeout=600.0)` |
 | `portal_close_shell` | `(host)` |
-| `portal_read` | `(host, path, start=1, end=None, encoding='utf-8')` |
+| `portal_read` | `(host, path, start=1, end=None, limit=None, encoding='utf-8')` |
 | `portal_patch` | `(host, path, file_hash, patches_json, encoding='utf-8', auto_newline=False)` |
 | `portal_grep` | `(host, pattern, path='.', glob='', file_type='', output_mode='files_with_matches', ignore_case=False, before_context=0, after_context=0, context=0, head_limit=250, offset=0, multiline=False)` |
 | `portal_glob` | `(host, pattern, path='.')` |
@@ -456,6 +456,8 @@ portal ssh    clear web01            # 清掉单条
 }
 ```
 
+> 💡 **建议顺手设一个较小的默认超时** `PORTAL_DEFAULT_TIMEOUT`（秒）。内置默认是保守的 1h，而 `portal_exec` / `portal_shell` 执行期间会发 keepalive 心跳，让 MCP client **不会**主动掐断一个挂起的调用——也就是说 `timeout` 几乎是唯一的真正截断点。设成例如 `"PORTAL_DEFAULT_TIMEOUT": "120"`，能让忘了显式传 `timeout` 的挂起命令快速失败而不是占满整窗口；agent 对真正慢的命令（构建 / 安装）仍可按需用 per-call `timeout` 调大。
+
 ### Claude Code CLI
 
 直接编辑 `<project>/.mcp.json`（同上 schema），或用 CLI / 斜杠命令登记：
@@ -594,6 +596,9 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 | 后台任务 | `PORTAL_JOB_MAX_LIVE` | 并发存活后台任务上限（默认 50） |
 | 后台任务 | `PORTAL_JOB_TTL` | 完成任务在表中保留多少秒后清理 + 删远端 tmp（默认 3600） |
 | 可靠性 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_shell` 执行期间 keepalive 心跳间隔（秒） |
+| 可靠性 | `PORTAL_DEFAULT_TIMEOUT` | `portal_exec` / `portal_shell` / `portal_local_exec` 省略 `timeout` 时的默认每命令超时（秒）；per-call `timeout` 覆盖之 |
+| 远端读 | `PORTAL_READ_MAX_LINES` | `portal_read` 省略 `limit` 时每页返回的最大行数（默认 2000） |
+| 远端读 | `PORTAL_READ_MAX_BYTES` | `portal_read` 每页返回内容的最大字节数，避免大文件撑爆 MCP 客户端的内联输出阈值（默认 16384） |
 | 测试（仅 dev） | `PORTAL_TEST_LIVE` | 是否执行真实 SSH 集成测试 |
 | 测试（仅 dev） | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | live 测试目标 |
 
@@ -649,6 +654,7 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | `portal_shell` / `portal_exec` / `portal_local_exec` 在命令执行期间每隔多少秒发一条 MCP progress 通知作 keepalive。命令无输出也不会让 client 撞 idle 超时（JSON-RPC `-32001`）；与服务端 `timeout` 参数相互独立。非正数或非法值回退到默认 | `5`（秒） |
+| `PORTAL_DEFAULT_TIMEOUT` | `portal_exec` / `portal_shell` / `portal_local_exec` 在 agent **省略** `timeout` 参数时使用的默认每命令超时（**单位：秒**）。三个工具统一走这一个口子，内置默认都是保守的 1h——因为执行期间的 keepalive 心跳会让 client 不主动中断挂起的调用，`timeout` 几乎是唯一真正的截断点。调小（如 `120`）可让挂起命令快速失败而非占满整窗口。**agent 每次调用显式传的 `timeout` 永远覆盖此默认**；调小默认不影响 agent 对慢命令按需调大。在 import 时读取一次（即随 MCP server 进程的 `env` 块生效）。非正数 / 非法值回退到内置默认 | 内置 `3600`（即 1h） |
 
 ### 测试（仅 dev）
 

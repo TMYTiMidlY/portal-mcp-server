@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import os
 import re
 import time
 import uuid
@@ -55,6 +56,29 @@ from .connection_manager import get_manager
 from .safety import validate_remote_path
 
 logger = logging.getLogger("portal_mcp.remote_editor")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ[name])
+    except (KeyError, ValueError):
+        return default
+
+
+# Pagination caps for ``remote_read``. A bare read of a large file would
+# otherwise return the whole thing as one JSON blob; the MCP *client* (e.g.
+# Copilot CLI) then refuses to inline a tool result over its own threshold
+# (~20 KiB measured) and spills it to a temp file with an "Output too large"
+# message. So we page the read here: a single call returns at most
+# READ_MAX_LINES lines AND at most READ_MAX_BYTES bytes of content (whichever
+# binds first, but always >= 1 line so pagination can always advance), and
+# flags ``truncated`` + ``next_start`` so the caller can continue. The byte
+# cap is the real guard (the JSON wrapping + escaping inflates content ~1.10x,
+# so 16 KiB of content -> ~18 KiB wrapped, comfortably under the ~20 KiB
+# client threshold); the line cap mirrors Claude's Read default and bounds
+# pathological many-short-lines files. Both are env-tunable.
+READ_MAX_LINES = _env_int("PORTAL_READ_MAX_LINES", 2000)
+READ_MAX_BYTES = _env_int("PORTAL_READ_MAX_BYTES", 16384)
 
 # A stable, recognizable suffix so we can later identify orphans we left
 # behind (e.g. when a connection died after `sftp.open(tmp)` but before
@@ -268,16 +292,32 @@ async def _sweep_orphan_tmps_in(sftp, directory: str, max_age_s: int,
 
 
 async def remote_read(host: str, path: str, start: int = 1,
-                      end: Optional[int] = None, encoding: str = "utf-8") -> Dict[str, Any]:
-    """Read a file (or a line range) from a remote host.
+                      end: Optional[int] = None, limit: Optional[int] = None,
+                      encoding: str = "utf-8") -> Dict[str, Any]:
+    """Read a file (or a 1-based line range) from a remote host, with paging.
+
+    The *requested* range is ``[start, end]`` (``end`` defaults to EOF). A
+    single call returns at most ``limit`` lines of that range (default
+    :data:`READ_MAX_LINES`) and at most :data:`READ_MAX_BYTES` bytes,
+    whichever binds first — but always at least one line so the caller can
+    always make progress. The page is cut on a line boundary, so
+    ``range_hash`` always covers exactly the returned slice and stays valid
+    for a follow-up ``portal_patch``.
+
+    Usage: call once with just ``(host, path)`` to read from the top; while the
+    result has ``truncated=True``, call again with ``start=next_start`` to walk
+    the rest. Use ``start``/``end`` for a known range, or ``limit`` to read only
+    the first N lines of the requested range.
 
     Returns:
         {
-          content: str,            # the requested slice
-          file_hash: str,          # SHA-256 of the WHOLE file
-          range_hash: str,         # SHA-256 of the returned slice
+          content: str,            # the returned page (whole lines)
+          file_hash: str,          # SHA-256 of the WHOLE file (for portal_patch)
+          range_hash: str,         # SHA-256 of the returned page
           start: int, end: int,    # 1-based inclusive line range actually returned
           total_lines: int,
+          truncated: bool,         # True if the page stops before the requested end
+          next_start: int,         # (only when truncated) pass as `start` to continue
           encoding: str,
         }
     """
@@ -286,24 +326,45 @@ async def remote_read(host: str, path: str, start: int = 1,
     total = len(lines)
 
     s_idx = max(0, start - 1)
-    e_idx = total if end is None else min(total, end)
-    if s_idx >= total:
+    requested_e_idx = total if end is None else max(0, min(total, end))
+
+    if s_idx >= total or s_idx >= requested_e_idx:
+        # Nothing to return (past EOF, or an empty requested range).
         slice_text = ""
         actual_end = start
+        truncated = False
+        cut = s_idx
     else:
-        slice_lines = lines[s_idx:e_idx]
-        slice_text = "".join(slice_lines)
-        actual_end = s_idx + len(slice_lines)
+        max_lines = READ_MAX_LINES if limit is None else max(1, int(limit))
+        line_capped_e_idx = min(requested_e_idx, s_idx + max_lines)
+        # Accumulate whole lines until the byte budget would be exceeded,
+        # always keeping at least the first line so pagination advances even
+        # when a single line is larger than the budget.
+        acc = 0
+        cut = s_idx
+        for i in range(s_idx, line_capped_e_idx):
+            b = len(lines[i].encode(encoding))
+            if i > s_idx and acc + b > READ_MAX_BYTES:
+                break
+            acc += b
+            cut = i + 1
+        slice_text = "".join(lines[s_idx:cut])
+        actual_end = cut
+        truncated = cut < requested_e_idx
 
-    return {
+    result: Dict[str, Any] = {
         "content": slice_text,
         "file_hash": _sha256(full),
         "range_hash": _sha256(slice_text),
         "start": s_idx + 1 if total else 1,
         "end": actual_end,
         "total_lines": total,
+        "truncated": truncated,
         "encoding": encoding,
     }
+    if truncated:
+        result["next_start"] = cut + 1
+    return result
 
 
 async def remote_patch(host: str, path: str, file_hash: str,

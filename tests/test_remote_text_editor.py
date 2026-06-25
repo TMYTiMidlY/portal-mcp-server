@@ -236,6 +236,9 @@ class TestHashAndRead:
         assert out["start"] == 1
         assert out["end"] == 5
         assert out["total_lines"] == 5
+        # Small file fits under the caps → not truncated, no continuation.
+        assert out["truncated"] is False
+        assert "next_start" not in out
 
     @pytest.mark.asyncio
     async def test_read_range(self, fake_remote):
@@ -246,12 +249,104 @@ class TestHashAndRead:
         assert out["content"] == "Line 2\nLine 3\nLine 4\n"
         assert out["start"] == 2
         assert out["end"] == 4
+        assert out["truncated"] is False
 
     @pytest.mark.asyncio
     async def test_read_path_validation_blocks_nul(self, fake_remote):
         from portal_mcp_server.remote_text_editor import remote_read
         with pytest.raises(ValueError):
             await remote_read("h", "/etc/passwd\x00fake")
+
+
+# ════════════════════════════════════════════════════════════════════════════
+#  Pagination — line cap, byte cap, truncated/next_start continuation
+# ════════════════════════════════════════════════════════════════════════════
+
+class TestReadPaging:
+    @pytest.mark.asyncio
+    async def test_limit_caps_lines_and_sets_next_start(self, fake_remote):
+        fs, _, _ = fake_remote
+        fs.write("/f", "".join(f"L{i}\n" for i in range(1, 11)))  # 10 lines
+        from portal_mcp_server.remote_text_editor import remote_read
+        out = await remote_read("h", "/f", limit=3)
+        assert out["content"] == "L1\nL2\nL3\n"
+        assert out["start"] == 1
+        assert out["end"] == 3
+        assert out["total_lines"] == 10
+        assert out["truncated"] is True
+        assert out["next_start"] == 4
+
+    @pytest.mark.asyncio
+    async def test_next_start_continues_to_eof(self, fake_remote):
+        fs, _, _ = fake_remote
+        fs.write("/f", "".join(f"L{i}\n" for i in range(1, 11)))
+        from portal_mcp_server.remote_text_editor import remote_read
+        page1 = await remote_read("h", "/f", limit=4)
+        page2 = await remote_read("h", "/f", start=page1["next_start"], limit=4)
+        page3 = await remote_read("h", "/f", start=page2["next_start"], limit=4)
+        assert page1["content"] == "L1\nL2\nL3\nL4\n"
+        assert page2["content"] == "L5\nL6\nL7\nL8\n"
+        assert page3["content"] == "L9\nL10\n"
+        assert page3["truncated"] is False
+        assert "next_start" not in page3
+        # Reassembled pages equal the whole file.
+        assert page1["content"] + page2["content"] + page3["content"] == \
+            "".join(f"L{i}\n" for i in range(1, 11))
+
+    @pytest.mark.asyncio
+    async def test_byte_cap_cuts_on_line_boundary(self, fake_remote, monkeypatch):
+        import portal_mcp_server.remote_text_editor as rte
+        # Each line is "xxxx\n" = 5 bytes; budget of 12 bytes fits 2 full lines.
+        monkeypatch.setattr(rte, "READ_MAX_BYTES", 12)
+        monkeypatch.setattr(rte, "READ_MAX_LINES", 1000)
+        fs, _, _ = fake_remote
+        fs.write("/f", "".join("xxxx\n" for _ in range(10)))
+        out = await rte.remote_read("h", "/f")
+        assert out["content"] == "xxxx\nxxxx\n"
+        assert out["end"] == 2
+        assert out["truncated"] is True
+        assert out["next_start"] == 3
+        # range_hash covers exactly the returned page (patch-compatible).
+        assert out["range_hash"] == _h("xxxx\nxxxx\n")
+
+    @pytest.mark.asyncio
+    async def test_byte_cap_always_returns_at_least_one_line(self, fake_remote, monkeypatch):
+        import portal_mcp_server.remote_text_editor as rte
+        monkeypatch.setattr(rte, "READ_MAX_BYTES", 4)  # smaller than any line
+        monkeypatch.setattr(rte, "READ_MAX_LINES", 1000)
+        fs, _, _ = fake_remote
+        fs.write("/f", "aaaaaaaaaa\nbbbbbbbbbb\n")  # 11-byte lines
+        out = await rte.remote_read("h", "/f")
+        # Even though the first line exceeds the budget, we still return it so
+        # pagination can advance.
+        assert out["content"] == "aaaaaaaaaa\n"
+        assert out["end"] == 1
+        assert out["truncated"] is True
+        assert out["next_start"] == 2
+
+    @pytest.mark.asyncio
+    async def test_range_under_cap_not_truncated(self, fake_remote):
+        fs, _, _ = fake_remote
+        fs.write("/f", "".join(f"L{i}\n" for i in range(1, 11)))
+        from portal_mcp_server.remote_text_editor import remote_read
+        out = await remote_read("h", "/f", start=3, end=5, limit=100)
+        assert out["content"] == "L3\nL4\nL5\n"
+        assert out["start"] == 3
+        assert out["end"] == 5
+        assert out["truncated"] is False
+        assert "next_start" not in out
+
+    @pytest.mark.asyncio
+    async def test_empty_file(self, fake_remote):
+        fs, _, _ = fake_remote
+        fs.write("/f", "")
+        from portal_mcp_server.remote_text_editor import remote_read
+        out = await remote_read("h", "/f")
+        assert out["content"] == ""
+        assert out["total_lines"] == 0
+        assert out["truncated"] is False
+        assert "next_start" not in out
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
