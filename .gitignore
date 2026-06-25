@@ -47,6 +47,8 @@ ENV/
 htmlcov/
 .pytest_cache/
 .tox/
+# Per-run test runtime dir (logs, audit, config, state) — see tests/conftest.py
+.pytest-portal/
 
 # Type checkers
 .mypy_cache/

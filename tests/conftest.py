@@ -23,6 +23,55 @@ from pathlib import Path
 import pytest
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+#  Test isolation — route EVERY portal-mcp-server runtime path (server log, audit
+#  log, config yamls, job state, XDG dirs) into ONE gitignored in-repo directory,
+#  set up HERE at conftest import, *before* any test module imports the package.
+#
+#  Why this can't be a fixture: cli.py and audit.py bind their FileHandler /
+#  rotating-audit-handler from default_log_dir() at *import* time, so by the time
+#  a function-scoped monkeypatch runs the handlers already point at the real
+#  ~/.local/state/portal-mcp-server/log/ — i.e. the very audit.jsonl / server.log
+#  the developer's live MCP server is writing. Pinning the paths before the first
+#  import keeps the real ~/.config & ~/.local/state pristine across a test run.
+#
+#  PORTAL_* overrides are the cross-platform lever: paths._resolve() honours them
+#  ahead of platformdirs on every OS, whereas XDG_* only steer platformdirs on
+#  Linux (macOS/Windows ignore them). XDG_* are set too, for the few Linux
+#  config/state-dir reads not behind a PORTAL_* knob (e.g. agent.json). setdefault
+#  is used so a deliberate ambient override (CI / your shell) still wins.
+#
+#  NOT routed here: PORTAL_CREDENTIAL_AGENT_SOCKET (kept on a short /tmp path by
+#  the agent_socket fixture — an in-repo path overflows macOS's 104-byte AF_UNIX
+#  sun_path) and PORTAL_JOB_STATE_FILE / the socket are *also* re-pointed per-test
+#  by the autouse fixtures below for stronger per-test isolation.
+# ──────────────────────────────────────────────────────────────────────────────
+_TEST_RUNTIME_ROOT = Path(__file__).resolve().parent.parent / ".pytest-portal"
+
+
+def _isolate_runtime_paths() -> None:
+    log_dir = _TEST_RUNTIME_ROOT / "log"
+    cfg_dir = _TEST_RUNTIME_ROOT / "config"
+    state_dir = _TEST_RUNTIME_ROOT / "state"
+    xdg_cfg = _TEST_RUNTIME_ROOT / "xdg-config"
+    xdg_state = _TEST_RUNTIME_ROOT / "xdg-state"
+    for d in (log_dir, cfg_dir, state_dir, xdg_cfg, xdg_state):
+        d.mkdir(parents=True, exist_ok=True)
+    for key, value in {
+        "PORTAL_LOG_DIR": str(log_dir),
+        "PORTAL_HOSTS_YAML": str(cfg_dir / "hosts.yaml"),
+        "PORTAL_POLICIES_YAML": str(cfg_dir / "policies.yaml"),
+        "PORTAL_SECRETS_YAML": str(cfg_dir / "secrets.yaml"),
+        "PORTAL_JOB_STATE_FILE": str(state_dir / "jobs.json"),
+        "XDG_CONFIG_HOME": str(xdg_cfg),
+        "XDG_STATE_HOME": str(xdg_state),
+    }.items():
+        os.environ.setdefault(key, value)
+
+
+_isolate_runtime_paths()
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers", "ssh: requires a reachable SSH server "
