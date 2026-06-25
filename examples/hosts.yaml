@@ -125,3 +125,17 @@ hosts:
   #   key: ~/.ssh/id_ed25519
   #   tags: [bastion, jump]
 
+
+# ── Local-machine sudo for portal_local_exec(use_sudo=True) ──────────────────
+# `<local>` is a RESERVED top-level key (a sibling of `hosts:`, NOT a host under
+# it). It configures sudo for the MCP server's OWN machine — used only by
+# portal_local_exec(use_sudo=True), which does NOT go over SSH. The angle
+# brackets are illegal in a hostname, so this reserved key never clashes with an
+# SSH host (don't confuse it with `localhost`, a normal SSH host to 127.0.0.1).
+# Password sources (lookup order: agent cache -> command -> error):
+#   (a) sudo_password_command below — prints the local sudo password to stdout.
+#   (b) `portal sudo set-local` in a terminal (hidden getpass, TTL-cached).
+# "<local>":
+#   sudo_password_command: pass show sudo/this-box
+#   # sudo_password_command: printf '%s' "$LOCAL_SUDO_PASSWORD"
+

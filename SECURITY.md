@@ -327,6 +327,13 @@ trace. The password is resolved server-side from one of two sources:
   same TTL. This is intentionally config-only and defaults to false. It
   does **not** read or reuse `portal passphrase set`; private-key
   passphrases remain a separate local-key-unlock credential.
+- **Local sudo (`portal_local_exec(use_sudo=True)`)** — the LOCAL
+  counterpart on the MCP server's OWN machine, using the reserved
+  `<local>` identity (illegal as a hostname, so it never collides with an
+  SSH host named `local` / `localhost`). Password source: `portal sudo
+  set-local` or a top-level `<local>:` section's `sudo_password_command` in
+  hosts.yaml. Same boundary (no password parameter; fed to `sudo -S -k`
+  on stdin), flagged `high_risk`, audited as `local_exec_sudo`.
 
 **Why a TTL agent cache here, when SSH password auth deliberately
 avoids one** (see directly above): SSH auth has a natural per-connection

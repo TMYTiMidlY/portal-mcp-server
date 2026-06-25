@@ -247,6 +247,11 @@ class ConnectionManager:
         # Surfaced to the agent via list_hosts() because a logger.error() on a
         # stdio MCP server's stderr is effectively invisible to the user.
         self._config_warnings: dict[str, list[str]] = {}
+        # sudo_password_command for the MCP server's OWN machine, read from a
+        # TOP-LEVEL ``<local>:`` section in hosts.yaml (a reserved key, NOT a host
+        # under ``hosts:``, so it never enters the host namespace). Consumed by
+        # ``resolve_sudo_password("<local>")`` for ``portal_local_exec(use_sudo=True)``.
+        self._local_sudo_password_command: Optional[str] = None
         self._pool: dict[str, list[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         # Clamp to >=1: pool_size 0 would make the overload branch call
@@ -339,6 +344,14 @@ class ConnectionManager:
                                else None),
                 source="hosts.yaml",
             )
+        # Top-level ``<local>:`` section (a reserved key sibling of ``hosts:``,
+        # NOT a host under it) carries the sudo_password_command for THIS machine's
+        # local_exec sudo. It is not a connectable host, so it stays out of the
+        # registry. The reserved key matches the ``<local>`` credential identity.
+        local_cfg = data.get("<local>")
+        if isinstance(local_cfg, dict):
+            self._local_sudo_password_command = (
+                local_cfg.get("sudo_password_command") or None)
         logger.info(f"Loaded {len(self._registry)} hosts from registry")
 
     def _resolve_path(self, path: Optional[str]) -> Optional[str]:
@@ -752,7 +765,19 @@ class ConnectionManager:
         ``sudo_password_command`` configured (so callers can fall back to the
         credential agent populated by ``portal sudo set``). Raises only if the
         command itself fails, matching ``_run_secret_command`` semantics.
+
+        The reserved local identity ``<local>`` resolves to the top-level
+        ``local:`` section's ``sudo_password_command`` instead of the host
+        registry (used by ``portal_local_exec(use_sudo=True)``).
         """
+        from .sudo_creds import LOCAL_SUDO_KEY
+        if host_name == LOCAL_SUDO_KEY:
+            cmd = self._local_sudo_password_command
+            if not cmd:
+                return None
+            return await self._run_secret_command(
+                cmd, host=host_name, kind="sudo_password_command",
+            )
         cfg = self._registry.get(host_name)
         if cfg is None or not cfg.sudo_password_command:
             return None

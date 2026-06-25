@@ -40,6 +40,7 @@ from .remote_bash import (
     remote_exec_with_env as _re_exec_env,
 )
 from .local_exec import local_exec_with_env as _local_exec_env
+from .local_exec import local_sudo_exec_with_env as _local_sudo_exec_env
 
 _log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
 try:
@@ -309,6 +310,29 @@ def _sudo_missing_message(host: str) -> str:
         f"  • Permanent (from a password manager): set `sudo_password_command` "
         f"for '{host}' in hosts.yaml to a command that prints the password "
         f"(e.g. `pass show sudo/{host}`).\n"
+        "Prefer an interactive input tool (e.g. ask_user) to ask the user to "
+        "run the first command and confirm when done; if you have no such "
+        "tool, tell them what to run and end your turn to wait."
+    )
+
+
+def _local_sudo_missing_message() -> str:
+    """Friendly error when no sudo password is available for the LOCAL machine.
+
+    Names BOTH ways to provide one so the agent can guide the user precisely.
+    The local identity is the reserved ``<local>`` — distinct from any SSH host
+    named ``local`` / ``localhost``.
+    """
+    return (
+        "No sudo password available for THIS machine (local_exec); the command "
+        "was NOT run. Ask the user to provide it out-of-band — never have them "
+        "paste a password into this conversation. Two ways:\n"
+        "  • Temporary (no-echo, cached with a TTL): run `portal sudo set-local` "
+        "in a separate terminal, type the password at the hidden prompt, then "
+        "retry this call.\n"
+        "  • Permanent (from a password manager): add a top-level `<local>:` "
+        "section to hosts.yaml with a `sudo_password_command` that prints the "
+        "password (e.g. `pass show sudo/this-box`).\n"
         "Prefer an interactive input tool (e.g. ask_user) to ask the user to "
         "run the first command and confirm when done; if you have no such "
         "tool, tell them what to run and end your turn to wait."
@@ -1225,12 +1249,14 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
 
 @mcp.tool()
 async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
+                            use_sudo: bool = False,
                             timeout: float = _default_command_timeout(),
                             ctx: "Context | None" = None) -> str:
     """Run a command on the **MCP SERVER's OWN machine** (local), NOT over SSH —
-    for anything on a remote host use portal_exec instead. Off by default (local
-    execution is a larger threat surface): the operator must set
-    PORTAL_ALLOW_LOCAL_EXEC=1 in the server process's env to enable it.
+    for anything on a remote host use portal_exec instead. This departs from the
+    project's core goal (driving *remote* hosts as if local); it's a useful but
+    off-target derivative, so it is OFF by default: the operator must explicitly
+    set PORTAL_ALLOW_LOCAL_EXEC=1 in the server process's env to enable it.
 
     ★ credentials: if the command needs a secret, don't have the user paste it
     into the chat — they run `portal secret set <name>` in their own terminal;
@@ -1239,8 +1265,13 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     lets a local script use an API token without the value ever entering this
     conversation.
 
-    No sudo here — for a privileged command, sudo is remote-only via
-    portal_exec(use_sudo=True).
+    ★ use_sudo: run the command under sudo on THIS machine (local_exec). The
+    sudo password is resolved out-of-band (NEVER an argument): the per-user
+    credential agent populated by `portal sudo set-local`, or a top-level
+    `<local>:` section's `sudo_password_command` in hosts.yaml. Fed to `sudo -S -k`
+    on stdin (never on argv/audit). Cannot be combined with secrets. This is the
+    LOCAL counterpart of portal_exec(use_sudo=True); the reserved identity
+    `<local>` is distinct from any SSH host named `local` / `localhost`.
 
     timeout (seconds, default 1h, operator-lowerable via PORTAL_DEFAULT_TIMEOUT):
     held open until the command exits or timeout elapses. Keepalive pings stop
@@ -1271,6 +1302,27 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     err = await _gate("<local>", command)
     if err:
         raise ToolError(f"BLOCKED: {err}")
+    if use_sudo and secrets:
+        raise ToolError("secrets and use_sudo cannot be combined in one call.")
+
+    if use_sudo:
+        from .sudo_creds import LOCAL_SUDO_KEY, resolve_sudo_password
+        password = await resolve_sudo_password(LOCAL_SUDO_KEY)
+        if password is None:
+            raise ToolError(_local_sudo_missing_message())
+        res = await _await_with_heartbeat(
+            _local_sudo_exec_env(command, password, {}, timeout=timeout), ctx)
+        res["high_risk"] = True
+        res["high_risk_note"] = (
+            "Ran a privileged sudo command on the MCP server's OWN machine "
+            "(local_exec) using the user's stored/cached local sudo password. "
+            "Briefly tell the user you did this (or only do so with their "
+            "explicit permission)."
+        )
+        audit_log("<local>", "sudo: " + command, res.get("exit_code", "?"),
+                  operation="local_exec_sudo")
+        return json.dumps(res, indent=2, ensure_ascii=False)
+
     env: dict[str, str] = {}
     values: list[str] = []
     if secrets:
@@ -1534,6 +1586,8 @@ def _kind_key_noun(kind: str) -> str:
 
 def _kind_prompt(kind: str, key: str) -> str:
     """getpass prompt for a kind/key."""
+    if kind == "sudo" and key == "<local>":
+        return "sudo password for THIS machine (local_exec): "
     return {
         "ssh": f"SSH login password for host '{key}': ",
         "passphrase": f"SSH key passphrase for host '{key}': ",
@@ -1970,6 +2024,20 @@ def _build_kind_subparser(sub, kind: str):
         "list",
         help=f"List every cached {_kind_label(kind)} ({noun}, fingerprint, TTL).")
     p_list.set_defaults(kind=kind, key=None, func=_kind_list_cli)
+
+    if kind == "sudo":
+        # Local-machine sudo for portal_local_exec(use_sudo=True). The reserved
+        # identity is `<local>` (illegal as a hostname, so it never collides with
+        # a remote named `local`/`localhost`). A dedicated verb means the user
+        # never has to type the angle-bracketed key or quote it for the shell.
+        p_setlocal = ksub.add_parser(
+            "set-local",
+            help="Prompt (no echo) for THIS machine's sudo password (used by "
+                 "portal_local_exec(use_sudo=True)) and cache it.")
+        p_setlocal.add_argument(
+            "--ttl", type=int, default=DEFAULT_TTL_SEC,
+            help=f"seconds before the cached value expires (default {DEFAULT_TTL_SEC})")
+        p_setlocal.set_defaults(kind="sudo", host="<local>", func=_kind_set_cli)
 
 
 def _credential_main(argv: list[str]) -> int:

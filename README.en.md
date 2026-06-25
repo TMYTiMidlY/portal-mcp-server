@@ -139,7 +139,7 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
 | `portal_exec` | **Default workhorse.** Stateless one-shot, result immediately (**split** stdout/stderr + exit code). `host` can be one host / a list / a `group_tag`; one `command` or a `commands` sequence; multi-host is parallel by default, `serialize=True` (+`delay_s`) does a rolling rollout; `use_sudo` / `secrets` inject credentials out-of-band. Reuses the connection pool — fast. |
 | `portal_shell` | Only when you need **cwd/env to persist across calls** (`cd`/`export`/venv) — one sticky interactive shell (bash/zsh) per host, with optional `commands=[…]` multi-step (state carried across steps). Output is the **combined** stream (a PTY merges stdout/stderr). Otherwise use `portal_exec` (faster, multi-host). |
 | `portal_job` | **Background** long tasks. `submit` returns a `job_id` instantly (remote `nohup` + tmp files, **keeps running even if the connection drops**), `poll` fetches incremental output / status, `cancel` kills, `list` lists. Job table is best-effort persisted, bounded, TTL-swept; the background path does **not** support sudo/secrets (use `portal_exec`). |
-| `portal_local_exec` | Run on the **MCP server's own machine** (not over SSH). Larger threat surface, disabled by default — the operator must set `PORTAL_ALLOW_LOCAL_EXEC=1`. Only for tasks that genuinely belong on the server host. |
+| `portal_local_exec` | Run on the **MCP server's own machine** (not over SSH). OFF by default — an off-target derivative of the project's remote-driving goal — so the operator must explicitly set `PORTAL_ALLOW_LOCAL_EXEC=1`. Only for tasks that genuinely belong on the server host. `use_sudo=True` runs it under local `sudo -S -k` (reserved `<local>` identity; password from `portal sudo set-local` or a top-level `<local>:` section's `sudo_password_command`; mutually exclusive with `secrets`). |
 | `portal_close_shell` | Close a host's sticky `portal_shell` session (the next `portal_shell` reopens). Rarely needed — only to reset a dirtied session. |
 
 > **★ Two layers of "reuse" — don't conflate them**: *connection reuse* = asyncssh's TCP/channel pool, shared by **every** tool, purely for **speed** (~280ms first connect, ~10-30ms per call after); *session reuse* = the one sticky interactive shell (bash/zsh) per host that only `portal_shell` uses, for **state continuity**. That shell session rides on a pooled channel; the two are orthogonal. And because the session is implicit plumbing, its state table lives in `portal_audit(view="sessions")` rather than carrying its own `list` the way tunnel/host/job do.
@@ -205,7 +205,7 @@ Rule of thumb: **don't mix `portal_*` and bash `ssh`/`scp` in the same task**, o
 | `portal_shell` | `(host, command='', commands=None, stop_on_error=True, timeout=3600.0)` |
 | `portal_exec` | `(host='', command='', commands=None, group_tag='', timeout=3600.0, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` |
 | `portal_job` | `(action, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal='TERM')` |
-| `portal_local_exec` | `(command, secrets=None, timeout=600.0)` |
+| `portal_local_exec` | `(command, secrets=None, use_sudo=False, timeout=600.0)` |
 | `portal_close_shell` | `(host)` |
 | `portal_read` | `(host, path, start=1, end=None, limit=None, encoding='utf-8')` |
 | `portal_patch` | `(host, path, file_hash, patches_json, encoding='utf-8', auto_newline=False)` |
@@ -711,6 +711,7 @@ There are five credential flows, each with a "password-manager style" (command s
 | **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `portal ssh set <host>` | host | agent in-memory TTL (default 900s, interactive entry only; command source fetched per connection) | on connect for `auth: password` / auto fallback when key auth refused |
 | **B. SSH key passphrase** | `passphrase_command` (hosts.yaml) | ✅ `portal passphrase set <host>` | host | agent in-memory TTL (default 900s) | local encrypted-key unlock |
 | **C. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent in-memory TTL (default 900s) | `portal_exec(use_sudo=True)` |
+| **C2. Local sudo execution** | `sudo_password_command` in a top-level `<local>:` section (hosts.yaml) | ✅ `portal sudo set-local` | `<local>` (reserved) | agent in-memory TTL (default 900s) | `portal_local_exec(use_sudo=True)` |
 | **D. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `portal secret set <name>` | name | agent in-memory TTL (default 900s, `--ttl` configurable) | `portal_exec(secrets=[…])` |
 | **E. Secret injection · local** | same as D (shares `secrets.yaml`) | same as D (shares `portal secret set`) | same as D | same as D | `portal_local_exec(secrets=[…])` |
 
@@ -886,6 +887,24 @@ Resolution order: **agent memory cache (2) → `sudo_password_command` (1) → e
 
 Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` executing `sudo -S -k -p '' -- bash -c <cmd>`; it does **not** reuse the persistent `portal_shell` session (`sudo -S` reads the password from stdin, which the persistent PTY has no channel to feed — a bare sudo there is auto-Ctrl-C'd and the session is preserved). Consequently a sudo command does **not** inherit `cd` / `export` state from prior `portal_shell` calls — bake any `cd … && …` into the same command. `-k` forces fresh auth each time; `-p ''` suppresses the prompt. Genuinely interactive sudo (needs a TTY, or a password change) still can't go through `portal_shell` — have the user run `ssh -t host sudo …`.
 
+#### Local sudo: `portal_local_exec(use_sudo=True)`
+
+The above is **remote** sudo. The MCP server itself often needs sudo too (it can't run "as the right user"), so `portal_local_exec(use_sudo=True)` runs a privileged command on the **MCP server's own machine** via local `sudo -S -k`, with the password likewise **never reaching the LLM / argv / disk**. It reuses the same credential resolution as the remote path; only the identity is the reserved **`<local>`**:
+
+- Temporary: `portal sudo set-local` (no echo, into the credential agent, `--ttl` configurable);
+- Permanent: a **top-level `<local>:` section** in `hosts.yaml` (a sibling of `hosts:`, a reserved key, **not** a host) carrying `sudo_password_command`:
+
+  ```yaml
+  hosts:
+    # ... your remote hosts ...
+  "<local>":                                # top-level reserved key; THIS machine's local_exec
+    sudo_password_command: pass show sudo/this-box
+  ```
+
+Resolution order mirrors the remote path: **agent cache → the top-level `<local>:` `sudo_password_command` → error**. `use_sudo` and `secrets` are mutually exclusive in one `portal_local_exec` call; the result is flagged `high_risk` and audited as `local_exec_sudo`.
+
+> **Don't conflate `<local>` / `local` / `localhost`**: `<local>` is the **reserved identity** for the MCP server's own machine (`portal_local_exec`, no SSH); the angle brackets are illegal in a hostname, so it **can never** collide with a real host. `localhost` is an **ordinary SSH host** (connects to `127.0.0.1:22`, needs sshd + key/password), used by every remote tool. If you name some remote `local` in `hosts.yaml` / ssh config, it is likewise just an **ordinary remote host**, unrelated to the local `<local>`.
+
 ### Named-secret injection: `secrets=[…]` + `portal secret set`
 
 Use this to hand a command an API token (a GitHub token, a deploy key, …) **without it entering the session history or being sent to the third-party LLM backend**. Same threat model as the sudo password: the agent passes only the secret's **name**, the server resolves the value and injects it as an **environment variable** into a one-shot command. The value travels via the process environment / SSH stdin (never on argv, so `ps` and the audit log can't see it), and any echo of it in the command output is redacted to `***` before the result reaches the agent.
@@ -893,7 +912,7 @@ Use this to hand a command an API token (a GitHub token, a deploy key, …) **wi
 > **Why not just `export`?** The pain point: a throwaway `export TOKEN=…` never reaches the agent's execution context — it only affects the new terminal *you* opened, while the agent runs commands in the MCP server process's environment, which can't see it. The only way to make the agent use it was to `vim` a `.env` / secrets file for it to source — which puts the secret back on disk and is easy to forget to delete. This design turns "hand over a key once" into a **native no-echo CLI prompt** (`portal secret set` uses `getpass`, just like typing a password), with the value living only in per-user credential agent memory and auto-expiring on a TTL — never on disk, never to the LLM.
 
 - Remote: `portal_exec(host, cmd, secrets=["github_token"])`, referencing `$GITHUB_TOKEN` (the uppercased name) in `cmd`.
-- Local: `portal_local_exec(cmd, secrets=["github_token"])` runs on the **MCP server host** (not over SSH). Local execution is a larger threat surface, so it is **disabled** unless the server process has `PORTAL_ALLOW_LOCAL_EXEC=1`.
+- Local: `portal_local_exec(cmd, secrets=["github_token"])` runs on the **MCP server host** (not over SSH). Local execution is an off-target derivative of the project's remote-driving goal, so it is **off by default** unless the server process has `PORTAL_ALLOW_LOCAL_EXEC=1`.
 
 Two sources (order: agent memory cache → `secrets.yaml`):
 

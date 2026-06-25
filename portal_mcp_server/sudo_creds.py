@@ -36,6 +36,16 @@ logger = logging.getLogger("portal_mcp.sudo")
 # Default lifetime of a cached sudo password before it must be re-entered.
 DEFAULT_TTL_SEC = 15 * 60
 
+# Reserved identity for the MCP server's OWN machine (used by
+# ``portal_local_exec(use_sudo=True)``). It deliberately reuses the ``<local>``
+# token that ``cli`` already uses for the local exec gate/audit, so the local
+# identity is the SAME string across gate, audit and the sudo credential key.
+# The angle brackets are illegal in a hostname (RFC 1123) and are not a literal
+# SSH host alias, so this can never collide with a real remote host named
+# ``local`` / ``localhost``: those stay ordinary remote hosts with their own
+# per-host sudo credentials.
+LOCAL_SUDO_KEY = "<local>"
+
 _cache_lock = threading.Lock()
 # host -> (password, expiry_monotonic)
 _cache: dict[str, tuple[str, float]] = {}
