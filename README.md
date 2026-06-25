@@ -962,8 +962,6 @@ hosts:
 - `ssh-config` —— 只在 ssh config 里（用户级或系统级 fallback）的别名；
 - `hosts.yaml+ssh-config` / `runtime+ssh-config` —— `use_ssh_config: true` 叠加：元数据（tags/sudo…）来自声明处，`host`/`user`/`port` 解析自 ssh config。
 
-读哪些 ssh config 文件由 `PORTAL_SSH_CONFIG` 决定（`ssh -F` 等价物，详见[环境变量 → 文件路径](#文件路径)）：默认用户级 `~/.ssh/config` + 系统级 `/etc/ssh/ssh_config` fallback；设成绝对路径则只读该文件（抑制系统级）；设成 `none` 则一个都不读（等价 `ssh -F none`，只剩 hosts.yaml）。
-
 **字段对照 + 渐进补全**：基础字段全有（`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`），常用高级字段 `proxy_jump`（→ asyncssh `tunnel`）、`keepalive_interval`（→ ServerAliveInterval）、`forward_agent`（→ agent 转发）现已**原生支持**；其余 ssh config 字段走 `use_ssh_config: true` 叠加。
 
 ## 安全

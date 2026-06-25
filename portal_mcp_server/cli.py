@@ -418,10 +418,12 @@ async def portal_host(action: Literal["list", "register", "remove"], name: str =
             # alias, register an overlay that takes its connection params from
             # there; otherwise we have no target, so ask for `host`.
             if not mgr.has_ssh_config_alias(name):
+                from .paths import ssh_config_source_label
+                label = ssh_config_source_label()
                 raise ToolError(
-                    f'action="register" needs `host` — no ~/.ssh/config Host '
-                    f'alias matches {name!r}. Either pass host=<ip/hostname> or '
-                    f'add a `Host {name}` stanza to ~/.ssh/config first.')
+                    f'action="register" needs `host` — no Host alias {name!r} '
+                    f'found in {label}. Either pass host=<ip/hostname> or '
+                    f'add a `Host {name}` stanza to {label} first.')
             # Gate on the alias name (the actual target lives in ssh config and
             # is not visible here; tools gate on the alias name anyway).
             err = await _gate(name)

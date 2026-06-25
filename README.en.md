@@ -941,6 +941,31 @@ So "waiting" surfaces only as a normal conversational turn handoff: the `getpass
 
 Step 2 is controlled by `PORTAL_SSH_CONFIG` (see [File paths](#file-paths)): an absolute path reads only that file, unset reads user + system, and **`none` disables step 2 entirely** — host resolution then comes solely from hosts.yaml. `portal_host(action="list")` lists hosts from both steps, each tagged with a `source` field.
 
+**Precedence (no field-level merge)** — once a host name appears in `hosts.yaml`, it **fully overrides** ssh config; ssh config isn't consulted for it at all (no "sudo from hosts.yaml, ProxyJump inherited from ssh config" blend). Two footguns are surfaced as warnings (never blocking), delivered via `portal_host(action="list")`'s `warnings` array (a stdio server's stderr is invisible to the user):
+
+- a name defined on **both** sides → hosts.yaml silently wins; ssh config's `IdentityFile`/`ProxyJump`/`User` are ignored;
+- `use_ssh_config: true` but no matching ssh-config alias → asyncssh falls back to a default DNS+user+key connection, probably not what you wanted.
+
+**Overlay recipe** (connection from ssh config, metadata from hosts.yaml):
+
+```yaml
+hosts:
+  web01:                          # key MUST == the Host alias in ssh config
+    use_ssh_config: true          # all connection params come from ssh config (HostName/User/Port/IdentityFile/ProxyJump…)
+    tags: [web, prod]             # portal-only: portal_exec's group_tag
+    sudo_password_command: pass show sudo/web01   # portal-only
+```
+
+`portal_host(action="register", name="web01")` with only `name` auto-checks ssh config — a matching alias is registered as exactly this overlay.
+
+**`list` lists both steps**: `portal_host(action="list")` returns hosts.yaml / runtime entries **and** enumerates every `Host` alias in the ssh config (parsed by asyncssh, `Include`-aware, excluding `*`/`?`/`!` patterns), resolving real `HostName`/`User`/`Port`. Each entry carries a `source` field:
+
+- `hosts.yaml` / `runtime` — from the hosts.yaml file / a runtime `register`; connection params are the fields themselves;
+- `ssh-config` — an alias found only in ssh config (user-level or the system fallback);
+- `hosts.yaml+ssh-config` / `runtime+ssh-config` — a `use_ssh_config: true` overlay: metadata (tags/sudo…) from the declared origin, `host`/`user`/`port` resolved from ssh config.
+
+**Field mapping + incremental coverage**: the basics are all there (`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`); the common advanced fields `proxy_jump` (→ asyncssh `tunnel`), `keepalive_interval` (→ ServerAliveInterval), `forward_agent` (→ agent forwarding) are now **natively supported**; any remaining ssh config field goes through the `use_ssh_config: true` overlay.
+
 ## Security
 
 - **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).

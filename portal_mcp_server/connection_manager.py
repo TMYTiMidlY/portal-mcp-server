@@ -364,6 +364,13 @@ class ConnectionManager:
         from .paths import ssh_config_files
         return ssh_config_files()
 
+    def _ssh_config_label(self) -> str:
+        """User-facing name of the active OpenSSH client config source (honours
+        ``PORTAL_SSH_CONFIG``), for warnings/messages — see
+        :func:`paths.ssh_config_source_label`."""
+        from .paths import ssh_config_source_label
+        return ssh_config_source_label()
+
     def _parse_ssh_config(self, config: SSHClientConfig,
                           files: list[Path]) -> None:
         """Parse ``files`` into ``config`` in order, each with its own directory
@@ -534,16 +541,17 @@ class ConnectionManager:
             ignored); the fix is the use_ssh_config overlay recipe.
         """
         exists = self.has_ssh_config_alias(name)
+        label = self._ssh_config_label()
         if use_ssh_config and not exists:
-            return [(f"host '{name}' sets use_ssh_config: true but ~/.ssh/config "
+            return [(f"host '{name}' sets use_ssh_config: true but {label} "
                      "has no matching Host alias; asyncssh will fall back to a "
                      f"default connection (DNS lookup of '{name}', default user "
                      "and key), which is probably not what you intended. Add a "
-                     f"`Host {name}` stanza to ~/.ssh/config or set host/user/"
+                     f"`Host {name}` stanza to {label} or set host/user/"
                      "port explicitly in hosts.yaml.")]
         if (not use_ssh_config) and exists:
             return [(f"host '{name}' is defined in BOTH hosts.yaml and "
-                     "~/.ssh/config; hosts.yaml takes precedence and ssh "
+                     f"{label}; hosts.yaml takes precedence and ssh "
                      "config is ignored for it (no field-level merge). To use "
                      "ssh config's connection params and only add metadata "
                      "(tags / sudo_password_command / ...) here, set "
@@ -581,8 +589,9 @@ class ConnectionManager:
             # Re-registering cleanly clears a stale overlay warning.
             self._config_warnings.pop(name, None)
         if use_ssh_config:
-            logger.info(f"Registered host: {name} (via ~/.ssh/config)")
-            return f"Host '{name}' registered (connection via ~/.ssh/config)"
+            label = self._ssh_config_label()
+            logger.info(f"Registered host: {name} (via {label})")
+            return f"Host '{name}' registered (connection via {label})"
         logger.info(f"Registered host: {name} ({user}@{host}:{port})")
         return f"Host '{name}' registered: {user}@{host}:{port}"
 
@@ -932,12 +941,13 @@ class ConnectionManager:
             ssh_cfg_host = self._try_load_from_ssh_config(host_name)
             if ssh_cfg_host is not None:
                 self._registry[host_name] = ssh_cfg_host
-                logger.info(f"Auto-registered host '{host_name}' from ~/.ssh/config")
+                logger.info(f"Auto-registered host '{host_name}' from "
+                            f"{self._ssh_config_label()}")
             else:
                 raise ValueError(
                     f"Unknown host: '{host_name}'. "
                     "Register it explicitly, define it in hosts.yaml, "
-                    "or add a Host alias to ~/.ssh/config."
+                    f"or add a Host alias to {self._ssh_config_label()}."
                 )
         cfg = self._registry[host_name]
         lock = await self._get_lock(host_name)

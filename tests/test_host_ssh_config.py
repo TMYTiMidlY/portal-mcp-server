@@ -112,7 +112,7 @@ async def test_register_name_only_uses_ssh_config(home, wired):
 
 async def test_register_name_only_without_alias_errors(home, wired):
     _ssh_config(home, "Host other\n  HostName 9.9.9.9\n")
-    with pytest.raises(ToolError, match=r"no ~/.ssh/config Host alias"):
+    with pytest.raises(ToolError, match=r"no Host alias 'web01' found in"):
         await cli.portal_host(action="register", name="web01")
 
 
@@ -343,4 +343,17 @@ async def test_none_passes_empty_config_to_asyncssh(home, tmp_path, monkeypatch)
     cfg = cm.HostConfig(name="web01", host="web01", use_ssh_config=True)
     kwargs = await m._build_connect_kwargs(cfg)
     assert kwargs["config"] == []
+
+
+def test_overlay_warning_names_active_config_source(home, tmp_path, monkeypatch):
+    """The hosts.yaml↔ssh-config warnings name the *active* config source
+    (PORTAL_SSH_CONFIG), not a hardcoded ~/.ssh/config."""
+    alt = tmp_path / "alt_config"
+    alt.write_text("Host other\n  HostName 9.9.9.9\n")     # web01 absent here
+    monkeypatch.setenv("PORTAL_SSH_CONFIG", str(alt))
+    yml = _hosts_yaml(tmp_path, "hosts:\n  web01:\n    use_ssh_config: true\n")
+    m = cm.ConnectionManager(hosts_yaml=yml)
+    warns = m.config_warnings().get("web01", [])
+    assert warns and str(alt) in warns[0]
+    assert "~/.ssh/config" not in warns[0]
 

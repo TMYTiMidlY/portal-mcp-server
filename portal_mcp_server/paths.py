@@ -179,17 +179,19 @@ def _ssh_config_override() -> str | None:
     return None
 
 
-def ssh_config_path() -> Path:
-    """User-level OpenSSH client config path for display/messages.
-
-    Returns the ``PORTAL_SSH_CONFIG`` path when it names a file, else the OpenSSH
-    default ``~/.ssh/config`` (also returned for ``PORTAL_SSH_CONFIG=none``,
-    which means "read nothing" — see :func:`ssh_config_files`).
+def ssh_config_source_label() -> str:
+    """Human-readable name of the active OpenSSH client config source, for
+    user-facing warnings/messages. Honours ``PORTAL_SSH_CONFIG`` (the ``ssh -F``
+    analogue): the override path, a "disabled" note for ``none``, or the
+    conventional ``~/.ssh/config`` default. :func:`ssh_config_files` remains the
+    authoritative list of files actually read.
     """
     ov = _ssh_config_override()
-    if ov and ov != _SSH_CONFIG_NONE:
-        return Path(ov)
-    return Path("~/.ssh/config").expanduser()
+    if ov == _SSH_CONFIG_NONE:
+        return "the OpenSSH client config (disabled via PORTAL_SSH_CONFIG=none)"
+    if ov:                                          # absolute override path
+        return ov
+    return "~/.ssh/config"
 
 
 def system_ssh_config_path() -> Path:

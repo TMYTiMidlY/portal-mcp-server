@@ -147,23 +147,28 @@ def test_resolved_paths_are_under_platform_dirs(monkeypatch, tmp_path):
 
 # ── OpenSSH client config discovery ──────────────────────────────────────────
 
-def test_ssh_config_path_default(monkeypatch, tmp_path):
-    monkeypatch.setenv("HOME", str(tmp_path))
-    assert paths.ssh_config_path() == tmp_path / ".ssh" / "config"
+def test_ssh_config_source_label_default():
+    assert paths.ssh_config_source_label() == "~/.ssh/config"
 
 
-def test_ssh_config_path_override_absolute_is_honoured(monkeypatch, tmp_path):
+def test_ssh_config_source_label_override_absolute(monkeypatch, tmp_path):
     target = tmp_path / "myconfig"
     monkeypatch.setenv("PORTAL_SSH_CONFIG", str(target))
-    assert paths.ssh_config_path() == target
+    assert paths.ssh_config_source_label() == str(target)
+
+
+def test_ssh_config_source_label_none(monkeypatch):
+    monkeypatch.setenv("PORTAL_SSH_CONFIG", "none")
+    label = paths.ssh_config_source_label()
+    assert "PORTAL_SSH_CONFIG=none" in label and "disabled" in label
 
 
 def test_ssh_config_override_relative_is_rejected(monkeypatch, caplog, tmp_path):
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PORTAL_SSH_CONFIG", "relative/config")
     caplog.set_level(logging.WARNING, logger="portal_mcp_server.paths")
-    result = paths.ssh_config_path()
-    assert result == tmp_path / ".ssh" / "config"     # fell back to the default
+    # Relative value is warned + ignored, so the label falls back to the default.
+    assert paths.ssh_config_source_label() == "~/.ssh/config"
     assert any(
         "PORTAL_SSH_CONFIG" in r.message and "non-absolute" in r.message
         for r in caplog.records
@@ -218,8 +223,8 @@ def test_ssh_config_none_reads_nothing(monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "system_ssh_config_path", lambda: system)
     monkeypatch.setenv("PORTAL_SSH_CONFIG", "none")
     assert paths.ssh_config_files() == []
-    # ssh_config_path (display only) still reports the conventional default.
-    assert paths.ssh_config_path() == home / ".ssh" / "config"
+    # The label reports that ssh config is disabled (display only).
+    assert "PORTAL_SSH_CONFIG=none" in paths.ssh_config_source_label()
 
 
 def test_ssh_config_none_is_case_insensitive(monkeypatch, tmp_path):
