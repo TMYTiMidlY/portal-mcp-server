@@ -23,7 +23,7 @@ async def test_exec_sudo_result_is_flagged_high_risk(monkeypatch):
     async def fake_resolve(host):
         return "pw"
 
-    async def fake_sudo(h, cmd, password, timeout=0):
+    async def fake_sudo(h, cmd, password, env=None, timeout=0):
         return {"host": h, "command": cmd, "exit_code": 0,
                 "stdout": "root", "stderr": ""}
 
@@ -32,6 +32,38 @@ async def test_exec_sudo_result_is_flagged_high_risk(monkeypatch):
     out = json.loads(await cli.portal_exec("web01", "id", use_sudo=True))
     assert out["high_risk"] is True
     assert "high_risk_note" in out and out["high_risk_note"]
+
+
+@pytest.mark.asyncio
+async def test_exec_sudo_and_secrets_coexist(monkeypatch, tmp_path):
+    """portal_exec(use_sudo=True, secrets=[...]) resolves the secret, passes it
+    to the sudo exec as env (delivered on stdin inside the elevated shell), and
+    redacts the value from the returned stdout/stderr."""
+    from portal_mcp_server import secrets_store as ss
+
+    monkeypatch.setenv("PORTAL_SECRETS_YAML", str(tmp_path / "missing.yaml"))
+    ss.reload_registry()
+    ss.clear_secret()
+    ss.cache_secret("github_token", "ghp_SECRET", ttl=60)
+
+    async def fake_resolve(host):
+        return "pw"
+
+    captured = {}
+
+    async def fake_sudo(h, cmd, password, env=None, timeout=0):
+        captured["env"] = dict(env or {})
+        return {"host": h, "command": cmd, "exit_code": 0,
+                "stdout": "token=ghp_SECRET", "stderr": ""}
+
+    monkeypatch.setattr(sudo_creds, "resolve_sudo_password", fake_resolve)
+    monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo)
+    out = json.loads(await cli.portal_exec("web01", "echo $GITHUB_TOKEN",
+                                           use_sudo=True, secrets=["github_token"]))
+    assert captured["env"] == {"GITHUB_TOKEN": "ghp_SECRET"}
+    assert "ghp_SECRET" not in out["stdout"]     # redacted out of the result
+    assert "***" in out["stdout"]
+    assert out["high_risk"] is True
 
 
 @pytest.mark.asyncio
@@ -187,7 +219,7 @@ async def test_commands_under_sudo_run_each_separately(monkeypatch):
     async def fake_resolve(host):
         return "pw"
 
-    async def fake_sudo(h, cmd, password, timeout=0):
+    async def fake_sudo(h, cmd, password, env=None, timeout=0):
         seen.append(cmd)
         return {"host": h, "command": cmd, "exit_code": 0,
                 "stdout": "", "stderr": ""}
@@ -211,7 +243,7 @@ async def test_multiline_sudo_command_newlines_preserved(monkeypatch):
     async def fake_resolve(host):
         return "pw"
 
-    async def fake_sudo(h, cmd, password, timeout=0):
+    async def fake_sudo(h, cmd, password, env=None, timeout=0):
         seen.append(cmd)
         return {"host": h, "command": cmd, "exit_code": 0,
                 "stdout": "", "stderr": ""}

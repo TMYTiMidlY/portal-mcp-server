@@ -340,6 +340,7 @@ def remote_bash_status() -> Dict[str, str]:
 
 
 async def remote_sudo_exec(host: str, command: str, password: str,
+                           env: "dict | None" = None,
                            timeout: float = 3600.0) -> Dict[str, object]:
     """Run a command under ``sudo`` on <host>, feeding the password via stdin.
 
@@ -349,6 +350,12 @@ async def remote_sudo_exec(host: str, command: str, password: str,
     auth so a previously-cached sudo ticket can't mask a wrong password. cwd/env
     from the persistent ``portal_shell`` session therefore do NOT apply here.
 
+    ``env`` (already-resolved ``ENV_VAR_NAME -> value`` secrets) is injected
+    WITHOUT relying on sudoers ``env_keep``: each value is fed on stdin right
+    after the password and read back inside the elevated shell (see
+    :func:`secrets_store.sudo_stdin_secret_script`), so it survives sudo's
+    ``env_reset`` and never lands on argv.
+
     Returns ``{host, command, exit_code, stdout, stderr, elapsed_s}`` —
     ``conn.run`` natively splits the streams (sudo auth failures land on
     stderr). The password is never logged and never echoed (``sudo -S`` reads
@@ -356,14 +363,19 @@ async def remote_sudo_exec(host: str, command: str, password: str,
     """
     from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
     from .safety import quote_shell
+    from . import secrets_store
 
+    env = env or {}
+    names = list(env.keys())
+    body = secrets_store.sudo_stdin_secret_script(command, names)
     mgr = get_manager()
     conn = await mgr.get_connection(host)
-    wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(command)}"
+    wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(body)}"
+    stdin_data = password + "\n" + "".join(f"{env[n]}\n" for n in names)
     t0 = time.monotonic()
     try:
         result = await asyncio.wait_for(
-            conn.run(wrapped, input=password + "\n", check=False,
+            conn.run(wrapped, input=stdin_data, check=False,
                      errors=DEFAULT_DECODE_ERRORS),
             timeout=timeout,
         )

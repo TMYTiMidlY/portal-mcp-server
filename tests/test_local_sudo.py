@@ -124,14 +124,57 @@ async def test_resolve_local_none_when_no_source(monkeypatch, tmp_path):
 #  portal_local_exec(use_sudo=True) behaviour
 # ────────────────────────────────────────────────────────────────────────────
 
+def test_sudo_stdin_secret_script_format():
+    from portal_mcp_server import secrets_store as ss
+    # no secrets -> command unchanged
+    assert ss.sudo_stdin_secret_script("id", []) == "id"
+    # one secret -> read+export preamble then the command
+    assert ss.sudo_stdin_secret_script("echo $GITHUB_TOKEN", ["GITHUB_TOKEN"]) == (
+        "IFS= read -r GITHUB_TOKEN\n"
+        "export GITHUB_TOKEN\n"
+        "echo $GITHUB_TOKEN"
+    )
+    # multiple secrets keep order
+    assert ss.sudo_stdin_secret_script("cmd", ["A", "B"]) == (
+        "IFS= read -r A\nIFS= read -r B\nexport A B\ncmd"
+    )
+
+
 @pytest.mark.asyncio
-async def test_use_sudo_and_secrets_mutually_exclusive(monkeypatch, tmp_path):
-    from portal_mcp_server import cli, security
+async def test_local_sudo_injects_secrets(monkeypatch, tmp_path):
+    """use_sudo and secrets now COEXIST: the secret is resolved, passed to the
+    sudo exec as env (delivered on stdin inside the elevated shell, bypassing
+    sudo's env_reset), and redacted from the returned output."""
+    from portal_mcp_server import cli, security, sudo_creds
+    from portal_mcp_server import secrets_store as ss
+
     monkeypatch.setenv("PORTAL_ALLOW_LOCAL_EXEC", "1")
+    monkeypatch.setenv("PORTAL_SECRETS_YAML", str(tmp_path / "missing.yaml"))
+    ss.reload_registry()
     pol = security.SecurityPolicy(policies_yaml=tmp_path / "none.yaml")
     monkeypatch.setattr(cli, "get_policy", lambda: pol)
-    with pytest.raises(ToolError, match="cannot be combined"):
-        await cli.portal_local_exec(command="id", secrets=["x"], use_sudo=True)
+    sudo_creds.clear_sudo_password()
+    sudo_creds.cache_sudo_password("<local>", "PW", ttl=60)
+    ss.clear_secret()
+    ss.cache_secret("github_token", "ghp_SECRET", ttl=60)
+
+    captured = {}
+
+    async def fake_local_sudo(command, password, env, timeout=600.0):
+        captured["password"] = password
+        captured["env"] = dict(env)
+        captured["command"] = command
+        return {"output": "token=ghp_SECRET", "exit_code": 0}
+
+    monkeypatch.setattr(cli, "_local_sudo_exec_env", fake_local_sudo)
+
+    out = await cli.portal_local_exec("echo $GITHUB_TOKEN", use_sudo=True,
+                                      secrets=["github_token"])
+    assert captured["password"] == "PW"
+    assert captured["env"] == {"GITHUB_TOKEN": "ghp_SECRET"}
+    assert "ghp_SECRET" not in out          # redacted out of the result
+    assert "***" in out
+    assert '"high_risk": true' in out
 
 
 @pytest.mark.asyncio

@@ -1102,12 +1102,14 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
         (the per-user credential agent from `portal sudo set <host>`, or the
         host's sudo_password_command) — never from you. Refused with guidance if
         no source is set. Consumes the command's stdin (tools that read their
-        own stdin aren't supported under sudo). Cannot be combined with secrets.
+        own stdin aren't supported under sudo). May be combined with secrets
+        (their values ride the same stdin channel, after the password).
 
     secrets: a list of NAMES, not values (e.g. ["github_token"]); each is
         resolved server-side, fed over SSH stdin (never on argv/audit), exported
         as its uppercased env var ($GITHUB_TOKEN), and redacted to *** in the
-        output. Cannot be combined with use_sudo.
+        output. May be combined with use_sudo (values are read+exported inside
+        the sudo'd shell, so sudo's env_reset can't strip them).
 
     Returns one dict {host, command, exit_code, stdout, stderr, elapsed_s} for a
     single host + command, else a JSON list (a multi-command host carries {host,
@@ -1149,9 +1151,6 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     else:
         raise ToolError("provide command (str) or commands (list of str).")
 
-    if use_sudo and secrets:
-        raise ToolError("secrets and use_sudo cannot be combined in one call.")
-
     # ── Gate every (host, command) pair up front ──
     err = await _gate_exec(hosts, cmd_list)
     if err:
@@ -1170,6 +1169,30 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     from .sudo_creds import resolve_sudo_password
 
     async def run_one(h: str, cmd: str) -> dict:
+        if use_sudo:
+            password = await resolve_sudo_password(h)
+            if password is None:
+                if multi_host:
+                    return {"host": h, "command": cmd, "exit_code": -1,
+                            "stdout": "", "stderr": f"no sudo password for {h!r}",
+                            "error": "no sudo password available"}
+                raise ToolError(_sudo_missing_message(h))
+            res = await _re_sudo_exec(h, cmd, password,
+                                      env=secret_env or {}, timeout=timeout)
+            if secret_values:
+                res["stdout"] = secrets_store.redact(res.get("stdout", ""), secret_values)
+                res["stderr"] = secrets_store.redact(res.get("stderr", ""), secret_values)
+            res["high_risk"] = True
+            note = (f"Ran a privileged sudo command on {h!r} using the user's "
+                    "stored/cached sudo password")
+            if secrets:
+                note += f", with stored secret(s) [{','.join(secrets)}] injected"
+            note += (". Briefly tell the user you did this (or only do so with "
+                     "their explicit permission).")
+            res["high_risk_note"] = note
+            audit_log(h, "sudo: " + cmd + secret_label, res.get("exit_code", "?"),
+                      operation="exec_sudo")
+            return res
         if secret_env is not None:
             res = await _re_exec_env(h, cmd, secret_env, timeout=timeout)
             res["stdout"] = secrets_store.redact(res.get("stdout", ""), secret_values)
@@ -1183,24 +1206,6 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
             )
             audit_log(h, cmd + secret_label, res.get("exit_code", "?"),
                       operation="exec_secrets")
-            return res
-        if use_sudo:
-            password = await resolve_sudo_password(h)
-            if password is None:
-                if multi_host:
-                    return {"host": h, "command": cmd, "exit_code": -1,
-                            "stdout": "", "stderr": f"no sudo password for {h!r}",
-                            "error": "no sudo password available"}
-                raise ToolError(_sudo_missing_message(h))
-            res = await _re_sudo_exec(h, cmd, password, timeout=timeout)
-            res["high_risk"] = True
-            res["high_risk_note"] = (
-                f"Ran a privileged sudo command on {h!r} using the user's "
-                "stored/cached sudo password. Briefly tell the user you did this "
-                "(or only do so with their explicit permission)."
-            )
-            audit_log(h, "sudo: " + cmd, res.get("exit_code", "?"),
-                      operation="exec_sudo")
             return res
         # Plain one-shot path: ssh_exec runs over the pool and audits as "exec".
         res = await ssh_exec(h, cmd, timeout=int(timeout))
@@ -1269,8 +1274,9 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     sudo password is resolved out-of-band (NEVER an argument): the per-user
     credential agent populated by `portal sudo set-local`, or a top-level
     `<local>:` section's `sudo_password_command` in hosts.yaml. Fed to `sudo -S -k`
-    on stdin (never on argv/audit). Cannot be combined with secrets. This is the
-    LOCAL counterpart of portal_exec(use_sudo=True); the reserved identity
+    on stdin (never on argv/audit). May be combined with secrets (their values
+    ride the same stdin channel, read+exported inside the sudo'd shell). This is
+    the LOCAL counterpart of portal_exec(use_sudo=True); the reserved identity
     `<local>` is distinct from any SSH host named `local` / `localhost`.
 
     timeout (seconds, default 1h, operator-lowerable via PORTAL_DEFAULT_TIMEOUT):
@@ -1302,24 +1308,33 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     err = await _gate("<local>", command)
     if err:
         raise ToolError(f"BLOCKED: {err}")
-    if use_sudo and secrets:
-        raise ToolError("secrets and use_sudo cannot be combined in one call.")
-
     if use_sudo:
         from .sudo_creds import LOCAL_SUDO_KEY, resolve_sudo_password
+        from . import secrets_store
         password = await resolve_sudo_password(LOCAL_SUDO_KEY)
         if password is None:
             raise ToolError(_local_sudo_missing_message())
+        sudo_env: dict[str, str] = {}
+        sudo_values: list[str] = []
+        if secrets:
+            sudo_env, sudo_values, serr = await _resolve_secrets(secrets)
+            if serr:
+                raise ToolError(serr)
         res = await _await_with_heartbeat(
-            _local_sudo_exec_env(command, password, {}, timeout=timeout), ctx)
+            _local_sudo_exec_env(command, password, sudo_env, timeout=timeout), ctx)
+        res["output"] = secrets_store.redact(res.get("output", ""), sudo_values)
         res["high_risk"] = True
-        res["high_risk_note"] = (
+        note = (
             "Ran a privileged sudo command on the MCP server's OWN machine "
-            "(local_exec) using the user's stored/cached local sudo password. "
-            "Briefly tell the user you did this (or only do so with their "
-            "explicit permission)."
+            "(local_exec) using the user's stored/cached local sudo password"
         )
-        audit_log("<local>", "sudo: " + command, res.get("exit_code", "?"),
+        if secrets:
+            note += f", with stored secret(s) [{','.join(secrets)}] injected"
+        note += (". Briefly tell the user you did this (or only do so with their "
+                 "explicit permission).")
+        res["high_risk_note"] = note
+        label = f"  [secrets: {','.join(secrets)}]" if secrets else ""
+        audit_log("<local>", "sudo: " + command + label, res.get("exit_code", "?"),
                   operation="local_exec_sudo")
         return json.dumps(res, indent=2, ensure_ascii=False)
 

@@ -60,31 +60,39 @@ async def local_sudo_exec_with_env(command: str, password: str, env: dict,
     on stdin.
 
     Mirrors :func:`local_exec_with_env` but wraps the command in
-    ``sudo -S -k -p '' -- bash -c <command>`` and writes the password to the
+    ``sudo -S -k -p '' -- bash -c <body>`` and writes the password to the
     child's **stdin** (never on argv, so it stays out of ``ps`` and the audit
     log). ``-k`` forces a fresh auth so a cached sudo ticket can't mask a wrong
-    password; ``-p ''`` suppresses the prompt text. ``env`` maps already-resolved
-    ``ENV_VAR_NAME -> value`` and is overlaid on ``os.environ``. Returns
+    password; ``-p ''`` suppresses the prompt text.
+
+    ``env`` maps already-resolved ``ENV_VAR_NAME -> value``. Secrets are NOT
+    injected via the process environment (sudo's ``env_reset`` would strip them);
+    instead each value is fed on stdin right after the password and read back
+    inside the elevated shell (see
+    :func:`secrets_store.sudo_stdin_secret_script`), so the value reaches the
+    command without any sudoers config and without touching argv. Returns
     ``{output, exit_code}``; the caller redacts the output.
     """
     from .safety import quote_shell
+    from . import secrets_store
 
-    full_env = {**os.environ, **{k: str(v) for k, v in env.items()}}
-    wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(command)}"
+    names = list(env.keys())
+    body = secrets_store.sudo_stdin_secret_script(command, names)
+    wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(body)}"
+    stdin_data = password + "\n" + "".join(f"{env[n]}\n" for n in names)
     try:
         proc = await asyncio.create_subprocess_shell(
             wrapped,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=full_env,
         )
     except OSError as e:
         return {"output": f"[error] failed to start command: {e}", "exit_code": -1}
 
     try:
         out_b, err_b = await asyncio.wait_for(
-            proc.communicate(input=(password + "\n").encode()), timeout=timeout)
+            proc.communicate(input=stdin_data.encode()), timeout=timeout)
     except asyncio.TimeoutError:
         try:
             proc.kill()

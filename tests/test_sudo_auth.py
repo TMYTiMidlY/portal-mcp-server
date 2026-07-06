@@ -174,7 +174,7 @@ async def test_sudo_password_never_in_audit_or_output(monkeypatch, tmp_path):
 
     captured = {}
 
-    async def fake_sudo_exec(host, cmd, password, timeout=60):
+    async def fake_sudo_exec(host, cmd, password, env=None, timeout=60):
         captured["password"] = password  # the real impl feeds this on stdin only
         return {"host": host, "command": cmd, "exit_code": 0,
                 "stdout": "uid=0(root)", "stderr": ""}

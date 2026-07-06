@@ -77,6 +77,35 @@ def env_var_name(name: str) -> str:
     return ev
 
 
+def sudo_stdin_secret_script(command: str, env_names: list) -> str:
+    """Build the ``bash -c`` body for a sudo'd command that needs secrets.
+
+    sudo's default ``env_reset`` would strip any environment variable injected
+    when launching the shell, and putting values on argv would leak them via
+    ``ps``. Instead each secret value is fed on **stdin** (one line per name,
+    AFTER the sudo password) and read back inside the already-elevated shell::
+
+        IFS= read -r GITHUB_TOKEN
+        export GITHUB_TOKEN
+        <command>
+
+    Because the ``export`` runs inside the sudo'd shell (after env_reset) and the
+    value travels on stdin, the secret reaches ``command`` without any sudoers
+    ``env_keep`` config and without ever appearing on argv or in the audit log.
+    The caller feeds ``password + "\\n"`` then each value + ``"\\n"`` in
+    ``env_names`` order. With no names this returns ``command`` unchanged.
+
+    ``env_names`` are uppercased identifiers (from :func:`env_var_name`), so
+    interpolating them into the script is safe.
+    """
+    if not env_names:
+        return command
+    lines = [f"IFS= read -r {n}" for n in env_names]
+    lines.append("export " + " ".join(env_names))
+    lines.append(command)
+    return "\n".join(lines)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # secrets.yaml registry
 # ─────────────────────────────────────────────────────────────────────
