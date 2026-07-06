@@ -133,8 +133,10 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 | `portal_exec` | **默认主力**。无状态一次性，立刻拿结果（**分离的** stdout/stderr + exit code）。`host` 可单机 / 列表 / `group_tag`；`command` 单条或 `commands` 序列；多机默认并行，`serialize=True`(+`delay_s`) 走滚动；`use_sudo` / `secrets` 带外注入凭据。复用连接池，快。 |
 | `portal_shell` | 需要 **cwd/env 跨调用保留**（`cd`/`export`/venv）时才用——每 host 一个粘性交互式 shell（bash/zsh），可选 `commands=[…]` 多步（状态跨步延续）。输出是**合并**流（PTY 把 stdout/stderr 并了）。否则用 `portal_exec`（更快、可多机）。 |
 | `portal_job` | **后台**长任务。`submit` 秒回 `job_id`（远端 `nohup`+tmp 文件，**连接断了也接着跑**），`poll` 取增量输出 / 状态，`cancel` 杀，`list` 列。job 表内存态、有上限、TTL 清理；后台**不支持** sudo/secrets（用 `portal_exec`）。 |
-| `portal_local_exec` | 在 **MCP server 自己机器**上跑（不走 SSH）——偏离了本项目以远端编排为核心的设计目标，是实用但 off-target 的衍生功能，故默认关闭，须 operator 显式设 `PORTAL_ALLOW_LOCAL_EXEC=1`。`use_sudo=True` 走本地 `sudo -S -k`（保留身份 `<local>`，密码来自 `portal sudo set-local` 或顶层保留段 `<local>:` 的 `sudo_password_command`）；`use_sudo` 与 `secrets` 可同时使用（secret 值随 stdin 在密码之后送入、在提权 shell 内 read+export，绕过 sudo 的 env_reset）。 |
+| `portal_local_exec` | 在 **MCP server 自己机器**上跑（不走 SSH）——偏离了本项目以远端编排为核心的设计目标，是实用但 off-target 的衍生功能，故默认关闭，须 operator 显式设 `PORTAL_ALLOW_LOCAL_EXEC=1`。`use_sudo=True` 走本地 `sudo -S -k`（保留身份 `<local>`，密码来自 `portal sudo set-local` 或顶层保留段 `<local>:` 的 `sudo_password_command`），可与 `secrets` 同时使用。 |
 | `portal_close_shell` | 关掉某 host 的粘性 `portal_shell` 会话（下次 `portal_shell` 自动重开）。罕用，仅用于重置脏会话。 |
+
+> **★ `use_sudo` 与 `secrets` 可以同时使用**——`portal_exec`（远端）和 `portal_local_exec`（本机）都支持在同一次调用里既提权又注入密钥，两条路径行为一致。
 
 > **★ 两层"复用"别搞混**：**连接复用**=asyncssh 的 TCP/channel 池，**所有**工具共享，纯为**速度**（首连 ~280ms，之后每 call ~10-30ms）；**会话复用**=只有 `portal_shell` 用的那个每 host 一个粘性交互式 shell（bash/zsh），为**状态连续**。shell 会话骑在池化 channel 上，两者正交。也正因为会话是隐式 plumbing，它的状态表归 `portal_audit(view="sessions")`，而不像 tunnel/host/job 那样自带 `list`。
 
@@ -899,7 +901,7 @@ ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；
     sudo_password_command: pass show sudo/this-box
   ```
 
-取密码顺序同远端：**agent 缓存 → 顶层 `<local>:` 的 `sudo_password_command` → 报错**。`use_sudo` 与 `secrets` 可在同一次 `portal_local_exec` 调用里**同时使用**（secret 值随 stdin 在 sudo 密码之后送入、在提权后的 shell 里 read+export，故 sudo 的 `env_reset` 清不掉、也不进 argv）；结果标 `high_risk`，审计记为 `local_exec_sudo`。
+取密码顺序同远端：**agent 缓存 → 顶层 `<local>:` 的 `sudo_password_command` → 报错**。`use_sudo` 可与 `secrets` 同时使用；结果标 `high_risk`，审计记为 `local_exec_sudo`。
 
 > **`<local>` / `local` / `localhost` 别混**：`<local>` 是**保留身份**，专指 MCP server 本机（`portal_local_exec`，不走 SSH），尖括号是 hostname 非法字符，**永不**和真实主机撞名；`localhost` 是一台**普通 SSH host**（连 `127.0.0.1:22`，要 sshd + 公钥/密码），被所有远端工具用；你若在 `hosts.yaml` / ssh config 里把某台远端命名为 `local`，它也只是一台**普通远端 host**，与本机 `<local>` 互不相干。
 
@@ -934,7 +936,19 @@ ssh-agent 跑得起来时**首选** agent（链路第 1 条），体验最好；
 
    值经 systemd --user 管理的本地 unix socket 推进 per-user credential agent 内存缓存：`.socket` unit 监听 `%t/portal-mcp-server/credentials.sock`，安装器在 `agent.json` 记录解析后的绝对路径，目录 0700 / socket 0600，仅本用户可达。值**从不落盘、从不进 LLM**，TTL 到期自动清除。
 
-完整配置见 [`examples/secrets.yaml`](./examples/secrets.yaml)。`secrets` 与 `use_sudo` 可在同一次 `portal_exec` 调用里同时使用——secret 值随 stdin 在 sudo 密码之后送入、在提权 shell 内 read+export，绕过 sudo 的 `env_reset`，无需任何 sudoers `env_keep` 配置、也不进 argv。
+完整配置见 [`examples/secrets.yaml`](./examples/secrets.yaml)。`secrets` 可与 `use_sudo` 在同一次 `portal_exec` 调用里同时使用。
+
+#### 实现细节：sudo + secrets 如何共存
+
+`use_sudo` 与 `secrets` 共用**同一条 stdin**：sudo 密码先送入，随后按 `secrets` 列表顺序送入每个值。真正的命令被包了一层小前缀，在 sudo **完成 `env_reset`（默认会清空继承的环境变量）之后**，于已提权的 shell 内逐行 `read` 回这些值再 `export`：
+
+```
+IFS= read -r GITHUB_TOKEN
+export GITHUB_TOKEN
+<原始命令>
+```
+
+因为 `export` 发生在 `env_reset` **之后**，值不会被清掉；因为值走 stdin 而非命令行参数，`ps`、shell 历史、审计日志都看不到它，也不需要任何 sudoers `env_keep` 配置。`portal_exec`（远端）与 `portal_local_exec`（本机）两条路径实现一致，源码见 `secrets_store.py` 的 `sudo_stdin_secret_script()`。
 
 #### 等待语义：fail-fast → `ask_user` → 重试
 

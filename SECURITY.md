@@ -372,13 +372,6 @@ exposure is bounded by:
 The `sudo_password_command` path needs no cache at all — it re-runs per
 sudo invocation, exactly like the SSH variant.
 
-Execution detail: sudo runs as a **one-shot** `sudo -S -k -p '' -- bash
--c <cmd>` via `conn.run(input=<pw>)`, *not* through the persistent
-`bash -i` session (`sudo -S` consumes stdin, which would collide with the
-sentinel-completion protocol). Consequence: a `use_sudo` command does
-**not** inherit `cwd` / env from prior `portal_shell` calls. `-k` forces
-fresh authentication each time; `-p ''` suppresses the prompt text.
-
 ### Audit log
 
 All state-changing tools write `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`):
