@@ -2,35 +2,63 @@
 
 ### BREAKING CHANGE
 
-- all MCP tool names changed. `portal_exec`→`remote_exec`,
-`portal_shell`→`remote_shell`, `portal_read`→`remote_read`,
-`portal_patch`→`remote_patch`, `portal_grep`→`remote_grep`,
-`portal_glob`→`remote_glob`, `portal_transfer`→`remote_transfer`,
-`portal_tunnel`→`remote_tunnel`, `portal_job`→`remote_job`,
-`portal_close_shell`→`remote_close`, `portal_local_exec`→`local_exec`,
-`portal_host`→`hosts`, `portal_check`→`policy_check`, `portal_audit`→`inspect`.
-No aliases are kept; update any client configs / prompts that reference the old
-names.
-- `timeout` is now a required parameter on portal_exec,
-portal_shell and portal_local_exec — the implicit 3600s default and the
-PORTAL_DEFAULT_TIMEOUT knob were removed, so callers that omitted it must now
-pass one, and a value above PORTAL_MAX_TIMEOUT (default 300s) is rejected.
-`use_ssh_config: true` now MERGES hosts.yaml over the ssh_config alias instead
-of a pure passthrough.
+- **All MCP tool names changed** (hard cutover, no aliases):
+`portal_exec`→`remote_exec`, `portal_shell`→`remote_shell`,
+`portal_read`→`remote_read`, `portal_patch`→`remote_patch`,
+`portal_grep`→`remote_grep`, `portal_glob`→`remote_glob`,
+`portal_transfer`→`remote_transfer`, `portal_tunnel`→`remote_tunnel`,
+`portal_job`→`remote_job`, `portal_close_shell`→`remote_close`,
+`portal_local_exec`→`local_exec`, `portal_host`→`hosts`,
+`portal_check`→`policy_check`, `portal_audit`→`inspect`. Update any client
+configs / prompts that reference the old names.
+- **`timeout` is now required** on `remote_exec` / `remote_shell` /
+`local_exec`. The implicit 3600s default and the `PORTAL_DEFAULT_TIMEOUT` knob
+are removed, so callers that omitted it must now pass one; a value above
+`PORTAL_MAX_TIMEOUT` (default 300s) is rejected — background a long task with
+`remote_job` instead.
+- **`use_ssh_config: true` now MERGES** hosts.yaml over the ssh_config alias
+(opt-in layered merge, hosts.yaml fields win) instead of a pure passthrough; a
+hosts.yaml `host:` that conflicts with the alias's resolved HostName is a hard
+error.
 
 ### Feat
 
-- required exec timeout+cap, login shell, ssh_config merge, host normalize, privileged patch/read, resumable upload
-- **exec**: allow sudo and secrets to coexist via stdin read+export
-- **local_exec**: local sudo via portal_local_exec(use_sudo=True)
-- **host**: enumerate ssh-config aliases in list + PORTAL_SSH_CONFIG (ssh -F)
-- **read**: paginate portal_read with line/byte caps
-- **exec**: operator-configurable default command timeout
-- split passphrase credential and opt-in sudo reuse
+- **login shell by default**: `remote_exec` / `remote_job` run the command in a
+login shell (`bash -lc`) so the remote user's `~/.profile` / `~/.bashrc`
+PATH+env (conda / nvm / pyenv, `~/.local/bin`) is loaded; opt out per call
+(`login=False`), per host (`login_shell:`), or globally (`PORTAL_LOGIN_SHELL`).
+Falls back to a plain exec on a bash-less host.
+- **privileged file read/write**: `remote_read(use_sudo=True)` /
+`remote_patch(use_sudo=True)` reach root-owned files — `sudo cat` to read,
+SFTP-staged atomic `sudo install` to write — preserving the two-layer hash
+check, atomic replace, and the file's original owner / group / mode.
+- **resumable upload**: `remote_transfer` upload auto-resumes an interrupted
+transfer from the partial file's offset (SFTP), verifying sha256 on resume with
+a single restart on mismatch.
+- **exec**: sudo and secrets can coexist on one `remote_exec` call — both are
+fed over SSH stdin and exported inside the sudo'd shell, so `env_reset` can't
+strip the secret.
+- **local_exec**: local sudo via `local_exec(use_sudo=True)`, password resolved
+out-of-band (`portal sudo set-local` or a `<local>:` `sudo_password_command`).
+- **host**: `hosts(action=list)` enumerates `~/.ssh/config` `Host` aliases
+(resolving HostName / User / Port), honors `PORTAL_SSH_CONFIG`, and tags each
+entry with its source.
+- **read**: `remote_read` gains line/byte pagination with caps.
+- split passphrase credential from the sudo cache; reusing the SSH login
+password for sudo is opt-in (`sudo_password_same_as_ssh`).
+
+### Fix
+
+- host names are trimmed of surrounding whitespace at every boundary (tool
+params, CLI keys, hosts.yaml keys, credential-agent keys), fixing the
+sudo / credential lookup for a name like `'LisaHost '` that silently missed its
+stored password.
 
 ### Refactor
 
-- drop portal_ tool prefix; share sudo primitive; add CONTEXT + ADR
+- drop the `portal_` tool prefix; share one `_run_sudo_raw` sudo primitive
+(`sudo -S -k`, password over stdin; trailing-newline strip decided per call
+site — exec strips, file reads stay byte-exact); add `CONTEXT.md` + `docs/adr/`.
 - **host**: warnings name the active ssh config source; align zh/en docs
 
 ## v3.3.2 (2026-06-14)

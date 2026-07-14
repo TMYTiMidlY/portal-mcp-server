@@ -53,3 +53,31 @@ ssh_config `HostName`. A connection parameter, not an identifier.
 Opt-in via `use_ssh_config: true`: the ssh_config alias is the base and the
 hosts.yaml fields explicitly set override on top. Distinct from the default,
 where a hosts.yaml host fully overrides ssh_config.
+
+## Execution mode
+
+**Foreground execution**:
+Running a command synchronously — the tool call blocks until the command exits
+(`remote_exec`, `remote_shell`, `local_exec`). The work runs inside the MCP
+server process, so it ends when the agent (and thus the server) stops.
+_Avoid_: calling this "a job" (a job is the background counterpart).
+
+**Background execution**:
+Running a command detached on the remote host (`remote_job`) via `nohup`: it
+keeps running after the SSH connection drops or the agent stops, and is polled
+for output. The durable counterpart to foreground execution.
+_Avoid_: "async exec" (every tool is async at the transport level; this term is
+about the *command* outliving the *call*).
+
+## Credential path
+
+**Credential path** (unified):
+The single in-process asyncssh authentication route every connection goes
+through. Every credential kind — SSH key, login password, key passphrase, sudo
+password, named secret — is resolved on this one path, and the plaintext is
+handed only to its real consumer (the asyncssh handshake, `sudo -S` stdin, an
+injected env var); it never reaches the agent conversation, a command line, or
+disk.
+_Avoid_: treating a shelled-out `ssh` / `scp` / `sshpass` subprocess as
+equivalent — it does not share this path (see
+`docs/adr/0003-credential-unification.md`).

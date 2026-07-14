@@ -45,6 +45,8 @@
 
 ## 简介
 
+portal-mcp-server 的设计围绕三条理念：**工具少而正交**（只保留 bash 难以廉价合成的保证）、**单步可介入**（agent 一步一调用、读真实输出再决策，长任务丢后台）、**凭据统一**（所有连接走同一条进程内认证路径，明文不进 LLM）——展开见 [设计理念](#design-principles)。
+
 `portal-mcp-server` fork 自 [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)（Apache 2.0）：底层 SSH/asyncssh 引擎、连接池、tunnel 管理、多机编排算法、安全策略沿用上游模块。上层重新设计了一套面向 agent 的 portal 工具——围绕"持久 bash 会话 + 一次性 exec + 后台 job"三条执行路径，外加 hash 保护的远端文件编辑、结构化搜索、SFTP 传输、隧道、审计等原语。其中远端文件编辑（`remote_read` / `remote_patch`）的双层 hash 校验算法参考 [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)（MIT），并针对 SFTP 重写。
 
 完整衍生关系与算法引用见 [`NOTICE`](./NOTICE) 与 [安全](#安全) 章节。
@@ -178,6 +180,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 `portal-mcp-server` 只提供工具，不强制怎么用。建议在 `AGENTS.md` / 系统 prompt 加：
 
+- **一步一调用、读输出再决策**——把一个可判定的步骤放进一次 `remote_exec` / `remote_shell` 调用，读真实 stdout / stderr / exit 核对预期再走下一步（exit 0 也可能是错的）；`commands=[…]` 只用于无需中间检查的固定批，别把 `a && b && c` 或长流程塞进一次调用（中间出错看不到、没法介入）。无人值守的长任务用 `remote_job`。详见 [设计理念 · 逐步执行](#step-wise-exec)。
 - **优先确认 host 别名**——不在 `~/.ssh/config` / `hosts.yaml` 的主机先问用户
 - **写文件走 read → patch**——冲突时 patch 返回新 hash，重读重改
 - **默认沙箱 `/tmp/`**——改 `$HOME` 或源码前先确认
@@ -281,7 +284,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 </details>
 
-## 设计理念
+## <a id="design-principles"></a>设计理念
 
 ### 工具精简：少而正交
 
@@ -301,6 +304,20 @@ portal-mcp-server 据此把工具面收敛到一组**少而正交**的原语。�
 | `remote_tunnel` / `hosts` / `inspect` | 用 `action` / `view` 字段把同一资源的多个动作合并进一个工具，而非每个动作各立一个 tool |
 
 所有派发参数（`action` / `view` / `output_mode` / ...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验——agent 不必在多个语义重复的工具里反复选择。**工具 schema 上下文占用**：所有工具的 name + description + inputSchema 合计约 **~8k tokens**（`tiktoken o200k_base` 估算，约为 200k 上下文窗口的 **~4%**；descriptions 含 sudo / secrets / 安全约定等护栏文案，故偏厚）。
+
+### <a id="step-wise-exec"></a>逐步执行：一步一调用，读真实输出再决策
+
+`remote_exec` / `remote_shell` 是给 agent 的**单步**原语：一次调用 = 一个可判定的步骤。跑完先读**真实**的 stdout / stderr / exit code、和预期核对（exit 0 的步骤也可能是错的），再决定下一次调用——这样 agent 始终在回路里、出错能立刻纠偏。
+
+<details>
+<summary>为什么这么设计，以及和 timeout / cap / job 的关系</summary>
+
+- `commands=[…]` 把一串命令塞进**一次**调用，agent 看不到中间输出、无法在步骤间判断，所以只留给**无需中间检查的固定、无依赖批**；同理别把长流程或分支埋进一个 `a && b && c` 命令串——中间一步错了你既看不到、也没法介入。
+- 前台 `timeout` **必填**（无默认）就是逼 agent 对"这步该跑多久"有意识：探索性 / 可重跑的命令给小值（10–30s）快速失败，慢但有界的才调大。
+- 前台超时还有上限 `PORTAL_MAX_TIMEOUT`（默认 300s），超过即拒——**真正长的无人值守任务改用后台 `remote_job`**（提交秒回、可 poll / cancel、断连仍跑），而不是把一次阻塞调用钉死几个钟头。
+- 这条理念在 `remote_exec` / `remote_shell` 的工具 docstring 里对 agent 有完整版一线指引；这里是浓缩。
+
+</details>
 
 
 ### 进程内连接池
@@ -338,6 +355,19 @@ portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有�
 
 对比"用 subprocess 调 `ssh` / `scp`"：免去每命令 ~50–100 ms 的 fork、不需要协调多进程之间共享 SSH 复用（这正是 ControlMaster 在 Win 上挂的根因）、错误处理 / 重试 / 超时都是 Python 异步原语，而不是解析 stderr 字符串。
 
+### <a id="credential-unification"></a>凭据统一：所有连接只走一条进程内认证路径
+
+portal 里每个工具的每一条连接，都走 server 进程内**同一条 asyncssh 认证路径**：SSH key、登录密码、密钥 passphrase、sudo 密码、命名 secret 全在这里解析，明文只交给真正的消费者（asyncssh 握手 / `sudo -S` 的 stdin / 注入进 subprocess env），**从不进 LLM 上下文、不进 `ps` argv、不落盘**。
+
+<details>
+<summary>为什么这是一条不为便利让步的边界（"活过 agent 关闭"为何不靠子进程）</summary>
+
+agent 常想要"持久传输 / 活过 agent 关闭"，最直觉的实现是 `nohup` 一个 `scp` / `rsync` 子进程。portal **故意不做**——子进程那条路绕开了上面这条统一凭据路径：它拿不到 `password_command` 现取的密码、享受不到 hosts.yaml ↔ ssh_config 合并，最后只能退回 `sshpass` 把密码塞进 argv（`ps` 可见）或写进环境，把无回显输入的所有保护清零。
+
+所以取舍是：**把凭据统一当成不可逾越的 invariant**——"活过 agent 关闭"交给 `remote_job`（命令 `nohup` 到**远端**，凭据在连接建立时就已用完、不需要本地子进程持有），前台传输中断则靠 `remote_transfer` 的 `resume` 续传，都不引入一条会分叉认证的旁路。完整取舍与被否决的备选见 [ADR-0003](./docs/adr/0003-credential-unification.md)。
+
+</details>
+
 ### 反馈通道：warning 走 tool result，不走 stderr
 
 `portal-mcp-server` 把所有**用户需要看到的运行时 warning / error** 都塞进 tool result 的返回内容，不靠 server stderr 或日志文件喊话。这不是审美选择，是 MCP 协议在 client 端实际行为反推出来的硬约束。
@@ -370,7 +400,7 @@ portal-mcp-server 在 server 进程内部维护 asyncssh 连接池——所有�
 几条不写下来就容易被后人"顺手改坏"的内部约束：
 
 - **exec 输出会剥尾换行，别拿它读文件**。`remote_sudo_exec` / `remote_exec_with_env`（`remote_bash.py`）对 stdout/stderr 做 `rstrip("\n")`——这对"跑命令"是对的（照搬 shell `$(cmd)` 惯例、给 agent 干净输出），但**对文件内容有损**：剥掉尾换行后字节不再精确，`remote_read`/`remote_patch` 的 SHA-256 前置校验会对不上。所以 `use_sudo` 读文件**另走** `remote_text_editor._sudo_cat`（`cat`，**不** strip）。两条路共享同一个底层原语 `remote_bash._run_sudo_raw`（跑 `sudo -S -k -p '' <cmd>`、密码喂 stdin、返回**原始**结果），**strip 与否由调用点决定**：exec 剥、读不剥。改动这块时守住这条边界。读法用 `cat`（`_sudo_cat` 的 `read_cmd` 参数可换成 `base64`+本地解码，仅在将来要二进制精确读时才需要）。
-- **ssh_config 合并为什么是 opt-in + HostName 护栏**。asyncssh 是按"你实际去连的那个 host"匹配 ssh_config 的 `Host` 段（`config.py`），每个选项走"显式 kwarg 否则 config"。所以要继承某 alias 的 `IdentityAgent`/`ProxyJump` 等长尾选项，就得以 `host=<别名>` 去连——而这样 `HostName` 就由 ssh_config 定死、hosts.yaml 的 `host:` 覆盖不了它（其余字段能覆盖）。"既继承 alias 选项又用 hosts.yaml 的地址"在单次连接里天然不可兼得，这正是合并做成 **opt-in（`use_ssh_config: true`）+ HostName 不一致就报错**、而非默认静默合并的根因。详见 [ADR-0001](./docs/adr/0001-tool-naming-scheme.md) 邻近的设计与 `CONTEXT.md`。
+- **ssh_config 合并为什么是 opt-in + HostName 护栏**。asyncssh 是按"你实际去连的那个 host"匹配 ssh_config 的 `Host` 段（`config.py`），每个选项走"显式 kwarg 否则 config"。所以要继承某 alias 的 `IdentityAgent`/`ProxyJump` 等长尾选项，就得以 `host=<别名>` 去连——而这样 `HostName` 就由 ssh_config 定死、hosts.yaml 的 `host:` 覆盖不了它（其余字段能覆盖）。"既继承 alias 选项又用 hosts.yaml 的地址"在单次连接里天然不可兼得，这正是合并做成 **opt-in（`use_ssh_config: true`）+ HostName 不一致就报错**、而非默认静默合并的根因。完整取舍见 [ADR-0002](./docs/adr/0002-ssh-config-merge.md) 与 `CONTEXT.md` 的 Merge 词条。
 - **sudo 落位保原属主 / 权限**。`remote_patch(use_sudo=True)` 写 root 文件时，先 `sudo stat` 取原 `owner:group:mode`，落位脚本 `cp→旁临时→chown→chmod→mv` 逐一还原——别简化成"落完统一 root:root / 默认权限"，那会悄悄改掉 `/etc` 下文件的属主权限。
 
 ## 安装
