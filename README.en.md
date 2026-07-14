@@ -1013,7 +1013,10 @@ no matching alias; `use_ssh_config: true` with a `host:` that disagrees with the
 alias's HostName (**hard error on connect**). Base fields
 (`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`) plus
 `proxy_jump` / `keepalive_interval` / `forward_agent` are natively supported; other
-ssh-config fields need the merge.
+ssh-config fields need the merge. `proxy_jump` uses **value semantics**: omitting it
+inherits the ssh-config `ProxyJump` (merge mode); `proxy_jump: none` **forces a direct
+connection** (overriding it); an empty/`null` value is ambiguous (direct vs. inherit?)
+and is **rejected at connect time** — use `none` or drop the key.
 
 ## <a id="security"></a>Security
 
@@ -1123,7 +1126,16 @@ the agent uses the published version. For local debugging, temporarily set
 3. If using `~/.ssh/config`, confirm the `Host` alias / `HostName` / `User` /
    `IdentityFile`.
 4. For ProxyJump, asyncssh honors `~/.ssh/config`'s `ProxyJump`; confirm the
-   bastion connects manually too.
+   bastion connects manually too. **Mind the jump-credential boundary**: a bare
+   `proxy_jump: user@jump` in hosts.yaml reaches the bastion with the **default
+   key/agent** only, and reuses the passphrase resolved for the **target** to
+   unlock **the local key that logs into the bastion** (a differently-encrypted
+   bastion key then fails with `Incorrect passphrase`); it does **not** read a
+   bastion-specific `IdentityFile`. To give the bastion its own key/passphrase,
+   set `use_ssh_config: true` (asyncssh then reads the bastion's `Host`
+   `IdentityFile`) and load the bastion key into **ssh-agent** (agent auth needs
+   no passphrase, so the clash disappears). To force a direct connection
+   (ignoring an ssh-config `ProxyJump`), set `proxy_jump: none`.
 
 ### Connection drops after the MCP client restarts
 

@@ -592,7 +592,7 @@ args = ["portal-mcp-server@latest"]
 | --- | --- | --- |
 | `remote_exec` | `(host='' \| [host…], command='', commands=None, group_tag='', *, timeout, login=None, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` | 走连接池的无状态一次性。**单 host + 单 command → 一个 dict**（**分离**的 stdout/stderr + exit code）；多 host / `commands` 序列 → **list**（多命令 host 为 `{host, results:[…]}`）。`timeout` **必填**（无默认，超 `PORTAL_MAX_TIMEOUT` 上限即拒并导流 `remote_job`）；`login` 默认登录 shell（`bash -lc`）。并行 / 滚动、`use_sudo` / `secrets` 语义见上文工具列表与[认证](#authentication)。 |
 | `remote_shell` | `(host, command='', commands=None, stop_on_error=True, *, timeout)` | 每 host 一个持久交互 shell。单 command → `{host, session_id, command, exit_code, output, duration_s}`（`output` 是 PTY 合并流，超限截断标 `truncated`）；`commands=[…]` 在**同一** session 顺序跑 → `{host, session_id, results:[…], duration_s}`，`stop_on_error` 首败即停并加 `stopped_at`。卡交互提示被自动 Ctrl-C → `exit_code:-1` + `error:"interactive_prompt_blocked"` + `session_preserved:true`。`timeout` **必填**。命令边界协议见下文 **设计理念 · 持久 shell 会话** 一节。 |
-| `remote_job` | `(action=submit\|poll\|cancel\|list, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal=TERM\|KILL, use_sudo=False, secrets=None)` | `submit` 秒回 `job_id`（远端 `nohup` + tmp 文件，断连仍跑）；`poll` 按需分页（`since=<offset>` 只回更新字节、单次封顶 `max_bytes` 默认 64 KiB、带 `more`；或 `tail=N` 瞄尾），chunk base64 + 边界安全 UTF-8 解码；`cancel` 发 `signal`，`list` 列全部。job 表跨重启 best-effort 持久化、有上限、TTL 清理（`PORTAL_JOB_*`）。`use_sudo` / `secrets` **后台不支持、传即拒**并指向 `remote_exec`。 |
+| `remote_job` | `(action=submit\|poll\|cancel\|list, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal=TERM\|KILL, login=None, use_sudo=False, secrets=None)` | `submit` 秒回 `job_id`（远端 `nohup` + tmp 文件，断连仍跑）；`poll` 按需分页（`since=<offset>` 只回更新字节、单次封顶 `max_bytes` 默认 64 KiB、带 `more`；或 `tail=N` 瞄尾——`tail` 是快照、**不受 `max_bytes` 限制**），chunk base64 + 边界安全 UTF-8 解码；`cancel` 对**进程组**发 `signal` 并重新探测（**不对终态 job 发信号**），`list` 列全部。job 表**按进程** best-effort 持久化、有上限、TTL 清理（`PORTAL_JOB_*`）。`use_sudo` / `secrets` **后台不支持、传即拒**并指向 `remote_exec`。 |
 | `local_exec` | `(command, secrets=None, use_sudo=False, *, timeout)` | 在 **MCP server 自己机器**上跑（**不**走 SSH），默认关闭，须 `PORTAL_ALLOW_LOCAL_EXEC=1`。`timeout` **必填**（同 `PORTAL_MAX_TIMEOUT` 上限，超限拒但无后台可导流）。`use_sudo=True` 用保留身份 **`<local>`**（≠ 普通 SSH host `local` / `localhost`）走本地 `sudo -S -k`，密码来自 `portal sudo set-local` 或 hosts.yaml 顶层 `<local>:` 段，可合 `secrets`，标 `high_risk`。 |
 | `remote_close` | `(host)` | 关掉某 host 缓存的 `remote_shell` 会话（下次自动重开）。罕用，仅重置脏会话。 |
 
@@ -614,7 +614,7 @@ args = ["portal-mcp-server@latest"]
 
 | 工具 | 签名 | 返回结构 / 关键行为 |
 | --- | --- | --- |
-| `remote_transfer` | `(direction=upload\|download\|sync\|mirror\|upload-list\|download-list, host, local_path, remote_path, checksum=False, paths_json='', resume=True)` | 二进制安全、原子 SFTP。单文件模式（`upload`/`download`）→ `{status, direction, host, bytes, duration_s, …}`；增量模式（`sync` 推目录 / `mirror` 拉目录 / `*-list`）跳过 size+mtime 匹配（`checksum=True` 改 sha256）→ `{status, uploaded\|downloaded, skipped, failed[], bytes_total, bytes_transferred, duration_s}`，单文件失败进 `failed[]` 不中断。**upload 断点续传**（`resume=True` 默认）：远端有更小的半截文件时只补传尾巴，续传后整份 sha256 校验、不符整传一次（`resumed`/`restarted_after_mismatch` 标于结果）；`resume=False` 强制重传。`*-list` 需 `paths_json` = `[{"local":…,"remote":…}, …]`，只拷普通文件。 |
+| `remote_transfer` | `(direction=upload\|download\|sync\|mirror\|upload-list\|download-list, host, local_path, remote_path, checksum=False, paths_json='', resume=True)` | 二进制安全、原子 SFTP。单文件模式（`upload`/`download`）→ `{status, direction, host, bytes, duration_s, …}`；增量模式（`sync` 推目录 / `mirror` 拉目录 / `*-list`）跳过 size+mtime 匹配（`checksum=True` 改 sha256）→ `{status, uploaded\|downloaded, skipped, failed[], bytes_total, bytes_transferred, duration_s}`，单文件失败进 `failed[]` 不中断。**upload 断点续传**（`resume=True` 默认）：远端有更小的半截文件时只补传尾巴，续传后整份 sha256 校验通过 → `resumed`；**无法校验（远端没 `sha256sum`）→ 重新整传 `restarted_unverifiable`**；校验不符 → 重新整传 `restarted_after_mismatch`；`resume=False` 强制重传。目录模式不跟随本地符号链接、且拒绝写穿符号链接目标。`*-list` 需 `paths_json` = `[{"local":…,"remote":…}, …]`，只拷普通文件。 |
 
 ### 资源（agent 显式管理）
 
@@ -1126,7 +1126,7 @@ hosts:
 - `ssh-config` —— 只在 ssh config 里（用户级或系统级 fallback）的别名；
 - `hosts.yaml+ssh-config` / `runtime+ssh-config` —— `use_ssh_config: true` 合并：连接参数以 ssh config 别名为基底，声明处显式设的字段（tags/sudo… 以及显式的 `host`/`user`/`port`）叠在上面覆盖。
 
-**字段对照 + 渐进补全**：基础字段全有（`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`），常用高级字段 `proxy_jump`（→ asyncssh `tunnel`）、`keepalive_interval`（→ ServerAliveInterval）、`forward_agent`（→ agent 转发）现已**原生支持**；其余 ssh config 字段靠开 `use_ssh_config: true` 合并继承。
+**字段对照 + 渐进补全**：基础字段全有（`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`），常用高级字段 `proxy_jump`（→ asyncssh `tunnel`）、`keepalive_interval`（→ ServerAliveInterval）、`forward_agent`（→ agent 转发）现已**原生支持**；其余 ssh config 字段靠开 `use_ssh_config: true` 合并继承。`proxy_jump` 用**值语义**：不写 = 沿用 ssh config 的 `ProxyJump`（合并模式）；写 `proxy_jump: none` = **强制直连**（覆盖 ssh config 的 `ProxyJump`）；空串 / `null` 是歧义值（想直连还是继承？），连接时**直接报错**——改用 `none` 或删掉该键。
 
 ## <a id="security"></a>安全
 
@@ -1202,7 +1202,7 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
 1. 确认 `ssh user@host` 能在终端直连
 2. 检查私钥权限：`chmod 600 ~/.ssh/id_ed25519`
 3. 如果用了 `~/.ssh/config`，确认 `Host` 别名、`HostName`、`User`、`IdentityFile` 配正确
-4. 跳板机（ProxyJump）场景：asyncssh 原生支持 `~/.ssh/config` 的 `ProxyJump`，确认跳板机也能手动 ssh 通
+4. 跳板机（ProxyJump）场景：asyncssh 原生支持 `~/.ssh/config` 的 `ProxyJump`，确认跳板机也能手动 ssh 通。**留意跳板凭据的边界**：hosts.yaml 里裸写的 `proxy_jump: user@jump` 只用**默认 key/agent** 连跳板，而且会把为**目标**解出的 passphrase 拿去解**本机上那把登录跳板的私钥**（跳板 key 若加密且 passphrase 不同 → `Incorrect passphrase`）；它**不读**跳板专属的 `IdentityFile`。要让跳板用它自己的 key/passphrase：开 `use_ssh_config: true`（asyncssh 会读跳板 `Host` 段的 `IdentityFile`），并把跳板 key 加进 **ssh-agent**（agent 认证不吃 passphrase，冲突自然消失）。想强制直连（忽略 ssh config 的 `ProxyJump`）写 `proxy_jump: none`。
 
 ### MCP client 重启后连接断了
 
