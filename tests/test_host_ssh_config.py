@@ -164,6 +164,45 @@ async def test_extra_fields_absent_by_default(tmp_path):
     assert "agent_forwarding" not in kwargs
 
 
+@pytest.mark.asyncio
+async def test_proxy_jump_none_forces_direct(home, tmp_path):
+    """`proxy_jump: none` -> asyncssh tunnel=None: a DIRECT connection that
+    OVERRIDES any ssh_config ProxyJump (asyncssh short-circuits
+    config.get('ProxyJump') whenever tunnel != ())."""
+    yml = _hosts_yaml(
+        tmp_path,
+        "hosts:\n  web01:\n    host: 10.0.0.1\n    proxy_jump: none\n")
+    m = cm.ConnectionManager(hosts_yaml=yml)
+    kwargs = await m._build_connect_kwargs(m._registry["web01"])
+    assert "tunnel" in kwargs and kwargs["tunnel"] is None
+
+
+@pytest.mark.asyncio
+async def test_proxy_jump_empty_is_refused_and_warned(home, tmp_path):
+    """An empty/blank `proxy_jump:` is ambiguous (force-direct vs. inherit): it
+    surfaces a config advisory at load and hard-fails at connect time, pointing
+    the operator at `none` / key removal."""
+    yml = _hosts_yaml(
+        tmp_path,
+        "hosts:\n  web01:\n    host: 10.0.0.1\n    proxy_jump: ''\n")
+    m = cm.ConnectionManager(hosts_yaml=yml)
+    assert any("proxy_jump" in w for w in m.config_warnings().get("web01", []))
+    with pytest.raises(RuntimeError, match=r"empty 'proxy_jump"):
+        await m._build_connect_kwargs(m._registry["web01"])
+
+
+@pytest.mark.asyncio
+async def test_proxy_jump_string_overrides(home, tmp_path):
+    """A non-empty, non-'none' value is used verbatim as the jump host."""
+    yml = _hosts_yaml(
+        tmp_path,
+        "hosts:\n  web01:\n    host: 10.0.0.1\n"
+        "    proxy_jump: user@bastion:2222\n")
+    m = cm.ConnectionManager(hosts_yaml=yml)
+    kwargs = await m._build_connect_kwargs(m._registry["web01"])
+    assert kwargs["tunnel"] == "user@bastion:2222"
+
+
 # ── asyncssh-backed detection: Include is followed, wildcards excluded ────────
 
 def test_alias_detection_follows_include(home, tmp_path):

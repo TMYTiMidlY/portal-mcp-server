@@ -182,7 +182,10 @@ class HostConfig:
     sudo_password_same_as_ssh: bool = False
     # ── Selected ssh_config-style connection options (forwarded to asyncssh
     # in ``_build_connect_kwargs`` for explicit, non-use_ssh_config hosts) ──
-    # ProxyJump: "user@jump:port" or a bare alias. -> asyncssh ``tunnel``.
+    # ProxyJump: "user@jump:port" or a bare alias -> asyncssh ``tunnel``.
+    # Value semantics: unset -> defer to ssh_config ProxyJump (merge mode);
+    # ``none`` -> force a DIRECT connection (overrides a config ProxyJump);
+    # an empty/blank value is ambiguous and is refused at connection time.
     proxy_jump: Optional[str] = None
     # ServerAliveInterval equivalent (seconds). -> ``keepalive_interval``.
     keepalive_interval: Optional[int] = None
@@ -339,6 +342,19 @@ class ConnectionManager:
                 logger.error("Host '%s' has %s", name, msg)
                 warnings.append(msg)
                 auth = None
+            proxy_jump = cfg.get("proxy_jump")
+            if "proxy_jump" in cfg and not (proxy_jump or "").strip():
+                # Present but empty/null -> ambiguous (force-direct vs. inherit
+                # ssh_config). Normalise to a "" sentinel; the connection is
+                # refused at connect time (see _build_connect_kwargs) and a config
+                # advisory is surfaced now via list_hosts / policy_check.
+                proxy_jump = ""
+                warnings.append(
+                    "has an empty 'proxy_jump:' — an empty value is ambiguous. "
+                    "Connecting will be REFUSED until fixed: use 'proxy_jump: "
+                    "none' to force a direct connection (overriding any ssh_config "
+                    "ProxyJump), or remove the key to defer to ssh_config."
+                )
             warnings.extend(self._overlay_warnings(name, use_ssh_config))
             if use_ssh_config and cfg.get("host"):
                 try:
@@ -373,7 +389,7 @@ class ConnectionManager:
                 passphrase_command=passphrase_command,
                 sudo_password_command=sudo_password_command,
                 sudo_password_same_as_ssh=sudo_password_same_as_ssh,
-                proxy_jump=cfg.get("proxy_jump"),
+                proxy_jump=proxy_jump,
                 keepalive_interval=(int(cfg["keepalive_interval"])
                                     if cfg.get("keepalive_interval") is not None
                                     else None),
@@ -963,8 +979,38 @@ class ConnectionManager:
         # ── Optional ssh_config-style connection options ──
         # ProxyJump -> tunnel, ServerAliveInterval -> keepalive_interval,
         # ForwardAgent -> agent_forwarding. Applied to every auth mode below.
-        if cfg.proxy_jump:
-            kwargs["tunnel"] = cfg.proxy_jump
+        #
+        # ProxyJump uses VALUE semantics (not truthiness), mirroring the
+        # `is not None` gating of keepalive_interval / forward_agent below, so an
+        # explicit "none" can force-disable a config-inherited ProxyJump:
+        #   • None   -> not set: don't pass `tunnel`, so asyncssh keeps its `()`
+        #               default and (merge mode) DEFERS to the ssh_config ProxyJump.
+        #   • "none" -> force a DIRECT connection: pass `tunnel=None`, which
+        #               asyncssh treats as "no jump" (tunnel != () short-circuits
+        #               config.get('ProxyJump')), OVERRIDING any config ProxyJump.
+        #   • ""     -> ambiguous empty value (normalised at load): REFUSE.
+        #   • str    -> use it as the jump host (overrides any config ProxyJump).
+        #
+        # KNOWN LIMITATION (string jump only): asyncssh opens the jump with its
+        # DEFAULT auth (default key files / ssh-agent) and reuses the SAME
+        # passphrase resolved for THIS target — it does NOT read a jump-specific
+        # IdentityFile from ssh_config, and applying the target's passphrase to a
+        # differently-encrypted jump key fails with "Incorrect passphrase". For a
+        # jump that needs its own key/passphrase, set `use_ssh_config: true` (then
+        # asyncssh reads the jump's own `Host` block) and load the jump key into
+        # ssh-agent (agent auth needs no passphrase). See README "ProxyJump 凭据".
+        if cfg.proxy_jump is not None:
+            pj = cfg.proxy_jump.strip()
+            if pj == "":
+                raise RuntimeError(
+                    f"Host '{cfg.name}' has an empty 'proxy_jump:'; refusing to "
+                    "connect. Use 'proxy_jump: none' to force a direct connection "
+                    "(overriding any ssh_config ProxyJump), or remove the key to "
+                    "defer to ssh_config.")
+            if pj.lower() == "none":
+                kwargs["tunnel"] = None
+            else:
+                kwargs["tunnel"] = cfg.proxy_jump
         if cfg.keepalive_interval is not None:
             kwargs["keepalive_interval"] = cfg.keepalive_interval
         if cfg.forward_agent is not None:
