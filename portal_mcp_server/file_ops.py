@@ -379,6 +379,12 @@ async def ssh_sync_directory(host_name: str, local_dir: str, remote_dir: str,
     try:
         async with _conn_and_sftp(host_name) as (conn, sftp):
             for local_file in sorted(local.rglob("*")):
+                # Don't follow symlinks out of the requested tree: a link whose
+                # target lives elsewhere would otherwise upload that target's
+                # content (exfiltration beyond local_dir).
+                if local_file.is_symlink():
+                    res["skipped_symlinks"] = res.get("skipped_symlinks", 0) + 1
+                    continue
                 if not local_file.is_file():
                     continue
                 st = local_file.stat()
@@ -588,6 +594,13 @@ async def ssh_mirror_directory(host_name: str, remote_dir: str, local_dir: str,
                 rel = PurePosixPath(rpath).relative_to(remote_root)
                 local_file = local.joinpath(*rel.parts)
                 try:
+                    # Refuse to write through a pre-existing symlink destination
+                    # (it could redirect the write outside local_dir).
+                    if local_file.is_symlink():
+                        res["failed"].append({
+                            "path": str(rel),
+                            "error": "refusing to write through a symlink destination"})
+                        continue
                     if local_file.is_file():
                         lst = local_file.stat()
                         skip = lst.st_size == size

@@ -290,3 +290,50 @@ async def test_mirror_missing_remote_dir(patch_manager, tmp_path):
     res = await ssh_mirror_directory("h", "/nope", str(tmp_path / "d"))
     assert res["status"] == "error"
     assert "not found" in res["error"]
+
+
+# ── symlink safety: don't follow local symlinks out of the requested tree ────
+def _try_symlink(src, dst):
+    import os
+    try:
+        os.symlink(src, dst)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_sync_skips_local_symlinks(patch_manager, tmp_path):
+    """A symlink inside local_dir pointing OUTSIDE it must not be uploaded."""
+    from portal_mcp_server.file_ops import ssh_sync_directory
+    (tmp_path / "a.txt").write_text("hello")
+    outside = tmp_path.parent / "outside_secret.txt"
+    outside.write_text("SECRET")
+    if not _try_symlink(outside, tmp_path / "link.txt"):
+        pytest.skip("symlinks not supported here")
+    sftp = FakeSFTP()
+    patch_manager["conn"] = FakeConn(sftp)
+    res = await ssh_sync_directory("h", str(tmp_path), "/remote/dir")
+    assert res["uploaded"] == 1                       # only a.txt
+    assert res.get("skipped_symlinks") == 1
+    assert "/remote/dir/a.txt" in sftp.put_calls
+    assert all("link" not in p for p in sftp.put_calls)
+
+
+@pytest.mark.asyncio
+async def test_mirror_refuses_symlink_destination(patch_manager, tmp_path):
+    """A pre-existing local symlink at the download destination must not be
+    written through (it could redirect the write outside local_dir)."""
+    from portal_mcp_server.file_ops import ssh_mirror_directory
+    local = tmp_path / "dst"
+    local.mkdir()
+    target = tmp_path / "real_a.txt"
+    target.write_text("original")
+    if not _try_symlink(target, local / "a.txt"):
+        pytest.skip("symlinks not supported here")
+    sftp = FakeSFTP({"/remote/dir/a.txt": {"size": 3, "mtime": 1, "data": b"NEW"}})
+    patch_manager["conn"] = FakeConn(sftp)
+    res = await ssh_mirror_directory("h", "/remote/dir", str(local))
+    assert res["downloaded"] == 0
+    assert res["failed"] and "symlink" in res["failed"][0]["error"]
+    assert target.read_text() == "original"           # not overwritten through the link
