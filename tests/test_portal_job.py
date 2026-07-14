@@ -192,6 +192,46 @@ async def test_cancel_sends_signal_and_marks_cancelled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_cancel_reports_process_still_alive(monkeypatch):
+    """If the process survives the signal (trapped SIGTERM), cancel reports it
+    as still running with a note instead of falsely claiming 'cancelled'."""
+    def router(c):
+        if "echo $!" in c:
+            return "100\n"
+        if "PGID=" in c:            # our cancel probe script
+            return "ALIVE\n"
+        return ""
+    _install_conn(monkeypatch, router)
+    jm = job_manager.JobManager()
+    jid = (await jm.submit("h", "x"))["job_id"]
+    res = await jm.cancel(jid, signal="TERM")
+    assert res["signal_sent"] is True
+    assert res["status_after"] == "running"
+    assert "still alive" in res.get("note", "")
+
+
+@pytest.mark.asyncio
+async def test_cancel_refuses_terminal_job(monkeypatch):
+    """A job we already consider finished is never signaled (its PID may have
+    been recycled to an unrelated process)."""
+    def router(c):
+        if "echo $!" in c:
+            return "100\n"
+        if "__CHUNK__" in c:
+            return _poll_out("__JOB_DONE__:0", 2, "no", "ok")
+        return ""
+    rec = _install_conn(monkeypatch, router)
+    jm = job_manager.JobManager()
+    jid = (await jm.submit("h", "x"))["job_id"]
+    await jm.poll(jid)              # observe the done marker -> terminal
+    res = await jm.cancel(jid)
+    assert res["signal_sent"] is False
+    assert res["status_after"] == "done"
+    assert "already done" in res.get("note", "")
+    assert not any("kill -" in c and "PGID=" in c for c in rec)  # no signal sent
+
+
+@pytest.mark.asyncio
 async def test_cancel_unknown_job(monkeypatch):
     _install_conn(monkeypatch, lambda c: "")
     jm = job_manager.JobManager()

@@ -349,10 +349,13 @@ class JobManager:
             if code is None:
                 return "unknown", None
             return ("done" if code == 0 else "failed"), code
+        if alive == "yes":
+            # Still running — even if a cancel was requested, the signal hasn't
+            # taken effect yet (trapped SIGTERM, pending KILL). Report the truth
+            # rather than prematurely claiming "cancelled".
+            return "running", None
         if rec.cancel_requested:
             return "cancelled", rec.exit_code
-        if alive == "yes":
-            return "running", None
         # Process gone without recording an exit status (killed externally).
         return "unknown", None
 
@@ -364,27 +367,53 @@ class JobManager:
             return {"job_id": job_id, "status_after": "unknown",
                     "signal_sent": False,
                     "error": "no such job_id (expired or server restarted)"}
+        if rec.status in _TERMINAL:
+            # Never signal a bare PID for a job we already consider finished:
+            # the OS may have recycled that PID to an unrelated process.
+            return {"job_id": job_id, "signal_sent": False,
+                    "status_after": rec.status,
+                    "note": f"job already {rec.status}; not signaling (its PID "
+                            f"may have been reused by another process)."}
         sig = "KILL" if str(signal).upper() == "KILL" else "TERM"
+        pid = rec.remote_pid
+        # Signal the whole process group (so children spawned by the job die
+        # too), then the pid, then re-probe so the reported status reflects
+        # what actually happened instead of assuming success.
+        script = (
+            f'PGID=$(ps -o pgid= -p {pid} 2>/dev/null | tr -d " "); '
+            f'[ -n "$PGID" ] && kill -{sig} -"$PGID" 2>/dev/null; '
+            f'kill -{sig} {pid} 2>/dev/null; '
+            f'sleep 0.3; '
+            f'if kill -0 {pid} 2>/dev/null; then echo ALIVE; else echo DEAD; fi'
+        )
         mgr = get_manager()
-        conn = await mgr.get_connection(rec.host)
         try:
-            await asyncio.wait_for(
-                conn.run(f"kill -{sig} {rec.remote_pid} 2>/dev/null || true",
-                         check=False, errors=DEFAULT_DECODE_ERRORS),
-                timeout=30,
-            )
+            conn = await mgr.get_connection(rec.host)
+        except Exception as e:
+            return {"job_id": job_id, "signal_sent": False,
+                    "status_after": rec.status, "error": str(e)}
+        try:
+            result = await asyncio.wait_for(
+                conn.run(script, check=False, errors=DEFAULT_DECODE_ERRORS),
+                timeout=30)
+            alive_after = "ALIVE" in (result.stdout or "")
         finally:
             mgr.release_connection(rec.host, conn)
+
         async with self._lock:
             rec.cancel_requested = True
-            if rec.status not in _TERMINAL:
+            if not alive_after and rec.status not in _TERMINAL:
                 rec.status = "cancelled"
                 rec.finished_at = rec.finished_at or time.time()
             self._persist()
-        logger.info("job %s cancelled (SIG%s sent to pid %d)",
-                    job_id, sig, rec.remote_pid)
-        return {"job_id": job_id, "signal_sent": True, "signal": sig,
-                "status_after": rec.status}
+        logger.info("job %s: SIG%s sent to pid %d (alive_after=%s)",
+                    job_id, sig, pid, alive_after)
+        out = {"job_id": job_id, "signal_sent": True, "signal": sig,
+               "status_after": rec.status}
+        if alive_after:
+            out["note"] = ("signal sent but the process is still alive "
+                           "(SIGTERM may be trapped — retry with signal='KILL').")
+        return out
 
     # ── list ────────────────────────────────────────────────────────────────
 
