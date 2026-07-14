@@ -30,7 +30,10 @@ class _FakeSFTP:
     def __init__(self, state):
         self._state = state
 
-    def open(self, name, mode, encoding=None):
+    def open(self, name, mode, encoding=None, attrs=None):
+        # record the create-time permissions so a test can assert 0600 staging
+        if attrs is not None and getattr(attrs, "permissions", None) is not None:
+            self._state.setdefault("open_perms", {})[name] = attrs.permissions
         return _FakeSFTPFile(self._state, name)
 
     async def realpath(self, name):
@@ -59,6 +62,9 @@ class _FakeConn:
             return types.SimpleNamespace(
                 returncode=0, stdout=self._state["stat"], stderr="")
         if "bash -c" in cmd:  # the install/place script
+            if self._state.get("fail_place"):
+                return types.SimpleNamespace(
+                    returncode=1, stdout="", stderr="cp: permission denied")
             self._state["content"] = self._state.get("staged", "")
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
         return types.SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -119,9 +125,22 @@ async def test_sudo_cat_missing_password_raises(wired, monkeypatch):
 async def test_sudo_write_atomic_preserves_owner_mode(wired):
     await rte._sudo_write_atomic("h", "/etc/hosts", "NEWCONTENT\n", "utf-8")
     assert wired["staged"] == "NEWCONTENT\n"            # content staged via SFTP
+    # staged plaintext copy of a root file must be created 0600, not world-readable
+    assert set(wired["open_perms"].values()) == {0o600}
     place = [c for c, _ in wired["runs"] if "bash -c" in c][0]
     assert "chown root:root" in place and "chmod 644" in place
     assert "cp --" in place and "mv -f --" in place     # atomic rename place
+    # the staged copy in $HOME is removed after a successful place
+    assert not any(n.startswith(".portal-mcp-stage") for n in wired["store"])
+
+
+@pytest.mark.asyncio
+async def test_sudo_write_atomic_cleans_staging_on_failure(wired):
+    """A failed place step must still remove the staged plaintext from $HOME."""
+    wired["fail_place"] = True
+    with pytest.raises(rte.RemoteEditError, match="write/place failed"):
+        await rte._sudo_write_atomic("h", "/etc/hosts", "SECRET\n", "utf-8")
+    assert not any(n.startswith(".portal-mcp-stage") for n in wired["store"])
 
 
 @pytest.mark.asyncio

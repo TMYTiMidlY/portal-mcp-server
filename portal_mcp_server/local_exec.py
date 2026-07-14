@@ -79,7 +79,8 @@ async def local_sudo_exec_with_env(command: str, password: str, env: dict,
     names = list(env.keys())
     body = secrets_store.sudo_stdin_secret_script(command, names)
     wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(body)}"
-    stdin_data = password + "\n" + "".join(f"{env[n]}\n" for n in names)
+    stdin_data = password + "\n" + secrets_store.sudo_stdin_secret_values(
+        [env[n] for n in names])
     try:
         proc = await asyncio.create_subprocess_shell(
             wrapped,

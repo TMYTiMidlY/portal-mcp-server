@@ -9,7 +9,11 @@ section's ``sudo_password_command`` in hosts.yaml — never as a tool parameter.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import inspect
+import shutil
+import subprocess
 
 import pytest
 
@@ -128,16 +132,51 @@ def test_sudo_stdin_secret_script_format():
     from portal_mcp_server import secrets_store as ss
     # no secrets -> command unchanged
     assert ss.sudo_stdin_secret_script("id", []) == "id"
-    # one secret -> read+export preamble then the command
+    # one secret -> read base64 line, decode, export, then the command
     assert ss.sudo_stdin_secret_script("echo $GITHUB_TOKEN", ["GITHUB_TOKEN"]) == (
-        "IFS= read -r GITHUB_TOKEN\n"
+        "IFS= read -r __b64_GITHUB_TOKEN\n"
+        'GITHUB_TOKEN=$(base64 -d <<<"$__b64_GITHUB_TOKEN" 2>/dev/null || '
+        'base64 -D <<<"$__b64_GITHUB_TOKEN")\n'
         "export GITHUB_TOKEN\n"
         "echo $GITHUB_TOKEN"
     )
     # multiple secrets keep order
     assert ss.sudo_stdin_secret_script("cmd", ["A", "B"]) == (
-        "IFS= read -r A\nIFS= read -r B\nexport A B\ncmd"
+        "IFS= read -r __b64_A\n"
+        'A=$(base64 -d <<<"$__b64_A" 2>/dev/null || base64 -D <<<"$__b64_A")\n'
+        "IFS= read -r __b64_B\n"
+        'B=$(base64 -d <<<"$__b64_B" 2>/dev/null || base64 -D <<<"$__b64_B")\n'
+        "export A B\ncmd"
     )
+
+
+def test_sudo_stdin_secret_values_are_base64():
+    from portal_mcp_server import secrets_store as ss
+    payload = ss.sudo_stdin_secret_values(["ab\ncd", "x"])
+    lines = payload.split("\n")
+    # one base64 line per value (+ trailing empty from the final "\n")
+    assert lines[0] == base64.b64encode(b"ab\ncd").decode()
+    assert lines[1] == base64.b64encode(b"x").decode()
+    assert lines[2] == ""
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("base64") is None,
+                    reason="needs bash + base64")
+def test_sudo_stdin_secret_roundtrip_multiline():
+    """A multi-line secret (e.g. a PEM key) survives the stdin/base64 framing.
+
+    Runs the generated script body (minus the sudo wrapper) through real bash
+    with the paired stdin payload and checks the value round-trips byte-for-byte
+    (bar a trailing newline, which command substitution strips)."""
+    from portal_mcp_server import secrets_store as ss
+    value = "-----BEGIN KEY-----\nline two\n\tindented\n-----END KEY-----"
+    body = ss.sudo_stdin_secret_script('printf %s "$PEM" | md5sum', ["PEM"])
+    payload = ss.sudo_stdin_secret_values([value])
+    proc = subprocess.run(["bash", "-c", body], input=payload.encode(),
+                          capture_output=True)
+    assert proc.returncode == 0, proc.stderr.decode()
+    expected = hashlib.md5(value.encode()).hexdigest()
+    assert proc.stdout.decode().split()[0] == expected
 
 
 @pytest.mark.asyncio

@@ -39,6 +39,21 @@ def test_env_var_name_mapping():
     assert ss.env_var_name("1starts.digit") == "_1STARTS_DIGIT"
 
 
+def test_colliding_secret_names_rejected():
+    """Two names that normalize to the same env var must be refused (not
+    silently clobber each other) and the command must not run."""
+    import asyncio
+    from portal_mcp_server import secrets_store as ss
+    from portal_mcp_server.cli import _resolve_secrets
+    ss.clear_secret()
+    ss.cache_secret("a-b", "v1", ttl=60)   # both normalize to $A_B
+    ss.cache_secret("a.b", "v2", ttl=60)
+    env, values, err = asyncio.run(_resolve_secrets(["a-b", "a.b"]))
+    assert err is not None
+    assert "A_B" in err and "NOT run" in err
+    ss.clear_secret()
+
+
 def test_redact_masks_every_value_longest_first():
     from portal_mcp_server import secrets_store as ss
     assert ss.redact("a SECRET b", ["SECRET"]) == "a *** b"

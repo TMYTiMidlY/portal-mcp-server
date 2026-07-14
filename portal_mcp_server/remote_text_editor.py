@@ -388,7 +388,12 @@ async def _sudo_write_atomic(host: str, path: str, new_content: str,
     try:
         sftp = await conn.start_sftp_client()
         try:
-            async with sftp.open(stage_rel, "w", encoding=encoding) as f:
+            # Create the staged copy 0600 up front: it holds the full new
+            # content of a root-owned (by definition sensitive) file and sits
+            # in $HOME for the duration of the place step. attrs at creation
+            # closes the create-then-tighten window; umask can only remove bits.
+            async with sftp.open(stage_rel, "w", encoding=encoding,
+                                 attrs=asyncssh.SFTPAttrs(permissions=0o600)) as f:
                 await f.write(new_content)
             abs_stage = await sftp.realpath(stage_rel)
         finally:
@@ -410,32 +415,34 @@ async def _sudo_write_atomic(host: str, path: str, new_content: str,
         f"chmod {mode} {q_tmp} && mv -f -- {q_tmp} {q_path} || "
         f"{{ rm -f -- {q_tmp}; exit 1; }}")
     try:
-        res = await _run_sudo_raw(host, f"bash -c {quote_shell(script)}", pw,
-                                  encoding="utf-8")
-    except asyncio.TimeoutError:
-        raise RemoteEditError(f"sudo write/place timed out on {host}:{path}")
-    if res.returncode != 0:
-        raise RemoteEditError(
-            f"sudo write/place failed on {host}:{path} (exit "
-            f"{res.returncode}): {(res.stderr or '').strip()[:200]}")
-
-    # 4) best-effort remove the staged copy in home.
-    try:
-        conn2 = await mgr.get_connection(host)
         try:
-            sftp2 = await conn2.start_sftp_client()
+            res = await _run_sudo_raw(host, f"bash -c {quote_shell(script)}", pw,
+                                      encoding="utf-8")
+        except asyncio.TimeoutError:
+            raise RemoteEditError(f"sudo write/place timed out on {host}:{path}")
+        if res.returncode != 0:
+            raise RemoteEditError(
+                f"sudo write/place failed on {host}:{path} (exit "
+                f"{res.returncode}): {(res.stderr or '').strip()[:200]}")
+    finally:
+        # 4) Always remove the staged plaintext copy in $HOME — even when the
+        #    place step raised/timed out, so a failure never leaks it on disk.
+        try:
+            conn2 = await mgr.get_connection(host)
             try:
-                await sftp2.remove(stage_rel)
-            finally:
-                sftp2.exit()
+                sftp2 = await conn2.start_sftp_client()
                 try:
-                    await sftp2.wait_closed()
-                except Exception:  # pragma: no cover
-                    pass
-        finally:
-            mgr.release_connection(host, conn2)
-    except Exception:  # pragma: no cover - staged-file cleanup is best-effort
-        logger.debug("staged file cleanup failed on %s", host, exc_info=True)
+                    await sftp2.remove(stage_rel)
+                finally:
+                    sftp2.exit()
+                    try:
+                        await sftp2.wait_closed()
+                    except Exception:  # pragma: no cover
+                        pass
+            finally:
+                mgr.release_connection(host, conn2)
+        except Exception:  # pragma: no cover - staged-file cleanup is best-effort
+            logger.debug("staged file cleanup failed on %s", host, exc_info=True)
 
 
 async def remote_read(host: str, path: str, start: int = 1,
@@ -586,7 +593,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
         upper = parsed[i]
         lower = parsed[i + 1]
         upper_start_0 = upper.start - 1
-        lower_end_0 = total if lower.end is None else lower.end
+        lower_end_0 = total if lower.end is None else max(0, lower.end)
         if lower_end_0 > upper_start_0:
             return {
                 "result": "error",
@@ -598,7 +605,11 @@ async def remote_patch(host: str, path: str, file_hash: str,
     warnings: list[str] = []
     for p in parsed:
         s_idx = p.start - 1
-        e_idx = total if p.end is None else min(total, p.end)
+        # Clamp end into [0, total] (mirrors the read helper): a negative end
+        # would otherwise index from the tail via Python slice semantics and
+        # silently patch the wrong range. end == start-1 (an empty range) stays
+        # valid — that is the pure-insert idiom (range_hash left empty).
+        e_idx = total if p.end is None else max(0, min(total, p.end))
         if s_idx > total:
             return {
                 "result": "error",

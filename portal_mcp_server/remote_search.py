@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shlex
 import time
 from typing import Any, Dict, List, Optional
@@ -31,6 +32,11 @@ from typing import Any, Dict, List, Optional
 from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
 
 logger = logging.getLogger("portal_mcp.remote_search")
+
+# A grep -A/-B/-C context row under -H -r: ``file-<lineno>-text`` (hyphen
+# separators, vs. ``:`` for matches). Non-greedy file so the first
+# ``-<digits>-`` wins; strictly better than dropping context entirely.
+_GREP_CONTEXT_RE = re.compile(r"^(?P<file>.*?)-(?P<line>\d+)-(?P<text>.*)$")
 
 # Cache: host -> {"rg": bool, "find": bool}
 _TOOL_CACHE: Dict[str, Dict[str, bool]] = {}
@@ -283,16 +289,30 @@ async def _grep_fallback(conn, pattern, base, *, glob, output_mode,
     r = await conn.run(" ".join(parts), check=False,
                        errors=DEFAULT_DECODE_ERRORS)
     entries: List[dict] = []
+    # With -A/-B/-C, grep prints matches as ``file:line:text`` and context rows
+    # as ``file-line-text`` (hyphen separators), plus ``--`` group separators.
+    # Parse both so requested context is not silently dropped; context rows are
+    # tagged {"context": true} to mirror the rg path.
+    want_context = bool(context or before_context or after_context)
     for ln in r.stdout.splitlines():
-        parts3 = ln.split(":", 2)  # file:line:text
-        if len(parts3) < 3:
+        if ln == "--":
             continue
-        try:
-            line_no = int(parts3[1])
-        except ValueError:
-            continue
-        entries.append({"file": _relativize(parts3[0], base),
-                        "line": line_no, "text": parts3[2]})
+        parts3 = ln.split(":", 2)  # file:line:text (a matching line)
+        if len(parts3) >= 3:
+            try:
+                line_no = int(parts3[1])
+            except ValueError:
+                line_no = None
+            if line_no is not None:
+                entries.append({"file": _relativize(parts3[0], base),
+                                "line": line_no, "text": parts3[2]})
+                continue
+        if want_context:
+            m = _GREP_CONTEXT_RE.match(ln)
+            if m:
+                entries.append({"file": _relativize(m.group("file"), base),
+                                "line": int(m.group("line")),
+                                "text": m.group("text"), "context": True})
     total = len(entries)
     page = entries[offset:offset + head_limit] if head_limit else entries[offset:]
     return {"output_mode": "content", "engine": "grep",

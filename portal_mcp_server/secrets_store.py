@@ -30,6 +30,7 @@ Nothing in this module is ever written to disk.
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import re
 import threading
@@ -82,28 +83,54 @@ def sudo_stdin_secret_script(command: str, env_names: list) -> str:
 
     sudo's default ``env_reset`` would strip any environment variable injected
     when launching the shell, and putting values on argv would leak them via
-    ``ps``. Instead each secret value is fed on **stdin** (one line per name,
-    AFTER the sudo password) and read back inside the already-elevated shell::
+    ``ps``. Instead each secret value is fed on **stdin** (one base64 line per
+    name, AFTER the sudo password) and decoded back inside the already-elevated
+    shell::
 
-        IFS= read -r GITHUB_TOKEN
+        IFS= read -r __b64_GITHUB_TOKEN
+        GITHUB_TOKEN=$(base64 -d <<<"$__b64_GITHUB_TOKEN" 2>/dev/null || base64 -D <<<"$__b64_GITHUB_TOKEN")
         export GITHUB_TOKEN
         <command>
+
+    base64 framing (vs. feeding the raw value) is what lets a **multi-line**
+    secret — a PEM private key, a multi-line JSON blob — survive intact: a raw
+    ``read -r`` would stop at the first embedded newline and misdeliver the rest
+    into the next variable. The value is one whitespace-free base64 line, so a
+    single ``read`` captures all of it; ``base64 -d`` (GNU) / ``-D`` (BSD/macOS)
+    decodes it. (Command substitution strips a trailing newline, so a value that
+    *ends* in ``\\n`` loses that one byte — rare for a secret and far better than
+    the previous corruption of any embedded newline.)
 
     Because the ``export`` runs inside the sudo'd shell (after env_reset) and the
     value travels on stdin, the secret reaches ``command`` without any sudoers
     ``env_keep`` config and without ever appearing on argv or in the audit log.
-    The caller feeds ``password + "\\n"`` then each value + ``"\\n"`` in
-    ``env_names`` order. With no names this returns ``command`` unchanged.
+    Feed the payload with :func:`sudo_stdin_secret_values` (password first, then
+    that payload). With no names this returns ``command`` unchanged.
 
     ``env_names`` are uppercased identifiers (from :func:`env_var_name`), so
     interpolating them into the script is safe.
     """
     if not env_names:
         return command
-    lines = [f"IFS= read -r {n}" for n in env_names]
+    lines: list[str] = []
+    for n in env_names:
+        lines.append(f"IFS= read -r __b64_{n}")
+        lines.append(
+            f'{n}=$(base64 -d <<<"$__b64_{n}" 2>/dev/null || '
+            f'base64 -D <<<"$__b64_{n}")')
     lines.append("export " + " ".join(env_names))
     lines.append(command)
     return "\n".join(lines)
+
+
+def sudo_stdin_secret_values(values: list) -> str:
+    """Build the stdin payload (one base64 line per value) that pairs with
+    :func:`sudo_stdin_secret_script`. Encoding here keeps the script and its
+    input framing in one place. Values are fed in list order, AFTER the sudo
+    password line."""
+    return "".join(
+        base64.b64encode(str(v).encode("utf-8")).decode("ascii") + "\n"
+        for v in values)
 
 
 # ─────────────────────────────────────────────────────────────────────

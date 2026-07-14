@@ -114,7 +114,16 @@ async def _resolve_secrets(names: "list[str]"):
 
     env: dict[str, str] = {}
     values: list[str] = []
+    seen: dict[str, str] = {}  # ENV_VAR_NAME -> originating secret name
     for name in names:
+        ev = secrets_store.env_var_name(name)
+        if ev in seen and seen[ev] != name:
+            return env, values, (
+                f"secret names '{seen[ev]}' and '{name}' both normalize to the "
+                f"same environment variable ${ev}, so one would silently "
+                f"clobber the other. Rename one so each injected secret gets a "
+                f"distinct variable. The command was NOT run."
+            )
         try:
             value = await secrets_store.resolve_secret(name)
         except Exception as e:  # command configured but failed (value-free msg)
@@ -131,7 +140,8 @@ async def _resolve_secrets(names: "list[str]"):
                 f"'{name}: {{command: ...}}' entry to secrets.yaml.) Never ask the "
                 f"user to paste the secret value into this conversation."
             )
-        env[secrets_store.env_var_name(name)] = value
+        env[ev] = value
+        seen[ev] = name
         values.append(value)
     return env, values, None
 
@@ -706,6 +716,12 @@ async def remote_tunnel(action: Literal["open", "close", "list"],
                                                   local_bind, local_port)
         else:  # socks (Literal guarantees one of the three)
             result = await tm.open_dynamic_proxy(host, local_port or 1080, local_bind)
+        if isinstance(result, dict) and result.get("error"):
+            # open_* returns {"error": ...} on failure; audit the real outcome
+            # instead of unconditionally recording "ok", and surface it.
+            audit_log(host, f"tunnel:{kind}", f"ERROR:{result['error']}",
+                      operation="tunnel_open")
+            raise ToolError(f"tunnel open failed on {host!r}: {result['error']}")
         audit_log(host, f"tunnel:{kind}", "ok", operation="tunnel_open")
         return json.dumps(result, indent=2)
 
@@ -1317,7 +1333,9 @@ async def remote_exec(host: "str | list[str]" = "", command: str = "",
                       operation="exec_secrets")
             return res
         # Plain one-shot path: ssh_exec runs over the pool and audits as "exec".
-        res = await ssh_exec(h, cmd, timeout=int(timeout),
+        # Pass timeout as-is (float): int() would floor a sub-second value like
+        # 0.9 to 0, turning a short deadline into "expire immediately".
+        res = await ssh_exec(h, cmd, timeout=timeout,
                              login=_resolve_login(login, h))
         _maybe_hint_sudo_tty(res)
         return res
@@ -1484,7 +1502,9 @@ async def remote_close(host: str) -> str:
     err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
-    return await _re_bash_close(host)
+    result = await _re_bash_close(host)
+    audit_log(host, "close", "ok", operation="bash_close")
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════

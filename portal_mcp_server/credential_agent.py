@@ -32,6 +32,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import os
 import shlex
 import socket
@@ -166,6 +167,14 @@ class CredentialAgent:
         if not key or not isinstance(value, str) or not value:
             return {"status": "error", "error": f"{kind} key and value required"}
         ttl = float(msg.get("ttl", DEFAULT_TTL_SEC))
+        # A non-finite or non-positive TTL (nan/inf/<=0) would make the entry
+        # never expire (nan/inf) or expire instantly. Fall back to the default
+        # so the security-relevant expiry boundary always holds. (The CLI uses
+        # int argparse, so this only guards a raw/buggy socket client.)
+        if not math.isfinite(ttl) or ttl <= 0:
+            logger.warning("ignoring invalid ttl=%r; using default %ss",
+                           msg.get("ttl"), DEFAULT_TTL_SEC)
+            ttl = float(DEFAULT_TTL_SEC)
         async with self._lock:
             self._cache[(kind, key)] = (value, time.monotonic() + ttl)
         logger.info("%s credential cached for %r (ttl=%ss)", kind, key, int(ttl))

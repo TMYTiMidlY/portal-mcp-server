@@ -402,7 +402,7 @@ async def remote_sudo_exec(host: str, command: str, password: str,
     names = list(env.keys())
     body = secrets_store.sudo_stdin_secret_script(command, names)
     wrapped = f"-- bash -c {quote_shell(body)}"
-    stdin_extra = "".join(f"{env[n]}\n" for n in names)
+    stdin_extra = secrets_store.sudo_stdin_secret_values([env[n] for n in names])
     t0 = time.monotonic()
     try:
         result = await _run_sudo_raw(host, wrapped, password,

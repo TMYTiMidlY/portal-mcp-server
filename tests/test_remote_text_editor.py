@@ -449,6 +449,22 @@ class TestPatchErrors:
         assert "overlapping" in res["reason"]
 
     @pytest.mark.asyncio
+    async def test_negative_end_does_not_corrupt_tail(self, fake_remote):
+        """A negative `end` must not index from the tail (Python slice) and
+        silently replace trailing lines; it clamps to an empty range (insert)."""
+        fs, _, _ = fake_remote
+        original = "a\nb\nc\nd\n"
+        fs.write("/f", original)
+        from portal_mcp_server.remote_text_editor import remote_patch
+        res = await remote_patch(
+            "h", "/f", file_hash=_h(original),
+            patches=[{"start": 2, "end": -1, "contents": "X\n", "range_hash": ""}],
+        )
+        assert res["result"] == "ok"
+        # b/c/d all survive (old bug: lines[1:-1] replaced b,c -> "a\nX\nd\n")
+        assert fs.read("/f") == "a\nX\nb\nc\nd\n"
+
+    @pytest.mark.asyncio
     async def test_patch_beyond_eof_rejected(self, fake_remote):
         fs, _, _ = fake_remote
         original = "a\nb\nc\n"
