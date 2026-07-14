@@ -464,7 +464,7 @@ wheels = [
 
 [[package]]
 name = "portal-mcp-server"
-version = "3.3.2"
+version = "4.0.0a0"
 source = { editable = "." }
 dependencies = [
     { name = "asyncssh" },

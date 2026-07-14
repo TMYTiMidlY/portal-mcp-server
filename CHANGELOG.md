@@ -1,3 +1,38 @@
+## v4.0.0a0 (2026-07-14)
+
+### BREAKING CHANGE
+
+- all MCP tool names changed. `portal_exec`→`remote_exec`,
+`portal_shell`→`remote_shell`, `portal_read`→`remote_read`,
+`portal_patch`→`remote_patch`, `portal_grep`→`remote_grep`,
+`portal_glob`→`remote_glob`, `portal_transfer`→`remote_transfer`,
+`portal_tunnel`→`remote_tunnel`, `portal_job`→`remote_job`,
+`portal_close_shell`→`remote_close`, `portal_local_exec`→`local_exec`,
+`portal_host`→`hosts`, `portal_check`→`policy_check`, `portal_audit`→`inspect`.
+No aliases are kept; update any client configs / prompts that reference the old
+names.
+- `timeout` is now a required parameter on portal_exec,
+portal_shell and portal_local_exec — the implicit 3600s default and the
+PORTAL_DEFAULT_TIMEOUT knob were removed, so callers that omitted it must now
+pass one, and a value above PORTAL_MAX_TIMEOUT (default 300s) is rejected.
+`use_ssh_config: true` now MERGES hosts.yaml over the ssh_config alias instead
+of a pure passthrough.
+
+### Feat
+
+- required exec timeout+cap, login shell, ssh_config merge, host normalize, privileged patch/read, resumable upload
+- **exec**: allow sudo and secrets to coexist via stdin read+export
+- **local_exec**: local sudo via portal_local_exec(use_sudo=True)
+- **host**: enumerate ssh-config aliases in list + PORTAL_SSH_CONFIG (ssh -F)
+- **read**: paginate portal_read with line/byte caps
+- **exec**: operator-configurable default command timeout
+- split passphrase credential and opt-in sudo reuse
+
+### Refactor
+
+- drop portal_ tool prefix; share sudo primitive; add CONTEXT + ADR
+- **host**: warnings name the active ssh config source; align zh/en docs
+
 ## v3.3.2 (2026-06-14)
 
 ### Fix
