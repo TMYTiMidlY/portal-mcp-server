@@ -69,20 +69,27 @@ class TunnelManager:
             return {"error": str(e)}
 
     async def open_remote_forward(self, host_name: str,
-                                   remote_port: int, local_host: str, local_port: int) -> dict:
-        """Reverse tunnel: remote_port on host_name → local_host:local_port."""
+                                   remote_port: int, local_host: str,
+                                   local_port: int,
+                                   listen_bind: str = "127.0.0.1") -> dict:
+        """Reverse tunnel: remote_port on host_name → local_host:local_port.
+
+        ``listen_bind`` is the address the remote sshd listens on. Default
+        ``127.0.0.1`` keeps the forwarded port reachable only from the remote
+        host itself; pass ``0.0.0.0`` (opt-in) to expose it on the remote's
+        other interfaces (still subject to the remote's ``GatewayPorts``)."""
         mgr = get_manager()
         conn = await mgr.get_connection(host_name)
         try:
             listener = await conn.forward_remote_port(
-                "", remote_port, local_host, local_port
+                listen_bind, remote_port, local_host, local_port
             )
             tid = str(uuid.uuid4())[:8]
             tunnel = ActiveTunnel(
                 tunnel_id=tid, tunnel_type="remote",
                 host_name=host_name,
                 local_host=local_host, local_port=local_port,
-                remote_host="0.0.0.0", remote_port=listener.get_port(),
+                remote_host=listen_bind, remote_port=listener.get_port(),
                 listener=listener,
                 conn=conn,
                 description=f"{host_name}:{listener.get_port()} → {local_host}:{local_port}"

@@ -718,13 +718,31 @@ async def remote_tunnel(action: Literal["open", "close", "list"],
         err = await _gate(host)
         if err:
             raise ToolError(f"BLOCKED: {err}")
+        # A tunnel listener reachable off-box is an unauthenticated proxy into
+        # the SSH host; keep binds loopback-only unless the operator opts in.
+        allow_exposure = os.environ.get(
+            "PORTAL_ALLOW_TUNNEL_EXPOSURE", "").lower() in ("1", "true", "yes", "on")
         if kind == "local":
+            if not _is_loopback_host(local_bind) and not allow_exposure:
+                raise ToolError(
+                    f"refusing to bind a local forward to non-loopback "
+                    f"{local_bind!r}: set PORTAL_ALLOW_TUNNEL_EXPOSURE=1 to allow "
+                    f"off-box exposure, or use local_bind='127.0.0.1'.")
             result = await tm.open_local_forward(host, local_port,
                                                  remote_host, remote_port, local_bind)
         elif kind == "reverse":
+            # Bind the remote listener to loopback by default; the opt-in widens
+            # it to all interfaces on the remote (still gated by GatewayPorts).
+            listen_bind = "0.0.0.0" if allow_exposure else "127.0.0.1"
             result = await tm.open_remote_forward(host, remote_port,
-                                                  local_bind, local_port)
+                                                  local_bind, local_port,
+                                                  listen_bind=listen_bind)
         else:  # socks (Literal guarantees one of the three)
+            if not _is_loopback_host(local_bind) and not allow_exposure:
+                raise ToolError(
+                    f"refusing to bind a SOCKS proxy to non-loopback "
+                    f"{local_bind!r}: set PORTAL_ALLOW_TUNNEL_EXPOSURE=1 to allow "
+                    f"off-box exposure, or use local_bind='127.0.0.1'.")
             result = await tm.open_dynamic_proxy(host, local_port or 1080, local_bind)
         if isinstance(result, dict) and result.get("error"):
             # open_* returns {"error": ...} on failure; audit the real outcome
