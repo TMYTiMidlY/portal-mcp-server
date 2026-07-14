@@ -57,7 +57,7 @@ portal-mcp-server 的设计围绕三条理念：**工具少而正交**（只保�
 - **agent-first 的精简工具面**：`action` / `mode` 字段合并语义重复的入口，每个工具只提供一条 bash 难以廉价合成的保证，减少 agent 选工具的歧义。工具 schema（name + description + inputSchema）合计约占 **~9k tokens**（≈ 200k 上下文窗口的 **~4–5%**；`tiktoken o200k_base` 实测约 8.8k）。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed；可选接入 [cc-safety-net](https://github.com/kenryu42/cc-safety-net) 语义级 command gate（opt-in，能脱 `bash -c` 壳 / 拦解释器单行 / 破坏性 git/rm，覆盖 `remote_exec`/`local_exec`/`shell`/`job` 这些绕过 agent `bash` PreToolUse hook 的执行路径，默认 fail-closed）。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
-- **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
+- **一条命令装好**：`uv tool install portal-mcp-server` 一次同时得到 MCP server 二进制和 `portal` 短命令 CLI；也可零安装用 `uvx portal-mcp-server@latest` 让 client 从 PyPI 现拉现跑，无需 clone、无需 venv。
 
 ## <a id="architecture-design"></a>架构与设计
 
@@ -268,28 +268,40 @@ agent 常想要"持久传输 / 活过 agent 关闭"，最直觉的实现是 `noh
 
 ## <a id="install"></a>安装
 
-portal-mcp-server 和其他 MCP server 一样接入——登记进你的 MCP client 即可（MCP 是什么见 [modelcontextprotocol.io](https://modelcontextprotocol.io/)）。它**不需要 clone、不需要常驻安装**：client 通过 [`uv`](https://docs.astral.sh/uv/) 的 `uvx` 直接从 PyPI 拉起运行，首次缓存依赖、之后秒级启动。
+portal-mcp-server 和其他 MCP server 一样接入——登记进你的 MCP client 即可（MCP 是什么见 [modelcontextprotocol.io](https://modelcontextprotocol.io/)）。用 [`uv`](https://docs.astral.sh/uv/) 起，没有 `uv` 先装一个（`curl -LsSf https://astral.sh/uv/install.sh | sh`；Windows 见 [uv 安装文档](https://docs.astral.sh/uv/getting-started/installation/)）。
 
-没有 `uv` 先装一个（`curl -LsSf https://astral.sh/uv/install.sh | sh`；Windows 见 [uv 安装文档](https://docs.astral.sh/uv/getting-started/installation/)）。各 client 里怎么填 `uvx portal-mcp-server@latest` 见下方 [接入方式](#client-integration)。
+**推荐 `uv tool install portal-mcp-server`**——一次安装，PATH（`~/.local/bin`）里同时得到 MCP server 二进制和 `portal` 短命令 CLI：
+
+```bash
+uv tool install portal-mcp-server     # 装 portal-mcp-server + portal 两个入口
+uv tool upgrade portal-mcp-server     # 之后升级（或 uv tool upgrade --all）
+```
+
+为什么装成常驻而不是 `uvx`：凭据操作（`portal ssh/sudo/secret set` 等）是要**手敲的日常命令**，装好才有短命令 `portal …`；而且 MCP server 和 CLI 是**同一份、同版本**不会漂移，启动也不必每次按 `@latest` 联网重解析。MCP client 里把 `command` 填 `portal-mcp-server`（见下方 [接入方式](#client-integration)）。
+
+> **零安装 / 只想试一下**：也可以不装，让 client 通过 `uvx portal-mcp-server@latest` 直接从 PyPI 现拉现跑（首次缓存依赖、之后秒级）。代价是每次启动都按 `@latest` 联网重解析、且拿不到 `portal` 短命令——高频用 CLI 不划算。
 
 最快上手（以 Claude Code 为例；其他 client 见 [接入方式](#client-integration)）：
 
 ```bash
-# 1. 登记（--scope user 对所有 repo 生效）
-claude mcp add --scope user portal -- uvx portal-mcp-server@latest
-# 2. 确保目标 host 在 ~/.ssh/config 或 hosts.yaml 里
-# 3. 在对话里说"看看 myhost 上 /var/log/syslog 最后 50 行"，
+# 1. 安装（得到 portal-mcp-server + portal 两个命令）
+uv tool install portal-mcp-server
+# 2. 登记（--scope user 对所有 repo 生效）
+claude mcp add --scope user portal -- portal-mcp-server
+# 3. 确保目标 host 在 ~/.ssh/config 或 hosts.yaml 里
+# 4. 在对话里说"看看 myhost 上 /var/log/syslog 最后 50 行"，
 #    agent 就会调用 remote_exec("myhost", "tail -50 /var/log/syslog", timeout=30)
 ```
 
 ### 终端用户（用 MCP server，不动源码）
 
-不需要 clone，让 MCP client 通过 `uvx` 直接从 PyPI 拉运行——见下方 [接入方式](#client-integration)。`uvx` 第一次启动缓存依赖，后续重启秒级。
+`uv tool install portal-mcp-server` 之后，MCP client 里把 `command` 填 `portal-mcp-server`（见下方 [接入方式](#client-integration)）即可；也可以不装、用 `uvx portal-mcp-server@latest` 让 client 现拉现跑。
 
 shell 里手动 smoke test：
 
 ```bash
-uvx portal-mcp-server@latest --help
+portal-mcp-server --help              # 已安装
+uvx portal-mcp-server@latest --help   # 或零安装
 ```
 
 ### 开发者（要改代码 / 跑测试）
@@ -377,19 +389,36 @@ portal ssh    clear web01            # 清掉单条
 
 `passphrase` / `sudo` / `secret` 子命令树结构完全一致（key 名分别是 `host` / `host` / `name`）。
 
+> **未知 host 保护（`set` / `confirm`）**：`ssh` / `passphrase` / `sudo` 的 `set` / `confirm` 会先校验 host 是否已知——**既不在 `hosts.yaml`、`~/.ssh/config` 里也没有对应 `Host` 别名**就直接报错退出（列出已知 host 帮你发现笔误），**不会**弹密码输入、也不会白缓存一条永远连不上的凭据。这多半是 `portaltest` 敲成 `portaltes` 这类 typo。若 host 确实存在但当前 CLI 进程看不到（比如运行时 `hosts(action="register")` 动态注册的），加 `--force` 跳过校验：`portal ssh set myhost --force`。`secret`（key 是 name 不是 host）和 `sudo set-local`（保留身份 `<local>`）天然豁免，没有 `--force`。
+
 > **设计原则：plaintext 永不离开 agent 内存**。整套 CLI **故意没有 `show plaintext` / `dump` 这种动词**：`show` 只回 sha256[:16] 指纹 + TTL，`list` 同理，`confirm` 是让你重新输入一遍跟内存里的比对。明文只交给同 uid 的真消费者——asyncssh（SSH 握手 / 本地 key 解锁）、`sudo -S`（stdin）、`$env` 注入（subprocess env）。terminal scrollback / 截图 / OBS / asciinema / 远程 view session / stdout pipe 全是泄露面，明文 echo 会把无回显输入的所有保护清零。业内同类工具（ssh-agent `-L` 只列指纹 / gpg-agent 无导出 passphrase / vault agent 走 template / polkit-agent 纯 GUI）全是同一套姿态。需要把值导出去用，应该走 `password_command` / `passphrase_command` / `secrets.yaml` 的 `command:` 从密码管理器临时拉，**不要**让 credential agent 回吐明文。
 
 ## <a id="client-integration"></a>接入方式
 
 [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlckBsYXRlc3QiXX0=)
 
-`portal-mcp-server` 是一个本地 stdio MCP server，所有支持 MCP 的 host 都能接入。下面给常见 host 的最小配置——`uvx` 会自动从 PyPI 拉取并缓存，后续启动秒级。
+`portal-mcp-server` 是一个本地 stdio MCP server，所有支持 MCP 的 host 都能接入。下面给常见 host 的最小配置。**推荐先 `uv tool install portal-mcp-server`，再把 `command` 填 `portal-mcp-server`**；下面每个 client 的一键 badge / `mcp add` 命令用的是零安装的 `uvx portal-mcp-server@latest` 形式，装过的把 `uvx` + `portal-mcp-server@latest` 换成 `portal-mcp-server` 即可。
 
-> 如果 MCP client 找不到 `uvx`，用 `which uvx`（Windows 用 `where uvx`）查完整路径，并把 `command` 改成该绝对路径。
+> 如果 MCP client 找不到 `portal-mcp-server`（或 `uvx`）——常见于 GUI app（Claude Desktop / VS Code）不继承你 shell 的 PATH——用 `which portal-mcp-server`（Windows 用 `where portal-mcp-server`）查绝对路径填进 `command`。`uv tool` 装的这个路径（`~/.local/bin/portal-mcp-server`）跨 `uv tool upgrade` 不变，写死也稳。
 
 ### 通用配置片段
 
 > 大多数 host 都接受 `{ "mcpServers": { "<name>": { "command": ..., "args": [...] } } }` 这种顶层 schema；VS Code 和 Codex 用各自专有 schema，单独列出。
+
+已安装（推荐，`command` 就是短二进制名）：
+
+```json
+{
+  "mcpServers": {
+    "portal": {
+      "command": "portal-mcp-server",
+      "args": []
+    }
+  }
+}
+```
+
+零安装（不装，走 uvx 现拉现跑）：
 
 ```json
 {
@@ -419,11 +448,12 @@ portal ssh    clear web01            # 清掉单条
 直接编辑 `<project>/.mcp.json`（同上 schema），或用 CLI / 斜杠命令登记：
 
 ```bash
-# 推荐：user 级，对所有 repo 生效
-claude mcp add --scope user portal -- uvx portal-mcp-server@latest
+# 推荐：user 级，对所有 repo 生效（已 uv tool install，command 用短名 portal-mcp-server）
+claude mcp add --scope user portal -- portal-mcp-server
 
 # 不加 --scope 默认是 local，只在「当前目录」生效，换个目录 claude mcp list 就看不到
-claude mcp add portal -- uvx portal-mcp-server@latest
+claude mcp add portal -- portal-mcp-server
+# 零安装：把 portal-mcp-server 换成 uvx portal-mcp-server@latest
 # 或在 Claude Code 会话内输入 /mcp 交互登记
 ```
 
@@ -818,8 +848,8 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 {
   "mcpServers": {
     "portal": {
-      "command": "uvx",
-      "args": ["portal-mcp-server@latest"],
+      "command": "portal-mcp-server",
+      "args": [],
       "env": {
         "PORTAL_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
         "PORTAL_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",

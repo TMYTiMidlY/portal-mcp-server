@@ -94,8 +94,9 @@ and the [Security](#security) section.
   paths that bypass the agent's own `bash` PreToolUse hook; fail-closed).
 - **OpenSSH config compatibility**: `~/.ssh/config` aliases, `known_hosts`,
   ssh-agent are recognized automatically — no need to re-register hosts.
-- **Zero extra deployment**: the MCP client runs it straight from PyPI via
-  `uvx` — no clone, no venv.
+- **One-command install**: `uv tool install portal-mcp-server` gives you both the
+  MCP server and the `portal` CLI; or zero-install via `uvx portal-mcp-server@latest`
+  straight from PyPI — no clone, no venv.
 
 ## <a id="architecture-design"></a>Architecture & design
 
@@ -365,32 +366,50 @@ logged. The agent is expected to relay them to the user.
 
 portal-mcp-server is installed like any other MCP server — register it with your
 MCP client (see [modelcontextprotocol.io](https://modelcontextprotocol.io/) for
-what MCP is). It needs **no clone and no persistent install**: the client launches
-it straight from PyPI via [`uv`](https://docs.astral.sh/uv/)'s `uvx`, caching
-dependencies on first run and starting in seconds afterward.
+what MCP is). It runs on [`uv`](https://docs.astral.sh/uv/); if you don't have it,
+install it (`curl -LsSf https://astral.sh/uv/install.sh | sh`; Windows:
+[uv install docs](https://docs.astral.sh/uv/getting-started/installation/)).
 
-If you don't have `uv`, install it (`curl -LsSf https://astral.sh/uv/install.sh | sh`;
-Windows: [uv install docs](https://docs.astral.sh/uv/getting-started/installation/)).
-How to enter `uvx portal-mcp-server@latest` per client is in
-[Client integration](#client-integration).
+**Recommended: `uv tool install portal-mcp-server`** — one install puts both the
+MCP server binary and the `portal` short-command CLI on your PATH (`~/.local/bin`):
+
+```bash
+uv tool install portal-mcp-server     # installs portal-mcp-server + portal
+uv tool upgrade portal-mcp-server     # update later (or uv tool upgrade --all)
+```
+
+Why persistent over `uvx`: the credential ops (`portal ssh/sudo/secret set`, …)
+are **everyday commands you type by hand**, so you want the short `portal …`; and
+the MCP server and CLI are then the **same build at the same version** (no drift),
+with no per-launch `@latest` network re-resolution. In your client set `command`
+to `portal-mcp-server` (see [Client integration](#client-integration)).
+
+> **Zero-install / just trying it**: you can skip installing and let the client
+> launch `uvx portal-mcp-server@latest` straight from PyPI (cached on first run,
+> seconds after). The cost: every launch re-resolves `@latest` over the network
+> and you don't get the `portal` short command — not worth it if you use the CLI a lot.
 
 Fastest start (Claude Code shown; other clients under [Client integration](#client-integration)):
 
 ```bash
-# 1. Register (--scope user applies to all repos)
-claude mcp add --scope user portal -- uvx portal-mcp-server@latest
-# 2. Make sure the target host is in ~/.ssh/config or hosts.yaml
-# 3. In chat, say "show the last 50 lines of /var/log/syslog on myhost";
+# 1. Install (get the portal-mcp-server + portal commands)
+uv tool install portal-mcp-server
+# 2. Register (--scope user applies to all repos)
+claude mcp add --scope user portal -- portal-mcp-server
+# 3. Make sure the target host is in ~/.ssh/config or hosts.yaml
+# 4. In chat, say "show the last 50 lines of /var/log/syslog on myhost";
 #    the agent calls remote_exec("myhost", "tail -50 /var/log/syslog", timeout=30)
 ```
 
 ### Terminal users (use the MCP server, don't touch source)
 
-No clone needed — let the client pull and run via `uvx` (see
-[Client integration](#client-integration)). Manual smoke test:
+After `uv tool install portal-mcp-server`, set your client's `command` to
+`portal-mcp-server` (see [Client integration](#client-integration)); or skip the
+install and use `uvx portal-mcp-server@latest`. Manual smoke test:
 
 ```bash
-uvx portal-mcp-server@latest --help
+portal-mcp-server --help              # installed
+uvx portal-mcp-server@latest --help   # or zero-install
 ```
 
 ### Developers (change code / run tests)
@@ -436,6 +455,22 @@ request (it re-reads `agent.json`); no restart needed. See [Authentication](#aut
 
 ### Generic config snippet
 
+**Recommended** (after `uv tool install portal-mcp-server`, `command` is the bare
+binary name):
+
+```json
+{
+  "mcpServers": {
+    "portal": {
+      "command": "portal-mcp-server",
+      "args": []
+    }
+  }
+}
+```
+
+Zero-install (no install, uvx pulls on launch):
+
 ```json
 {
   "mcpServers": {
@@ -446,6 +481,12 @@ request (it re-reads `agent.json`); no restart needed. See [Authentication](#aut
   }
 }
 ```
+
+> If the host can't find `portal-mcp-server` (or `uvx`) — common with GUI apps
+> (Claude Desktop / VS Code) that don't inherit your shell PATH — put the absolute
+> path from `which portal-mcp-server` (Windows: `where portal-mcp-server`) in
+> `command`. The `uv tool` path (`~/.local/bin/portal-mcp-server`) is stable across
+> `uv tool upgrade`, so hardcoding it is safe.
 
 To pass environment variables (pointing at custom hosts/policies/log paths),
 add `env`:
@@ -468,10 +509,11 @@ add `env`:
 ### Claude Code CLI
 
 ```bash
-# Recommended: user scope, all repos
-claude mcp add --scope user portal -- uvx portal-mcp-server@latest
+# Recommended: user scope, all repos (uv tool installed → command is portal-mcp-server)
+claude mcp add --scope user portal -- portal-mcp-server
 # Without --scope it defaults to local (current dir only)
-claude mcp add portal -- uvx portal-mcp-server@latest
+claude mcp add portal -- portal-mcp-server
+# Zero-install: replace portal-mcp-server with  uvx portal-mcp-server@latest
 # or type /mcp inside a Claude Code session
 ```
 
