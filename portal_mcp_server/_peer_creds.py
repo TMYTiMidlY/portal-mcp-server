@@ -19,9 +19,16 @@ regression.
 On Windows the agent speaks over a named pipe instead of a Unix socket;
 :func:`is_same_user_named_pipe_peer` resolves the peer process's user SID
 (via ``GetNamedPipe{Client,Server}ProcessId`` → token → SID) and compares it
-to the current user's. It **fails open** (returns ``True``) on any error, so a
-bug in the Win32 plumbing can never break the same-user happy path — it only
-adds a reject when it can positively prove a cross-user peer.
+to the current user's. It **fails closed** (returns ``False``) when it cannot
+prove the peer is the same user — the peer pid or its token SID being
+unreadable is itself the signature of a cross-user / higher-integrity peer
+(you can always read a same-user peer's token). The one exception is failing
+to read *our own* SID, which is a pathological local bug rather than evidence
+of a cross-user peer, so that degrades to allow.
+
+Note: asyncio's ``ProactorEventLoop.start_serving_pipe`` creates the pipe with
+the process token's default DACL (no API to pass a custom security descriptor),
+so this SID check — not a hand-set ACL — is the effective same-user gate.
 """
 from __future__ import annotations
 
@@ -68,33 +75,51 @@ def is_same_uid_peer(sock: socket.socket) -> bool:
 
 # ── Windows named-pipe peer verification ─────────────────────────────────────
 # The agent uses a named pipe on Windows (no SO_PEERCRED). We resolve the peer
-# process's user SID and compare it to ours. Everything here FAILS OPEN: any
-# Win32 error degrades to "allow", so this can only ever *add* a reject for a
-# provably cross-user peer — it can never break the same-user happy path.
+# process's user SID and compare it to ours. This FAILS CLOSED: if we cannot
+# prove the peer is the same user (its pid or token SID is unreadable — exactly
+# what happens for a cross-user / higher-integrity process, since a same-user
+# peer's token is always queryable by us) we deny. Only failing to read our OWN
+# SID degrades to allow, as that is a local bug, not a cross-user signal.
 
 def is_same_user_named_pipe_peer(handle: int, *, role: str) -> bool:
     """True iff the named pipe's peer runs as the current Windows user.
 
     ``role="server"`` checks the connected client (``GetNamedPipeClientProcessId``);
     ``role="client"`` checks the server (``GetNamedPipeServerProcessId``).
-    Non-Windows or any failure → ``True`` (degrade to ACL / name scoping).
+    Non-Windows → ``True`` (Unix uses SO_PEERCRED / filesystem perms instead).
+    Fails CLOSED on Windows: anything that prevents proving same-user → deny.
     ``handle`` is the OS pipe HANDLE as an int.
     """
     if sys.platform != "win32":
         return True
     try:
+        my_sid = _win_process_user_sid(None)  # None => current process
+        if not my_sid:
+            # Can't resolve our OWN user SID: a pathological Win32 failure, not
+            # evidence of a cross-user peer. Degrade to allow so our own bug
+            # can't brick the same-user happy path.
+            logger.warning("named-pipe peer check: could not resolve own SID; allowing")
+            return True
         peer_pid = _win_named_pipe_peer_pid(handle, role)
         if peer_pid is None:
-            return True
+            logger.warning("named-pipe peer check: could not resolve peer pid; denying")
+            return False
         peer_sid = _win_process_user_sid(peer_pid)
-        my_sid = _win_process_user_sid(None)  # None => current process
-        if not peer_sid or not my_sid:
-            return True
-        return peer_sid == my_sid
-    except Exception:  # pragma: no cover - win32-only; fail open
-        logger.debug("named-pipe peer check failed; degrading to allow",
-                     exc_info=True)
+        if not peer_sid:
+            # A same-user peer's token is queryable by us; failure to read it
+            # signals a cross-user / higher-integrity peer → deny.
+            logger.warning(
+                "named-pipe peer check: could not resolve peer SID (pid=%s); denying",
+                peer_pid)
+            return False
+        if peer_sid != my_sid:
+            logger.warning("named-pipe peer check: peer SID %s != own %s; denying",
+                           peer_sid, my_sid)
+            return False
         return True
+    except Exception:  # pragma: no cover - win32-only; fail closed
+        logger.warning("named-pipe peer check errored; denying", exc_info=True)
+        return False
 
 
 def _win_named_pipe_peer_pid(handle: int, role: str):  # pragma: no cover - win32 only
