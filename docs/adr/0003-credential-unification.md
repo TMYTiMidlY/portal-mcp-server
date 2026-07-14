@@ -1,48 +1,40 @@
-# 0003 — One in-process credential path; no detached subprocess for durability
+# 0003 — 唯一的进程内凭据路径；不为"活得久"而起分离子进程
 
-Status: accepted
+> 🌐 简体中文 ｜ [English](./0003-credential-unification.en.md)
 
-Every connection portal makes goes through a single in-process asyncssh
-authentication path. All credential kinds — SSH key, login password, key
-passphrase, sudo password, named secret — are resolved on that path and handed
-only to their real consumer (the asyncssh handshake, `sudo -S` on stdin, or an
-injected environment variable); the plaintext never reaches the agent
-conversation, a command line / `ps` argv, or disk. portal will NOT spawn a
-detached subprocess (`nohup scp` / `rsync` / `ssh`) to make an operation outlive
-the agent, because that subprocess cannot use this path.
+状态：已采纳（accepted）
 
-## Context
+portal 建立的每条连接都走唯一一条进程内 asyncssh 认证路径。所有凭据类型——SSH 密钥、
+登录密码、密钥 passphrase、sudo 密码、命名 secret——都在这条路径上解析，明文只交给它
+真正的消费方（asyncssh 握手、`sudo -S` 的 stdin、注入的环境变量）；明文永不进入 agent
+对话、命令行 / `ps` argv、或磁盘。portal **不会**为了让某操作活得比 agent 久而起一个
+分离的子进程（`nohup scp` / `rsync` / `ssh`），因为那个子进程用不上这条路径。
 
-Agents frequently want a transfer or command to "survive the agent stopping".
-The obvious implementation is a detached `nohup rsync` / `scp` child process. But
-portal's credential guarantees — a `password_command` fetched fresh at connect
-time, the hosts.yaml ↔ ssh_config merge (see
-[ADR-0002](0002-ssh-config-merge.md)), and "no password on argv" — only exist on
-the in-process asyncssh path. A shelled-out `scp` / `rsync` would have none of
-them: it would fall back to `sshpass`, putting the password on the argv
-(`ps`-visible), or lose `password_command` / merge entirely.
+## 背景
 
-## Considered options
+agent 常想让一次传输或命令"在 agent 停止后仍继续"。最直白的实现是起一个分离的
+`nohup rsync` / `scp` 子进程。但 portal 的凭据保证——连接时现取的 `password_command`、
+hosts.yaml ↔ ssh_config 合并（见 [ADR-0002](0002-ssh-config-merge.md)）、以及"密码不进
+argv"——只存在于进程内的 asyncssh 路径上。外壳出去的 `scp` / `rsync` 一个都没有：它会
+回落到 `sshpass`、把密码放进 argv（`ps` 可见），或彻底丢掉 `password_command` / 合并。
 
-- **Detached subprocess for durable ops** — rejected: bypasses the unified
-  credential path and reintroduces exactly the argv / plaintext leakage the
-  project exists to avoid.
-- **HTTP transport to decouple from the stdio-client lifetime** — deferred:
-  heavier to deploy and does not specifically solve durable transfer; a larger
-  change than the problem warrants here.
-- **Stay fully in-process; get durability elsewhere** — chosen. Durable work
-  goes to `remote_job` (the command is `nohup`-ed on the REMOTE host, so the
-  credential was already consumed at connect time and no local child needs to
-  hold it); an interrupted upload recovers via `remote_transfer`'s `resume`.
+## 考虑过的方案
 
-## Consequences
+- **为持久操作起分离子进程**——否决：绕开统一凭据路径，重新引入本项目存在的意义所要
+  避免的 argv / 明文泄漏。
+- **用 HTTP transport 与 stdio 客户端生命周期解耦**——推迟*作为持久性方案*：部署更重，
+  且不专门解决持久传输，是比问题本身更大的改动。（HTTP transport 后来因其他原因加了
+  进来；这并不改变本决策——持久性仍交给 `remote_job` / resume。）
+- **完全留在进程内，持久性另想办法**——选中。持久工作交给 `remote_job`（命令 `nohup`
+  在**远端**主机上，凭据在连接建立时就已用完、无需本地子进程持有）；前台传输中断则靠
+  `remote_transfer` 的 `resume` 续传恢复。
 
-- Foreground `remote_exec` / `remote_shell` / `remote_transfer` die with the
-  agent / server by design — that is the documented exec-vs-job distinction, not
-  a gap.
-- "Durable" means `remote_job`; "recover an interrupted upload" means `resume`,
-  not autonomous survival of a foreground transfer.
-- The credential-unification invariant holds for every code path, which is what
-  lets the project promise "plaintext never enters the LLM / argv / disk".
-- The vocabulary — "Credential path", "Foreground / Background execution" — is
-  defined in [`CONTEXT.md`](../../CONTEXT.md).
+## 后果
+
+- 前台 `remote_exec` / `remote_shell` / `remote_transfer` 随 agent / server 一起死，这是
+  设计如此——就是那条已写明的 exec-vs-job 区分，不是缺陷。
+- "持久"指 `remote_job`；"恢复中断的上传"指 `resume`，而非前台传输的自主存活。
+- 凭据统一不变量对每条代码路径都成立，这正是本项目敢承诺"明文永不进入 LLM / argv /
+  磁盘"的依据。
+- 词汇——"凭据路径（Credential path）"、"前台 / 后台执行"——定义在
+  [`CONTEXT.md`](../../CONTEXT.md)。

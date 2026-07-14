@@ -1,48 +1,41 @@
-# 0002 — hosts.yaml ↔ ssh_config merge is opt-in, with a HostName-mismatch guard
+# 0002 — hosts.yaml ↔ ssh_config 合并是 opt-in，并带 HostName 不一致护栏
 
-Status: accepted
+> 🌐 简体中文 ｜ [English](./0002-ssh-config-merge.en.md)
 
-When a host is resolved, `hosts.yaml` and `~/.ssh/config` are NOT merged by
-default. Merging is opt-in per host via `use_ssh_config: true`: the ssh_config
-`Host` alias becomes the base and the explicitly-set `hosts.yaml` fields override
-on top. If `hosts.yaml` sets `host:` (the dial address / HostName) AND the host
-name is an ssh_config alias AND the two HostNames differ, the connection tools
-hard-error instead of silently connecting; `hosts(action=list)` / `policy_check`
-surface the same conflict as a warning so it stays diagnosable.
+状态：已采纳（accepted）
 
-## Context
+解析一台主机时，`hosts.yaml` 与 `~/.ssh/config` **默认不合并**。合并按主机经
+`use_ssh_config: true` 显式开启：ssh_config 的 `Host` 别名做基底，把显式设置的
+`hosts.yaml` 字段叠在上面覆盖。如果 `hosts.yaml` 设了 `host:`（拨号地址 / HostName），
+且该主机名是一个 ssh_config 别名，且两个 HostName 不一致，连接工具会**直接报错**而非
+静默连接；`hosts(action=list)` 会把同一冲突作为 warning 暴露出来，便于诊断。
 
-asyncssh (2.23.0) matches an ssh_config `Host` pattern against the host you
-actually connect to, and resolves each option as "explicit kwarg, else config
-value" (see [`asyncssh/config.py`](https://github.com/ronf/asyncssh/blob/v2.23.0/asyncssh/config.py)
-and [`asyncssh/connection.py`](https://github.com/ronf/asyncssh/blob/v2.23.0/asyncssh/connection.py)).
-To inherit an alias's long-tail options (`IdentityAgent`, `ProxyJump`,
-keepalives, …) you must connect with `host=<alias>` so asyncssh matches that
-`Host` block — but then `HostName` is pinned by ssh_config and a `hosts.yaml`
-`host:` can no longer override it (every OTHER field still can). "Inherit the
-alias's options AND dial a different HostName" is therefore not expressible in a
-single connection.
+## 背景
 
-## Considered options
+asyncssh（2.23.0）按"你实际去连的那个 host"匹配 ssh_config 的 `Host` 段，且每个选项按
+"显式 kwarg，否则取 config 值"解析（见
+[`asyncssh/config.py`](https://github.com/ronf/asyncssh/blob/v2.23.0/asyncssh/config.py)
+与 [`asyncssh/connection.py`](https://github.com/ronf/asyncssh/blob/v2.23.0/asyncssh/connection.py)）。
+要继承某别名的长尾选项（`IdentityAgent`、`ProxyJump`、keepalive…），就必须以
+`host=<别名>` 去连，让 asyncssh 匹配那个 `Host` 段——但这样 `HostName` 就由 ssh_config
+定死，`hosts.yaml` 的 `host:` 再也覆盖不了它（其余字段仍可覆盖）。"既继承别名选项、又拨
+一个不同的 HostName"在单次连接里因此不可兼得。
 
-- **Always merge, silently** — rejected: surprising. A `hosts.yaml` `host:` that
-  disagrees with the alias's HostName would be silently ignored, connecting to
-  the wrong address with no signal.
-- **Never merge (pure passthrough, hosts.yaml only)** — rejected: can't inherit
-  an alias's long-tail options; forces re-declaring `IdentityAgent` / `ProxyJump`
-  / … in hosts.yaml.
-- **Opt-in merge + hard-error on HostName mismatch** — chosen: default behavior
-  is unchanged (non-breaking), opting in buys option inheritance, and the one
-  case the model genuinely can't express (conflicting HostName) fails loudly and
-  diagnosably rather than silently.
+## 考虑过的方案
 
-## Consequences
+- **总是静默合并**——否决：太意外。与别名 HostName 不一致的 `hosts.yaml` `host:` 会被
+  静默忽略，连到错误地址而无任何信号。
+- **从不合并（纯 passthrough，只用 hosts.yaml）**——否决：无法继承别名的长尾选项，逼
+  你在 hosts.yaml 里重新声明 `IdentityAgent` / `ProxyJump` / …。
+- **opt-in 合并 + HostName 不一致就报错**——选中：默认行为不变（非破坏性），opt-in 换来
+  选项继承，而模型唯一真正无法表达的那种情况（HostName 冲突）会响亮且可诊断地失败，而
+  非静默连错地址。
 
-- Default resolution is unchanged for anyone not setting `use_ssh_config`.
-- The hand-picked ssh-option fields (`proxy_jump`, `keepalive_interval`,
-  `forward_agent`, `use_ssh_agent`) stay as explicit overrides, needed for
-  pure-hosts.yaml hosts that have no ssh_config alias.
-- A conflicting HostName is a hard error on connect (and a listed warning), not a
-  silent wrong-address connection.
-- The vocabulary — "Merge", "Host name" vs "HostName" — is defined in
-  [`CONTEXT.md`](../../CONTEXT.md).
+## 后果
+
+- 对不设 `use_ssh_config` 的人，默认解析不变。
+- 手挑的那几个 ssh 选项字段（`proxy_jump`、`keepalive_interval`、`forward_agent`、
+  `use_ssh_agent`）仍作为显式覆盖保留，供没有 ssh_config 别名的纯 hosts.yaml 主机使用。
+- HostName 冲突在连接时是硬错误（且列表里有 warning），而非静默连错地址。
+- 词汇——"合并（Merge）"、"主机名（Host name）"vs"HostName"——定义在
+  [`CONTEXT.md`](../../CONTEXT.md)。

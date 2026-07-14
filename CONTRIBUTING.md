@@ -17,7 +17,7 @@ pytest                         # 应全绿（live SSH 测试默认 skip）
 要让 MCP client 直接跑这个本地 checkout，可安装成固定可执行文件：
 
 ```bash
-uv tool install --force .      # --force 覆盖旧 tool，确保用当前 checkout
+uv tool install --force --editable .   # --force 覆盖旧 tool；--editable 让源码改动即时生效
 ```
 
 不想用 uv 也可以走标准 pip：
@@ -117,7 +117,7 @@ PR 必须四个 Python 版本全绿才能 merge。
 ### Release — `.github/workflows/release.yml`
 
 触发：
-- push tag 匹配 `v*.*.*`（**生产路径**）
+- push tag 匹配 `v*`（含 PEP 440 预发布 / dev / post，如 `v4.0.0a0`）（**生产路径**）
 - `workflow_dispatch`（手动兜底）
 
 三个 job 顺序执行：
@@ -166,7 +166,7 @@ GH environment `pypi` 在仓库 Settings → Environments 里绑到 https://pypi
 6. 在 [Actions 页](https://github.com/TMYTiMidlY/portal-mcp-server/actions) 等三个 job 全绿
 7. 验收：https://github.com/TMYTiMidlY/portal-mcp-server/releases/tag/v\<x.y.z\> + https://pypi.org/project/portal-mcp-server/\<x.y.z\>/
 
-> `cz bump` 不会自己 push（给你留了反悔的机会）。`--follow-tags` 会把 annotated tag 跟 `main` 一起推上去；release.yml 由 `push: tags: ['v*.*.*']` 触发。
+> `cz bump` 不会自己 push（给你留了反悔的机会）。`--follow-tags` 会把 annotated tag 跟 `main` 一起推上去；release.yml 由 `push: tags: ['v*']` 触发（`v*` 而非 `v*.*.*`，故 `v4.0.0a0` 这类预发布 tag 也会触发）。
 
 ### Release 出错怎么办
 
