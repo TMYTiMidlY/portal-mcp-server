@@ -745,6 +745,20 @@ class ConnectionManager:
         cfg = self._registry.get(normalize_host_name(host_name))
         return bool(cfg and cfg.sudo_password_same_as_ssh)
 
+    def knows_host(self, name: str) -> bool:
+        """True if ``name`` resolves to a real host WITHOUT any side effect: an
+        explicit registry / hosts.yaml entry, or a concrete ``Host`` alias in the
+        OpenSSH client config.
+
+        Mirrors :meth:`get_connection`'s resolution order (registry → ssh config)
+        but never auto-registers. Lets the credential CLI reject caching a
+        password under a host name nothing can connect to — a typo, or a host the
+        user hasn't configured yet. Note: the reserved ``<local>`` sudo identity
+        is intentionally NOT in the registry, so callers exempt it separately.
+        """
+        return (normalize_host_name(name) in self._registry
+                or self.has_ssh_config_alias(name))
+
     def config_warnings(self) -> dict[str, list[str]]:
         """host -> config warnings collected at registry load time."""
         return {k: list(v) for k, v in self._config_warnings.items()}

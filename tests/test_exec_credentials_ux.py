@@ -158,6 +158,7 @@ def test_ssh_set_does_not_cache_sudo_by_default(monkeypatch):
     monkeypatch.setattr("portal_mcp_server.credential_agent.store", fake_store)
     monkeypatch.setattr(cli, "_should_cache_ssh_password_as_sudo",
                         lambda _host: False)
+    monkeypatch.setattr(cli, "_validate_known_host_or_exit", lambda _a: None)
 
     args = SimpleNamespace(kind="ssh", key="web01", ttl=60)
     assert cli._kind_set_cli(args) == 0
@@ -176,6 +177,7 @@ def test_ssh_set_caches_sudo_when_host_opts_in(monkeypatch, capsys):
     monkeypatch.setattr("portal_mcp_server.credential_agent.store", fake_store)
     monkeypatch.setattr(cli, "_should_cache_ssh_password_as_sudo",
                         lambda host: host == "web01")
+    monkeypatch.setattr(cli, "_validate_known_host_or_exit", lambda _a: None)
 
     args = SimpleNamespace(kind="ssh", key="web01", ttl=60)
     assert cli._kind_set_cli(args) == 0
@@ -199,6 +201,7 @@ def test_ssh_confirm_caches_sudo_when_host_opts_in(monkeypatch):
     monkeypatch.setattr("portal_mcp_server.credential_agent.store", fake_store)
     monkeypatch.setattr(cli, "_should_cache_ssh_password_as_sudo",
                         lambda _host: True)
+    monkeypatch.setattr(cli, "_validate_known_host_or_exit", lambda _a: None)
 
     args = SimpleNamespace(kind="ssh", key="web01", ttl=60)
     assert cli._kind_confirm_cli(args) == 0
@@ -206,6 +209,119 @@ def test_ssh_confirm_caches_sudo_when_host_opts_in(monkeypatch):
         ("ssh", "web01", "pw", 60),
         ("sudo", "web01", "pw", 60),
     ]
+
+
+# ── unknown-host guard on `set` / `confirm` ─────────────────────────────────
+
+def _fake_manager(known: bool, names=("alpha", "beta")):
+    return SimpleNamespace(
+        knows_host=lambda _h: known,
+        list_hosts=lambda: [{"name": n} for n in names],
+    )
+
+
+def _wire_store(monkeypatch):
+    """Common stubs so a `set` that passes validation actually 'stores'."""
+    calls = []
+
+    def fake_store(kind, key, value, ttl=0):
+        calls.append((kind, key, value, ttl))
+        return {"status": "ok"}
+
+    monkeypatch.setattr(cli, "_ensure_agent_for_write", lambda _path: None)
+    monkeypatch.setattr("getpass.getpass", lambda _prompt: "pw")
+    monkeypatch.setattr("portal_mcp_server.credential_agent.store", fake_store)
+    monkeypatch.setattr(cli, "_should_cache_ssh_password_as_sudo",
+                        lambda _host: False)
+    return calls
+
+
+def test_set_unknown_host_is_rejected(monkeypatch, capsys):
+    """`portal ssh set <typo>` for a host in neither hosts.yaml nor ssh config
+    aborts BEFORE prompting/storing, and the error names the likely fixes."""
+    calls = _wire_store(monkeypatch)
+    prompted = {"hit": False}
+    monkeypatch.setattr("getpass.getpass",
+                        lambda _p: prompted.__setitem__("hit", True))
+    monkeypatch.setattr(cli, "get_manager",
+                        lambda: _fake_manager(known=False, names=["portaltest"]))
+
+    args = SimpleNamespace(kind="ssh", key="portaltes", ttl=60, force=False)
+    with pytest.raises(SystemExit) as exc:
+        cli._kind_set_cli(args)
+    assert exc.value.code == 1
+    assert calls == []                     # nothing cached
+    assert prompted["hit"] is False        # never asked for a password
+    err = capsys.readouterr().err
+    assert "Unknown host 'portaltes'" in err
+    assert "hosts.yaml" in err and "ssh" in err.lower()
+    assert "portaltest" in err             # typo hint lists the real host
+
+
+def test_set_known_host_proceeds(monkeypatch):
+    """A host present in the registry / ssh config passes the guard and caches."""
+    calls = _wire_store(monkeypatch)
+    monkeypatch.setattr(cli, "get_manager", lambda: _fake_manager(known=True))
+
+    args = SimpleNamespace(kind="ssh", key="alpha", ttl=60, force=False)
+    assert cli._kind_set_cli(args) == 0
+    assert calls == [("ssh", "alpha", "pw", 60)]
+
+
+def test_set_force_bypasses_unknown_host(monkeypatch):
+    """--force is the escape hatch: an unknown host still caches (and the guard
+    never even consults the registry)."""
+    calls = _wire_store(monkeypatch)
+
+    def _boom():
+        raise AssertionError("get_manager must not be consulted under --force")
+
+    monkeypatch.setattr(cli, "get_manager", _boom)
+
+    args = SimpleNamespace(kind="ssh", key="ghost", ttl=60, force=True)
+    assert cli._kind_set_cli(args) == 0
+    assert calls == [("ssh", "ghost", "pw", 60)]
+
+
+def test_secret_set_skips_host_check(monkeypatch):
+    """`secret` keys on a NAME, not a host — the guard must not reject it even
+    when it isn't a known host (and no --force attr exists on its args)."""
+    calls = _wire_store(monkeypatch)
+
+    def _boom():
+        raise AssertionError("secret set must not check the host registry")
+
+    monkeypatch.setattr(cli, "get_manager", _boom)
+
+    args = SimpleNamespace(kind="secret", key="github_token", ttl=60)
+    assert cli._kind_set_cli(args) == 0
+    assert calls == [("secret", "github_token", "pw", 60)]
+
+
+def test_set_local_sudo_is_exempt(monkeypatch):
+    """`sudo set-local` uses the reserved <local> key, which is deliberately not
+    a registry host; the guard must exempt it rather than reject."""
+    calls = _wire_store(monkeypatch)
+
+    def _boom():
+        raise AssertionError("<local> must be exempt without a registry lookup")
+
+    monkeypatch.setattr(cli, "get_manager", _boom)
+
+    args = SimpleNamespace(kind="sudo", key="<local>", ttl=60, force=False)
+    assert cli._kind_set_cli(args) == 0
+    assert calls == [("sudo", "<local>", "pw", 60)]
+
+
+def test_confirm_unknown_host_is_rejected(monkeypatch):
+    """The guard also fronts `confirm` (not just `set`)."""
+    _wire_store(monkeypatch)
+    monkeypatch.setattr(cli, "get_manager", lambda: _fake_manager(known=False))
+
+    args = SimpleNamespace(kind="sudo", key="typo", ttl=60, force=False)
+    with pytest.raises(SystemExit) as exc:
+        cli._kind_confirm_cli(args)
+    assert exc.value.code == 1
 
 
 # ── multi-step under sudo: commands[] runs separately; newlines never collapsed

@@ -1819,6 +1819,56 @@ def _maybe_cache_ssh_password_as_sudo(args, credential_agent,
     return 0
 
 
+def _validate_known_host_or_exit(args) -> None:
+    """Abort a host-based credential ``set`` / ``confirm`` when the host is
+    unknown — i.e. absent from BOTH hosts.yaml and ``~/.ssh/config``.
+
+    Caching an SSH login / passphrase / sudo password under such a name is
+    almost always a typo: nothing can ever connect to it, yet the command would
+    otherwise report success, so the mistake stays silent until a later
+    ``remote_exec`` fails with a confusing "Unknown host". We refuse up front and
+    point at the likely fix.
+
+    Exempt (return without checking): ``secret`` (its key is a NAME, not a host),
+    the reserved ``<local>`` sudo identity (``sudo set-local`` — deliberately not
+    a connectable host), and an explicit ``--force`` (an escape hatch for a host
+    registered at runtime that this CLI's fresh registry load can't see).
+    """
+    if args.kind == "secret" or getattr(args, "force", False):
+        return
+    key = args.key
+    if key == "<local>":
+        return
+    try:
+        mgr = get_manager()
+        if mgr.knows_host(key):
+            return
+        known = sorted({h["name"] for h in mgr.list_hosts()})
+    except Exception:
+        # A registry-load hiccup must never block a legitimate credential write.
+        logger.debug("host-existence check failed for %r; allowing", key,
+                     exc_info=True)
+        return
+    lines = [
+        f"Unknown host '{key}': it is not in hosts.yaml and has no matching "
+        "Host alias in your SSH config.",
+        "This is usually a typo. Fix the name, or configure the host first — "
+        "add a `hosts:` entry to hosts.yaml or a `Host` stanza to ~/.ssh/config.",
+    ]
+    if known:
+        shown = ", ".join(known[:20])
+        if len(known) > 20:
+            shown += f", … (+{len(known) - 20} more)"
+        lines.append(f"Known hosts: {shown}")
+    else:
+        lines.append("No hosts are configured yet.")
+    lines.append(
+        "If this host really exists (e.g. registered at runtime), re-run with "
+        f"--force to cache the {_kind_label(args.kind)} anyway.")
+    print("\n".join(lines), file=sys.stderr)
+    sys.exit(1)
+
+
 def _format_ttl(seconds: int) -> str:
     if seconds < 60:
         return f"{seconds}s"
@@ -2025,6 +2075,7 @@ def _kind_set_cli(args) -> int:
     import getpass
     from . import credential_agent
     from .paths import credential_agent_socket_path
+    _validate_known_host_or_exit(args)
     _ensure_agent_for_write(credential_agent_socket_path)
     prompt = _kind_prompt(args.kind, args.key)
     value = getpass.getpass(prompt)
@@ -2045,6 +2096,7 @@ def _kind_confirm_cli(args) -> int:
     import getpass
     from . import credential_agent
     from .paths import credential_agent_socket_path
+    _validate_known_host_or_exit(args)
     _ensure_agent_for_write(credential_agent_socket_path)
     prompt = _kind_prompt(args.kind, args.key)
     first = getpass.getpass(prompt)
@@ -2186,6 +2238,17 @@ def _build_kind_subparser(sub, kind: str):
         "--ttl", type=int, default=DEFAULT_TTL_SEC,
         help=f"seconds before the cached value expires (default {DEFAULT_TTL_SEC})")
     p_confirm.set_defaults(kind=kind, key=None, func=_kind_confirm_cli)
+
+    if kind != "secret":
+        # Host-based kinds refuse an unknown host (typo guard). --force is the
+        # escape hatch for a host the CLI's fresh registry load can't see (e.g.
+        # one registered at runtime). `secret` keys on a NAME, not a host, so it
+        # has no host to check and no --force.
+        for _p in (p_set, p_confirm):
+            _p.add_argument(
+                "--force", action="store_true",
+                help="cache even if the host is in neither hosts.yaml nor "
+                     "~/.ssh/config (skips the typo / existence check)")
 
     p_show = ksub.add_parser(
         "show",
