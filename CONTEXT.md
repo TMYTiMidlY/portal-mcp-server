@@ -64,6 +64,22 @@ _避免_：把它叫"一个 job"（job 是它的后台对应物）。
 _避免_：叫它"async exec"（每个工具在传输层都是 async；这个词讲的是**命令**活得比
 **调用**久）。
 
+## 执行环境（Execution environment）
+
+**登录 shell（Login shell）**：
+`login=True`（默认）下命令跑在 `bash -lc`，继承"命令最终以谁的身份运行"的**登录环境**
+——`/etc/profile` 与 `~/.bash_profile`/`~/.profile` 链，让 conda / nvm / pyenv /
+`~/.local/bin` 等 PATH 生效。
+_避免_：以为它加载完整交互式 `~/.bashrc`——`bash -lc` 是非交互的，`~/.bashrc` 顶部的
+非交互 guard（`case $- in *i*) ;; *) return;; esac`）会让其正文整段跳过。
+
+**提权即变 root（sudo = become root）**：
+`use_sudo=True` 以 root 身份运行；sudo 默认 `env_reset` 把 `HOME`/`USER`/`LOGNAME`/
+`SHELL` 按 root 重建，`~` 展开为 `/root`，登录用户环境不保留（处理登录用户文件须写绝对
+路径）。
+_避免_：把 `use_sudo` 理解成"有 sudo 权限但仍是我的环境"——那是 `sudo -E`，portal 刻意
+不做（见 [`docs/adr/0004-login-shell-and-sudo-env.md`](docs/adr/0004-login-shell-and-sudo-env.md)）。
+
 ## 凭据路径（Credential path）
 
 **凭据路径（Credential path，统一）**：

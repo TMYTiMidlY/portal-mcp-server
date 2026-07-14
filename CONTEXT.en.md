@@ -71,6 +71,25 @@ for output. The durable counterpart to foreground execution.
 _Avoid_: "async exec" (every tool is async at the transport level; this term is
 about the *command* outliving the *call*).
 
+## Execution environment
+
+**Login shell**:
+Under `login=True` (default) the command runs in `bash -lc`, inheriting the
+**login environment** of whoever the command runs as — `/etc/profile` and the
+`~/.bash_profile`/`~/.profile` chain — so conda / nvm / pyenv / `~/.local/bin`
+PATH additions apply.
+_Avoid_: assuming it loads the full interactive `~/.bashrc` — `bash -lc` is
+non-interactive, and the guard at the top of `~/.bashrc`
+(`case $- in *i*) ;; *) return;; esac`) skips its whole body.
+
+**sudo = become root**:
+`use_sudo=True` runs as root; sudo's default `env_reset` rebuilds
+`HOME`/`USER`/`LOGNAME`/`SHELL` for root, so `~` expands to `/root` and the login
+user's environment is not preserved (use absolute paths for login-user files).
+_Avoid_: reading `use_sudo` as "sudo privileges but still my environment" — that
+is `sudo -E`, which portal deliberately does not do (see
+[`docs/adr/0004-login-shell-and-sudo-env.md`](docs/adr/0004-login-shell-and-sudo-env.md)).
+
 ## Credential path
 
 **Credential path** (unified):
