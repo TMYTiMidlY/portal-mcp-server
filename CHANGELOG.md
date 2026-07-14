@@ -1,3 +1,26 @@
+## v4.0.0 (2026-07-15)
+
+### Security
+
+- **win**: fail closed in the named-pipe peer-SID check
+- **transfer**: don't follow local symlinks out of the tree in sync/mirror
+- **tunnel**: bind tunnels to loopback by default; gate off-box exposure
+- **http**: default HTTP bind to loopback; refuse open bind without a token
+- owner-only state files + kill local_exec process group on timeout
+
+### Fix
+
+- **hosts**: proxy_jump value semantics (none forces direct, empty refused)
+- **hosts**: stop logging auth:password-without-password_command as an error
+- **deps**: bundle bcrypt via asyncssh[bcrypt]
+- **build**: repair fancy-pypi-readme start-at so the wheel builds
+- **pool**: invalidate pooled connections on host re-register/remove
+- **shell**: interrupt the remote command on timeout and resync the session
+- **jobs**: per-process job state file + reclaim gone-without-marker jobs
+- **jobs**: verify cancel, signal the process group, don't signal finished jobs
+- **transfer**: re-upload fresh when a resumed upload can't be verified
+- harden credentials, patch ranges, and audit integrity (audit findings)
+
 ## v4.0.0a0 (2026-07-14)
 
 ### BREAKING CHANGE
