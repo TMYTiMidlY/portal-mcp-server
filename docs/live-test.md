@@ -1,8 +1,8 @@
 # 凭据流 live 测试
 
-本文件供 agent 读取：agent 依据这里的方法、在用户配合（无回显输入凭据、重启 MCP client 等只有人能做的步骤）下，对**已发布产物**跑端到端（e2e）测试，补 `pytest`（单测 / 集成）覆不到的部分——真实远端、真实凭据、无回显 prompt、credential agent 常驻进程等无法进 CI 的行为。测试目标**不限于**下面的 ADR 0003 维度：凡"发布产物真实跑起来才暴露"的凭据 / 连接行为都可纳入，agent 应按 [主动探测](#probe) 一节自行扩展。
+本文件供 agent 读取：agent 依据这里的方法、在用户配合（无回显输入凭据、重启 MCP client 等只有人能做的步骤）下，对**已发布产物**跑端到端（e2e）测试，补 `pytest`（单测 / 集成）覆不到的部分——真实远端、真实凭据、无回显 prompt、credential agent 常驻进程等无法进 CI 的行为。测试目标**不限于**下面列出的维度：凡"发布产物真实跑起来才暴露"的凭据 / 连接行为都可纳入，agent 应按 [主动探测](#probe) 一节自行扩展。
 
-当前主要覆盖 [ADR 0003](adr/0003-credential-unification.md) 的凭据不变量：SSH 登录密码 / 私钥 passphrase / sudo 密码是三种独立 kind、默认互不串用、`sudo_password_same_as_ssh` 为 opt-in、`ssh confirm` 成败分支正确、加密私钥能被缓存的 passphrase 解锁。与 [`tests/live_smoke.py`](../tests/live_smoke.py)（自动化、key-auth、跑功能回归）互补——这条链专测**无回显 prompt** 与 **credential agent** 的端到端行为。
+当前主要验证 **credential agent 侧信道**的凭据隔离 / 复用不变量：SSH 登录密码 / 私钥 passphrase / sudo 密码是三种独立 kind、默认互不串用、`sudo_password_same_as_ssh` 为 opt-in、`ssh confirm` 成败分支正确、加密私钥能被缓存的 passphrase 解锁。这些不变量的威胁模型出处是 [`SECURITY.md`](../SECURITY.md) 的 [SSH 登录交互式密码](../SECURITY.md#ssh-login-password) 与 [Sudo 认证](../SECURITY.md#sudo-auth) 两节；[ADR 0003](adr/0003-credential-unification.md) 只提供背景前提——所有 kind 共用同一条进程内凭据路径、明文永不进对话 / argv / 磁盘——这也是下面 [用指纹比对而不暴露明文](#fingerprint-compare) 一节能只凭 sha256 指纹判定同值 / 异值的原因。与 [`tests/live_smoke.py`](../tests/live_smoke.py)（自动化、key-auth、跑功能回归）互补——这条链专测**无回显 prompt** 与 **credential agent** 的端到端行为。
 
 ## 分工：能自动的都归 agent
 
@@ -73,7 +73,7 @@ hosts:
 
 sudo 相关调用结果会标 `high_risk`；跑完向用户说明用缓存的 sudo 密码执行了特权命令。
 
-## 用指纹比对而不暴露明文
+## <a id="fingerprint-compare"></a>用指纹比对而不暴露明文
 
 `portal <kind> show` 只给 secret 的 sha256 指纹 + 剩余 TTL，没有 show-plaintext 动作。比对指纹即可判定"同值 / 异值"——验证复用（ssh 与 sudo 同指纹）、隔离（passphrase 指纹不同）、未被覆盖（多步后指纹不变），全程不接触明文。
 

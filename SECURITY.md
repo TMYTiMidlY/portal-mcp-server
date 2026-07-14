@@ -193,7 +193,7 @@ env=os.environ.copy())` 跑用户给的 shell 片段。每个选择都是刻意�
   `__dict__` 遍历），只省边际 CPU。`portal ssh set` 与 `portal passphrase set` 侧信道
   **确实**缓存，因为它们没有可按需重跑的命令。
 
-#### SSH 登录交互式密码——带外凭据 agent 侧信道
+#### <a id="ssh-login-password"></a>SSH 登录交互式密码——带外凭据 agent 侧信道
 
 `portal ssh set <host>` 是 `password_command` 的无回显对应物：在一个**独立**终端（不是
 agent）里跑的带外 CLI，用 `getpass.getpass` 提示、把密码经一个 systemd `--user` 管理的
@@ -248,7 +248,7 @@ agent 内存缓存的边界（与 `portal sudo set` 同一模型）：
 `sudo`、`secret` 各自独立的 key 空间。不同的缓存 key 维度（SSH / passphrase / sudo 按
 host，secret 按名）和不同的注入点在解析器代码里保持分离。
 
-#### Sudo 认证——同一边界，凭据 agent 侧信道
+#### <a id="sudo-auth"></a>Sudo 认证——同一边界，凭据 agent 侧信道
 
 `remote_exec(..., use_sudo=True)` 在远端用 `sudo` 跑命令。边界与 SSH 密码认证相同：
 **`use_sudo` 是个布尔值，不是密码**——sudo 密码（或指向它的路径）绝不是 MCP 工具参数，
