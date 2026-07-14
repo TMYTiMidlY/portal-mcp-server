@@ -316,16 +316,21 @@ class ConnectionManager:
             sudo_password_same_as_ssh = bool(
                 cfg.get("sudo_password_same_as_ssh", False))
             if auth == "password" and not password_command:
-                msg = (
-                    "declares 'auth: password' but has no 'password_command' "
-                    "— the host is loaded but every connection will require "
-                    f"`portal ssh set {name}` to push a password "
-                    "into the per-user credential agent first. For unattended use, add "
-                    "a 'password_command:' that prints the password to stdout "
-                    f"(e.g. 'pass show ssh/{name}' or 'printf %s \"${name.upper()}_PASSWORD\"')."
+                # NOT an error: 'auth: password' without 'password_command' is a
+                # fully supported setup — the password is supplied out-of-band via
+                # `portal ssh set <host>` (per-user credential agent). Record a
+                # soft advisory only (surfaced by list_hosts / policy_check, NOT
+                # logged to stderr) so it does not spam `portal ssh set` and the
+                # other credential-CLI commands that load the registry. The
+                # genuine "no password source" failure is still raised precisely
+                # at connection time (see _build_connect_kwargs).
+                warnings.append(
+                    "uses 'auth: password' without a 'password_command' — "
+                    f"connections rely on `portal ssh set {name}` having cached "
+                    "a password in the per-user credential agent. For unattended "
+                    "use, add a 'password_command:' that prints the password to "
+                    f"stdout (e.g. 'pass show ssh/{name}')."
                 )
-                logger.error("Host '%s' %s", name, msg)
-                warnings.append(msg)
             if auth not in (None, "password"):
                 msg = (
                     f"unknown auth mode '{auth}'; expected None (key-based) or "

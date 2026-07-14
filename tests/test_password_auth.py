@@ -133,8 +133,11 @@ def test_plaintext_password_field_surfaces_warning_to_agent(tmp_path):
 
 
 def test_auth_password_without_command_surfaces_warning(tmp_path):
-    """`auth: password` with no `password_command` is a guaranteed connect
-    failure — surface it to the agent, not just the log."""
+    """`auth: password` with no `password_command` is a fully supported setup
+    (the password is pushed out-of-band via `portal ssh set <host>`), so it is
+    NOT logged as an error. But an operator who WANTED an unattended
+    `password_command` should still be able to spot the omission — surface it as
+    a soft advisory on the agent's host-discovery surface (list_hosts)."""
     from portal_mcp_server.connection_manager import ConnectionManager
 
     yml = tmp_path / "hosts.yaml"
@@ -423,9 +426,15 @@ async def test_auth_password_cache_takes_precedence_over_command(tmp_path):
         ssh_creds.clear_ssh_password()
 
 
-def test_hosts_yaml_auth_password_without_command_logs_error(tmp_path, caplog):
-    """The same misconfiguration is also surfaced at registry-load time so
-    operators see it in startup logs, not only on first connection."""
+def test_hosts_yaml_auth_password_without_command_is_not_logged_as_error(
+    tmp_path, caplog,
+):
+    """`auth: password` without `password_command` is a supported config, not a
+    misconfiguration: it must NOT emit a logger.error (that spammed stderr on
+    every credential-CLI command — e.g. `portal ssh set` — that loads the
+    registry, once per password-host). The advisory lives only in
+    config_warnings / list_hosts; the real "no password source" failure is
+    raised at connection time."""
     from portal_mcp_server.connection_manager import ConnectionManager
 
     yml = tmp_path / "hosts.yaml"
@@ -438,11 +447,16 @@ def test_hosts_yaml_auth_password_without_command_logs_error(tmp_path, caplog):
     """))
 
     with caplog.at_level(logging.ERROR, logger="portal_mcp.connections"):
-        ConnectionManager(hosts_yaml=yml)
+        m = ConnectionManager(hosts_yaml=yml)
 
-    assert any(
+    # No ERROR log for this host ...
+    assert not any(
         "web01" in rec.message and "password_command" in rec.message
         for rec in caplog.records
+    ), "auth:password-without-password_command must not log an ERROR"
+    # ... but the soft advisory is still discoverable.
+    assert any(
+        "password_command" in w for w in m.config_warnings().get("web01", [])
     )
 
 
