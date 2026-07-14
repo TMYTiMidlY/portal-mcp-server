@@ -25,6 +25,7 @@ from .network_tools import get_tunnel_manager
 from .job_manager import get_job_manager
 from .audit import audit_log, get_history, get_audit_stats
 from .security import get_policy
+from .safety import normalize_host_name
 from .server_info import server_info, set_transport as _set_server_transport
 from .remote_text_editor import (
     remote_read as _re_read,
@@ -187,31 +188,81 @@ def _heartbeat_interval() -> float:
     return v if v > 0 else 5.0
 
 
-# Single built-in per-command timeout (seconds), shared by every exec tool
-# (portal_exec / portal_shell / portal_local_exec) when the agent omits the
-# `timeout` argument AND PORTAL_DEFAULT_TIMEOUT is unset. Deliberately generous
-# (1h) so a genuinely slow build/install isn't cut off mid-flight.
-_BUILTIN_TIMEOUT = 3600.0
+# Hard ceiling (seconds) on a FOREGROUND blocking exec call — portal_exec /
+# portal_shell / portal_local_exec. `timeout` is a REQUIRED argument on those
+# tools (no default: the agent must consciously choose a cut-off), and a value
+# ABOVE this ceiling is refused. A genuinely long task must be backgrounded with
+# portal_job (no ceiling) so the agent isn't pinned on one blocking call and can
+# inspect / intervene between steps. Operator-tunable via PORTAL_MAX_TIMEOUT
+# (seconds); defaults to 5 minutes.
+_DEFAULT_MAX_TIMEOUT = 300.0
 
 
-def _default_command_timeout() -> float:
-    """Resolve the default per-command timeout (seconds) for the exec tools.
+def _max_command_timeout() -> float:
+    """Resolve the foreground per-command timeout CEILING (seconds).
 
-    Operators can override the default that applies when the agent omits the
-    `timeout` argument by setting PORTAL_DEFAULT_TIMEOUT (seconds) in the MCP
-    server's JSON ``env`` block — handy for lowering the conservative 1h
-    built-in so a hung command fails fast instead of pinning the call open
-    (heartbeats keep the client from aborting on its own). The per-call
-    `timeout` argument always wins over this. Falls back to the built-in when
-    the env var is unset, non-numeric, or non-positive. Read once at import,
-    so it becomes the schema default the agent sees.
+    Read from PORTAL_MAX_TIMEOUT in the MCP server's ``env`` block; falls back
+    to the built-in 5-minute default when unset, non-numeric, or non-positive.
+    This is a safety ceiling, NOT a default the agent inherits — the exec tools
+    have no default `timeout` at all; the agent must always pass one, and any
+    value above this ceiling is refused with guidance to use portal_job.
     """
-    raw = os.environ.get("PORTAL_DEFAULT_TIMEOUT", "")
+    raw = os.environ.get("PORTAL_MAX_TIMEOUT", "")
     try:
         v = float(raw)
     except (TypeError, ValueError):
-        return _BUILTIN_TIMEOUT
-    return v if v > 0 else _BUILTIN_TIMEOUT
+        return _DEFAULT_MAX_TIMEOUT
+    return v if v > 0 else _DEFAULT_MAX_TIMEOUT
+
+
+def _enforce_timeout_cap(timeout: float, *, job_hint: bool) -> None:
+    """Validate a foreground exec `timeout` (raises ToolError, else returns).
+
+    Rejects non-positive values and any value above the PORTAL_MAX_TIMEOUT
+    ceiling. ``job_hint`` steers the over-ceiling guidance: remote exec / shell
+    can offload a long task to portal_job; portal_local_exec has no local
+    background runner, so it is told to split the work into shorter steps.
+    """
+    if timeout is None or timeout <= 0:
+        raise ToolError("timeout (seconds) must be a positive number.")
+    cap = _max_command_timeout()
+    if timeout > cap:
+        if job_hint:
+            raise ToolError(
+                f"timeout {timeout:g}s exceeds the foreground ceiling {cap:g}s "
+                "(PORTAL_MAX_TIMEOUT). Don't pin a long task on a blocking call "
+                "— background it with portal_job (submit → poll → cancel; no "
+                "ceiling), so you can keep working and step in while it runs.")
+        raise ToolError(
+            f"timeout {timeout:g}s exceeds the foreground ceiling {cap:g}s "
+            "(PORTAL_MAX_TIMEOUT). portal_local_exec has no background runner — "
+            "split the work into shorter steps under the ceiling.")
+
+
+def _login_shell_default() -> bool:
+    """Global default for whether exec runs in a login shell (``bash -lc``).
+
+    Controlled by PORTAL_LOGIN_SHELL in the server env; ON by default. Only an
+    explicit false-y value ("0" / "false" / "no" / "off") turns it off — unset
+    or anything else is on.
+    """
+    raw = os.environ.get("PORTAL_LOGIN_SHELL", "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _resolve_login(login: "bool | None", host: str) -> bool:
+    """Effective login-shell decision for <host>: an explicit per-call ``login``
+    wins; else the host's hosts.yaml ``login_shell``; else PORTAL_LOGIN_SHELL
+    (on by default)."""
+    if login is not None:
+        return bool(login)
+    try:
+        per_host = get_manager().login_shell_for(host)
+    except Exception:
+        per_host = None
+    if per_host is not None:
+        return per_host
+    return _login_shell_default()
 
 
 async def _await_with_heartbeat(coro, ctx: "Context | None",
@@ -495,7 +546,7 @@ async def portal_transfer(
                            "upload-list", "download-list"],
         host: str, local_path: str, remote_path: str,
         ctx: Context, checksum: bool = False,
-        paths_json: str = "") -> str:
+        paths_json: str = "", resume: bool = True) -> str:
     """Transfer files between local and remote via SFTP (binary-safe, atomic).
 
     ## Modes
@@ -532,6 +583,11 @@ async def portal_transfer(
             an unavailable sha256sum force a re-transfer).
         paths_json: JSON array of {"local": ..., "remote": ...} objects, required
             by the upload-list / download-list modes (ignored otherwise).
+        resume: (upload only) if a SMALLER partial already exists at remote_path
+            from an interrupted transfer, append just the missing tail instead
+            of restarting, then verify the whole file's sha256 and re-upload
+            fresh once on mismatch. Default on; set False to force a fresh
+            overwrite. The result carries resumed=true when the tail path ran.
 
     Progress is reported to the MCP client during transfers.
 
@@ -551,7 +607,7 @@ async def portal_transfer(
     progress_cb = _make_progress_cb(ctx)
     if direction == "upload":
         result = await ssh_upload_file(host, local_path, remote_path,
-                                       progress_cb=progress_cb)
+                                       progress_cb=progress_cb, resume=resume)
     elif direction == "download":
         result = await ssh_download_file(host, remote_path, local_path,
                                          progress_cb=progress_cb)
@@ -809,7 +865,7 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
 @mcp.tool()
 async def portal_read(host: str, path: str, start: int = 1,
                       end: int | None = None, limit: int | None = None,
-                      encoding: str = "utf-8") -> str:
+                      encoding: str = "utf-8", use_sudo: bool = False) -> str:
     """Read a file (or a 1-based line range) from a remote host with SHA-256 hashes.
 
     Returns JSON with: content, file_hash, range_hash, start, end, total_lines,
@@ -842,19 +898,32 @@ async def portal_read(host: str, path: str, start: int = 1,
         limit: max number of lines to return in this page (default: the
             PORTAL_READ_MAX_LINES cap). The byte cap may shorten the page further.
         encoding: Text encoding (default utf-8)
+        use_sudo: read via `sudo cat` (root) for a file the SSH user can't read
+            (root-owned / mode 600). The sudo password is resolved out-of-band
+            per host (never a parameter) and the result is flagged high_risk.
+            Exact bytes are preserved (no newline stripping) so file_hash stays
+            valid for portal_patch.
     """
     err = await _gate(host)
     if err:
         raise ToolError(f"BLOCKED: {err}")
     res = await _re_read(host, path, start=start, end=end, limit=limit,
-                         encoding=encoding)
+                         encoding=encoding, use_sudo=use_sudo)
+    if use_sudo and isinstance(res, dict):
+        res["high_risk"] = True
+        res["high_risk_note"] = (
+            f"Read {path!r} on {host!r} via sudo (root) using the user's "
+            "stored/cached sudo password. Briefly tell the user you did this, "
+            "or only do so with their explicit permission.")
+        audit_log(host, f"read:{path}", "ok", operation="file_read_sudo")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()
 async def portal_patch(host: str, path: str, file_hash: str,
                        patches_json: str, encoding: str = "utf-8",
-                       auto_newline: bool = False) -> str:
+                       auto_newline: bool = False,
+                       use_sudo: bool = False) -> str:
     """Apply patches to a remote file with hash-based conflict detection.
 
     Workflow:
@@ -874,6 +943,13 @@ async def portal_patch(host: str, path: str, file_hash: str,
       - When auto_newline is true, missing trailing newlines on patch
         contents are auto-appended *only* if the slice they replace ended
         with one. The result includes a "warnings" list either way.
+      - use_sudo: read+write the file as root, for a root-owned file the SSH
+        user can't touch. Keeps the SAME hash safety + atomicity as the normal
+        path: content is read via `sudo cat`, staged over SFTP into the user's
+        private home, then placed with one sudo step (cp → temp beside the
+        target → restore owner/group/mode → atomic rename). The target must
+        already exist; the sudo password is resolved out-of-band per host and
+        the result is flagged high_risk. (Implementation note in the README.)
     """
     err = await _gate(host)
     if err:
@@ -883,10 +959,17 @@ async def portal_patch(host: str, path: str, file_hash: str,
     except Exception as e:
         raise ToolError(f"invalid patches_json: {e}")
     res = await _re_patch(host, path, file_hash=file_hash, patches=patches,
-                           encoding=encoding, auto_newline=auto_newline)
+                          encoding=encoding, auto_newline=auto_newline,
+                          use_sudo=use_sudo)
+    if use_sudo and isinstance(res, dict) and res.get("result") == "ok":
+        res["high_risk"] = True
+        res["high_risk_note"] = (
+            f"Patched {path!r} on {host!r} via sudo (root) using the user's "
+            "stored/cached sudo password. Briefly tell the user you did this, "
+            "or only do so with their explicit permission.")
     audit_log(host, f"patch:{path}",
               res.get("result", "?") if isinstance(res, dict) else "?",
-              operation="file_patch")
+              operation="file_patch_sudo" if use_sudo else "file_patch")
     return json.dumps(res, indent=2, ensure_ascii=False)
 
 
@@ -975,8 +1058,8 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 @mcp.tool()
 async def portal_shell(host: str, command: str = "",
                        commands: "list[str] | None" = None,
-                       stop_on_error: bool = True,
-                       timeout: float = _default_command_timeout(),
+                       stop_on_error: bool = True, *,
+                       timeout: float,
                        ctx: "Context | None" = None) -> str:
     """Run a command (or a sequence) on ONE remote host in a **persistent shell
     session**: cwd and environment (cd / export / venv activation) survive
@@ -986,12 +1069,16 @@ async def portal_shell(host: str, command: str = "",
 
     Pick one:
       - command="pytest"  → {host, session_id, command, exit_code, output,
-        duration_s}.
-      - commands=["cd /app","source .venv/bin/activate","pytest"]  → steps run
-        in order in the SAME session, so cwd / exports / venv carry across them
-        (what portal_exec's multi-command path cannot do). Returns {host,
-        session_id, results:[…]}; stop_on_error=True (default) halts at the
-        first failure and adds stopped_at.
+        duration_s}. ONE command per call is the preferred shape: the session
+        PERSISTS across separate calls, so cwd / exports / venv from an earlier
+        call still apply to the next — you keep step-by-step continuity AND get
+        to read each step's real output before deciding the next.
+      - commands=["cd /app","source .venv/bin/activate","pytest"]  → runs the
+        sequence in order in ONE call (same session). Reach for it ONLY for a
+        fixed sequence you do NOT need to inspect between steps; you can't judge
+        one step's output before the next runs. Returns {host, session_id,
+        results:[…]}; stop_on_error=True (default) halts at the first failure and
+        adds stopped_at.
 
     Behavior:
       - bash or zsh; an unknown login shell falls back to bash (if bash is
@@ -1007,16 +1094,20 @@ async def portal_shell(host: str, command: str = "",
     root use portal_exec(use_sudo=True); for a command needing a secret use
     portal_exec(secrets=[…]).
 
-    timeout (per command, seconds; default 1h, operator-lowerable via
-    PORTAL_DEFAULT_TIMEOUT): the call is held open until the command exits or
-    timeout elapses. Keepalive pings stop the client aborting a hung call, so
-    timeout is your real cut-off — for an exploratory / re-runnable command pass
-    a SMALL one first (e.g. 10–30) to fail fast, raising it only for genuinely
-    slow commands.
+    timeout (per command, seconds; REQUIRED — no default): the call is held open
+    until the command exits or timeout elapses. Keepalive pings stop the client
+    aborting a hung call, so timeout is your real cut-off — pass a SMALL one for
+    an exploratory / re-runnable command (e.g. 10–30) to fail fast, raising it
+    only for a genuinely slow but bounded command. Hard ceiling
+    (PORTAL_MAX_TIMEOUT, default 300s): a request above it is refused — use
+    portal_job for a long task.
 
     ⚠️ By convention, write operations should target /tmp/ on the remote unless
     the user approved another path (not enforced here).
     """
+    _enforce_timeout_cap(timeout, job_hint=True)
+    host = normalize_host_name(host)
+
     # command vs commands: exactly one, mirroring portal_exec.
     if commands is not None:
         if command:
@@ -1051,8 +1142,9 @@ async def portal_shell(host: str, command: str = "",
 @mcp.tool()
 async def portal_exec(host: "str | list[str]" = "", command: str = "",
                       commands: "list[str] | None" = None,
-                      group_tag: str = "",
-                      timeout: float = _default_command_timeout(),
+                      group_tag: str = "", *,
+                      timeout: float,
+                      login: "bool | None" = None,
                       use_sudo: bool = False,
                       secrets: "list[str] | None" = None,
                       serialize: bool = False, delay_s: float = 0.0,
@@ -1079,24 +1171,35 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     Targets (pick one): host="web01" | host=["web01","web02"] |
     group_tag="prod" (all registered hosts carrying that tag).
 
-    Commands (pick one): command="uptime" (a single command; a multi-line
-    string runs as one bash script) | commands=["apt update","apt upgrade"] (a
-    sequence, each with its own exit code, stopping at the first failure when
-    stop_on_error=True). Prefer the commands=[…] array over packing several
-    lines into one string — it can't be silently flattened and you get per-step
-    exit codes (matters most with use_sudo, where each entry runs as its own
-    sudo command).
+    Commands (pick one): command="uptime" — ONE command per call is the DEFAULT
+    and preferred shape. Run it, read the real output, check it against what you
+    expected (an exit-0 step can still be wrong), THEN decide the next call —
+    that keeps you in the loop and able to course-correct. commands=["a","b"]
+    batches a sequence into a SINGLE call (each with its own exit code; stops at
+    the first failure when stop_on_error=True, and with use_sudo each entry runs
+    as its own sudo command) — reach for it ONLY for a fixed, independent
+    sequence you do NOT need to inspect between steps. Don't bury a long or
+    branching pipeline in one `a && b && c` string: you lose per-step visibility
+    and can't intervene. A multi-line command string runs as one bash script.
 
     Multi-host fan-out is parallel by default; serialize=True (+ delay_s,
     stop_on_error) does a rolling, stop-on-first-failure rollout.
 
-    timeout (seconds, default 1h, operator-lowerable via PORTAL_DEFAULT_TIMEOUT):
-    the call is held open until the command finishes or timeout elapses.
-    Keepalive pings stop the client aborting a hung call, so timeout is your
-    real cut-off — for an exploratory / re-runnable command pass a SMALL one
-    first (e.g. 10–30) to fail fast, raising it only for commands you know are
-    slow; keep it generous for ones whose mid-flight kill is dangerous
-    (migrations, package upgrades).
+    timeout (seconds, REQUIRED — no default; consciously choose a cut-off): the
+    call is held open until the command finishes or timeout elapses. Keepalive
+    pings stop the client aborting a hung call, so timeout is your real cut-off —
+    pass a SMALL one for an exploratory / re-runnable command (e.g. 10–30) to
+    fail fast, raising it only for a genuinely slow but bounded command. Hard
+    ceiling (PORTAL_MAX_TIMEOUT, default 300s): a request above it is REFUSED —
+    background a long task with portal_job instead of pinning it on a blocking
+    call.
+
+    login (default on): run the command in a LOGIN shell (bash -lc) so the
+    remote user's ~/.profile / ~/.bashrc PATH + env (conda / nvm / pyenv,
+    ~/.local/bin, …) is loaded; pass login=False for a bare non-login shell.
+    Silently degrades to a plain exec on a host without bash. Affects only this
+    plain path (not sudo / secrets); operators set the default via
+    PORTAL_LOGIN_SHELL or a per-host `login_shell:` in hosts.yaml.
 
     use_sudo: run via `sudo -S`, with the password resolved out-of-band per host
         (the per-user credential agent from `portal sudo set <host>`, or the
@@ -1119,6 +1222,8 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     tell the user you ran a privileged / credentialed command with their stored
     sudo password / secret, or only do so with their explicit prior permission.
     """
+    _enforce_timeout_cap(timeout, job_hint=True)
+
     # ── Resolve target hosts (host str | host list | group_tag) ──
     if group_tag:
         if host:
@@ -1138,6 +1243,10 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
         multi_host = False
     else:
         raise ToolError("provide a target: host (str or list) or group_tag.")
+
+    hosts = [normalize_host_name(h) for h in hosts]
+    if any(not h for h in hosts):
+        raise ToolError("empty host name (after trimming whitespace).")
 
     # ── Resolve command(s) ──
     if commands:
@@ -1208,7 +1317,8 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
                       operation="exec_secrets")
             return res
         # Plain one-shot path: ssh_exec runs over the pool and audits as "exec".
-        res = await ssh_exec(h, cmd, timeout=int(timeout))
+        res = await ssh_exec(h, cmd, timeout=int(timeout),
+                             login=_resolve_login(login, h))
         _maybe_hint_sudo_tty(res)
         return res
 
@@ -1254,8 +1364,8 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
 
 @mcp.tool()
 async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
-                            use_sudo: bool = False,
-                            timeout: float = _default_command_timeout(),
+                            use_sudo: bool = False, *,
+                            timeout: float,
                             ctx: "Context | None" = None) -> str:
     """Run a command on the **MCP SERVER's OWN machine** (local), NOT over SSH —
     for anything on a remote host use portal_exec instead. This departs from the
@@ -1279,11 +1389,12 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     the LOCAL counterpart of portal_exec(use_sudo=True); the reserved identity
     `<local>` is distinct from any SSH host named `local` / `localhost`.
 
-    timeout (seconds, default 1h, operator-lowerable via PORTAL_DEFAULT_TIMEOUT):
-    held open until the command exits or timeout elapses. Keepalive pings stop
-    the client aborting a hung call, so for an exploratory / re-runnable command
-    pass a SMALL one first (e.g. 10–30) to fail fast, raising it only for slow
-    commands.
+    timeout (seconds, REQUIRED — no default): held open until the command exits
+    or timeout elapses. Keepalive pings stop the client aborting a hung call, so
+    pass a SMALL one for an exploratory / re-runnable command (e.g. 10–30) to
+    fail fast, raising it only for a genuinely slow but bounded command. Hard
+    ceiling (PORTAL_MAX_TIMEOUT, default 300s): a request above it is refused —
+    local_exec has no background runner, so split the work into shorter steps.
 
     ★ secrets flags the result "high_risk": briefly tell the user you ran a local
     command with their stored credential, or only do so with prior permission.
@@ -1305,6 +1416,7 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
             "session so the server is relaunched with it. (If you start the "
             "server another way, export the variable in its shell or set "
             "Environment=PORTAL_ALLOW_LOCAL_EXEC=1 in its systemd unit instead.)")
+    _enforce_timeout_cap(timeout, job_hint=False)
     err = await _gate("<local>", command)
     if err:
         raise ToolError(f"BLOCKED: {err}")
@@ -1385,15 +1497,18 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
                      since: int = 0, tail: int = 0, max_bytes: int = 65536,
                      signal: Literal["TERM", "KILL"] = "TERM",
                      use_sudo: bool = False,
-                     secrets: "list[str] | None" = None) -> str:
+                     secrets: "list[str] | None" = None,
+                     login: "bool | None" = None) -> str:
     """Run a command in the **background** and get a job_id back immediately, so
     you can keep thinking while it runs, poll for incremental output, and cancel
     it. Use this for long tasks; for a command that finishes quickly just use
     portal_exec (it waits and returns the result).
 
     ## Actions
-    - action="submit": start `command` on `host` in the background (nohup +
-        remote tmp files), returning {job_id, host, remote_pid, started_at,
+    - action="submit": start `command` on `host` in the background — in a LOGIN
+        shell (bash -lc, loading ~/.profile/.bashrc PATH+env; login=False to opt
+        out) via nohup + remote tmp files — returning {job_id, host, remote_pid,
+        started_at,
         status} right away. The job keeps running even if the SSH connection
         drops. NOTE: sudo / secret injection are NOT supported in the
         background and passing use_sudo=True or secrets=[...] here is rejected
@@ -1450,7 +1565,7 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
         if err:
             raise ToolError(f"BLOCKED: {err}")
         try:
-            res = await jm.submit(host, command)
+            res = await jm.submit(host, command, login=_resolve_login(login, host))
         except RuntimeError as e:
             raise ToolError(str(e))
         audit_log(host, f"job-submit: {command}", res.get("job_id", "?"),
@@ -2082,7 +2197,8 @@ def _credential_main(argv: list[str]) -> int:
     # verb handlers don't have to special-case.
     if args.subcmd in _CREDENTIAL_KINDS:
         noun = _kind_key_noun(args.subcmd)
-        args.key = getattr(args, noun, None)
+        raw_key = getattr(args, noun, None)
+        args.key = normalize_host_name(raw_key) if raw_key is not None else None
     return args.func(args)
 
 

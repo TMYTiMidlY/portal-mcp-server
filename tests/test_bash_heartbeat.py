@@ -119,24 +119,49 @@ def test_heartbeat_interval_invalid_falls_back(monkeypatch, bad):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  _default_command_timeout env parsing (PORTAL_DEFAULT_TIMEOUT)
+#  _max_command_timeout env parsing (PORTAL_MAX_TIMEOUT) + cap enforcement
 # ────────────────────────────────────────────────────────────────────────────
 
-def test_default_command_timeout_uses_builtin_when_unset(monkeypatch):
-    monkeypatch.delenv("PORTAL_DEFAULT_TIMEOUT", raising=False)
-    # One unified built-in (1h) for every exec tool.
-    assert cli._default_command_timeout() == cli._BUILTIN_TIMEOUT == 3600.0
+def test_max_command_timeout_uses_builtin_when_unset(monkeypatch):
+    monkeypatch.delenv("PORTAL_MAX_TIMEOUT", raising=False)
+    # One unified foreground ceiling (5 min) for every exec tool.
+    assert cli._max_command_timeout() == cli._DEFAULT_MAX_TIMEOUT == 300.0
 
 
-def test_default_command_timeout_env_override(monkeypatch):
-    monkeypatch.setenv("PORTAL_DEFAULT_TIMEOUT", "120")
-    assert cli._default_command_timeout() == 120.0
+def test_max_command_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("PORTAL_MAX_TIMEOUT", "120")
+    assert cli._max_command_timeout() == 120.0
 
 
 @pytest.mark.parametrize("bad", ["", "abc", "0", "-3"])
-def test_default_command_timeout_invalid_falls_back(monkeypatch, bad):
-    monkeypatch.setenv("PORTAL_DEFAULT_TIMEOUT", bad)
-    assert cli._default_command_timeout() == 3600.0
+def test_max_command_timeout_invalid_falls_back(monkeypatch, bad):
+    monkeypatch.setenv("PORTAL_MAX_TIMEOUT", bad)
+    assert cli._max_command_timeout() == 300.0
+
+
+@pytest.mark.parametrize("bad", [0, -1, -0.5])
+def test_enforce_timeout_cap_rejects_nonpositive(bad):
+    with pytest.raises(cli.ToolError):
+        cli._enforce_timeout_cap(bad, job_hint=True)
+
+
+def test_enforce_timeout_cap_rejects_over_ceiling(monkeypatch):
+    monkeypatch.setenv("PORTAL_MAX_TIMEOUT", "300")
+    with pytest.raises(cli.ToolError) as ei:
+        cli._enforce_timeout_cap(600, job_hint=True)
+    assert "portal_job" in str(ei.value)
+
+
+def test_enforce_timeout_cap_local_hint_omits_job(monkeypatch):
+    monkeypatch.setenv("PORTAL_MAX_TIMEOUT", "300")
+    with pytest.raises(cli.ToolError) as ei:
+        cli._enforce_timeout_cap(600, job_hint=False)
+    assert "portal_job" not in str(ei.value)
+
+
+def test_enforce_timeout_cap_allows_within_ceiling(monkeypatch):
+    monkeypatch.setenv("PORTAL_MAX_TIMEOUT", "300")
+    cli._enforce_timeout_cap(120, job_hint=True)  # within ceiling -> no raise
 
 
 # ────────────────────────────────────────────────────────────────────────────

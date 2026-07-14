@@ -13,6 +13,8 @@ from typing import Optional
 
 import yaml
 
+from .safety import normalize_host_name
+
 logger = logging.getLogger("portal_mcp.security")
 
 
@@ -52,6 +54,7 @@ class SecurityPolicy:
 
     def check_host(self, host_name: str) -> Optional[str]:
         """Returns error string if host is blocked, None if allowed."""
+        host_name = normalize_host_name(host_name)
         if not self.host_allowlist:
             return None
         for pattern in self.host_allowlist:

@@ -66,6 +66,21 @@ _ALLOWED_INTERPRETERS = frozenset({
 })
 
 
+def normalize_host_name(name):
+    """Normalize a host / credential-key IDENTIFIER by stripping surrounding
+    whitespace, so the same host maps to ONE key everywhere (registry,
+    connection pool, credential cache, policy, audit).
+
+    This is identifier normalization, NOT one of the shell/path validators
+    below — host aliases never legitimately carry leading/trailing whitespace
+    (ssh_config ``Host`` patterns split on whitespace), so a stray space is
+    always an accident (tab-completion / copy-paste). Silently trimming it
+    prevents mismatches like a sudo password cached under ``'web01 '`` never
+    being found by a lookup of ``'web01'``. Non-str input is returned as-is.
+    """
+    return name.strip() if isinstance(name, str) else name
+
+
 # ─── Validators ─────────────────────────────────────────────────────────────
 
 def validate_remote_path(path: str, *, allow_empty: bool = False) -> str:

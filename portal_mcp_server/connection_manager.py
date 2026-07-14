@@ -17,6 +17,8 @@ import asyncssh
 from asyncssh.config import SSHClientConfig
 import yaml
 
+from .safety import normalize_host_name
+
 logger = logging.getLogger("portal_mcp.connections")
 
 # Hard ceiling for password_command / passphrase_command execution. Long enough
@@ -191,11 +193,24 @@ class HostConfig:
     # (omit client_keys, authenticate with the keys the agent holds); ``False``
     # = hard-disable the agent (key files only). See ``_build_connect_kwargs``.
     use_ssh_agent: Optional[bool] = None
+    # Run one-shot portal_exec commands in a LOGIN shell (``bash -lc``) so the
+    # user's ``~/.profile`` / ``~/.bashrc`` environment (PATH additions for
+    # conda / nvm / pyenv, …) is loaded. ``None`` = defer to PORTAL_LOGIN_SHELL
+    # (on by default); ``True`` / ``False`` = per-host override. Ignored on
+    # hosts without bash (the wrap degrades to a plain exec) and by portal_shell
+    # (its persistent session is deliberately ``--norc`` for the OSC 133
+    # boundary protocol).
+    login_shell: Optional[bool] = None
     # Where this entry was declared, surfaced by ``list_hosts``: "hosts.yaml"
     # (the config file), "runtime" (a ``portal_host`` register call), or
     # "ssh-config" (auto-resolved from the OpenSSH client config). Combined with
     # ``use_ssh_config`` to produce the list's ``source`` label.
     source: str = "hosts.yaml"
+    # Names of the fields the user EXPLICITLY set in this hosts.yaml entry (the
+    # raw yaml keys). The use_ssh_config merge uses this to decide which fields
+    # override the ssh_config alias vs. defer to it — a HostConfig DEFAULT (e.g.
+    # user="root", port=22) must NOT clobber the alias's User/Port.
+    specified_fields: frozenset = field(default_factory=frozenset)
 
 
 @dataclass
@@ -274,6 +289,7 @@ class ConnectionManager:
             data = yaml.safe_load(f) or {}
         hosts = data.get("hosts", {})
         for name, cfg in hosts.items():
+            name = normalize_host_name(name)
             warnings: list[str] = []
             use_ssh_config = bool(cfg.get("use_ssh_config", False))
             if "password" in cfg:
@@ -312,6 +328,19 @@ class ConnectionManager:
                 warnings.append(msg)
                 auth = None
             warnings.extend(self._overlay_warnings(name, use_ssh_config))
+            if use_ssh_config and cfg.get("host"):
+                try:
+                    resolved_hn = self._resolve_ssh_config_fields(name).get("host")
+                except Exception:
+                    resolved_hn = None
+                if resolved_hn and cfg.get("host") != resolved_hn:
+                    warnings.append(
+                        f"use_ssh_config is on and host: {cfg.get('host')!r} "
+                        f"disagrees with the ssh_config alias's resolved HostName "
+                        f"{resolved_hn!r}. Connecting to this host will be "
+                        "REFUSED until they agree — set 'HostName' in the ssh "
+                        "config stanza, or drop host: from this hosts.yaml entry "
+                        "so it is inherited.")
             if warnings:
                 self._config_warnings[name] = warnings
             self._registry[name] = HostConfig(
@@ -342,6 +371,10 @@ class ConnectionManager:
                 use_ssh_agent=(bool(cfg["use_ssh_agent"])
                                if cfg.get("use_ssh_agent") is not None
                                else None),
+                login_shell=(bool(cfg["login_shell"])
+                             if cfg.get("login_shell") is not None
+                             else None),
+                specified_fields=frozenset(cfg.keys()),
                 source="hosts.yaml",
             )
         # Top-level ``<local>:`` section (a reserved key sibling of ``hosts:``,
@@ -564,12 +597,19 @@ class ConnectionManager:
                      "port explicitly in hosts.yaml.")]
         if (not use_ssh_config) and exists:
             return [(f"host '{name}' is defined in BOTH hosts.yaml and "
-                     f"{label}; hosts.yaml takes precedence and ssh "
-                     "config is ignored for it (no field-level merge). To use "
-                     "ssh config's connection params and only add metadata "
-                     "(tags / sudo_password_command / ...) here, set "
+                     f"{label}; hosts.yaml wins and ssh config is IGNORED for it "
+                     "(no merge unless you opt in). To MERGE — inherit the ssh "
+                     "config alias's HostName / IdentityAgent / ProxyJump / … "
+                     "with hosts.yaml fields overriding on top — set "
                      "`use_ssh_config: true` on this host.")]
         return []
+
+    def login_shell_for(self, name: str) -> Optional[bool]:
+        """Per-host login-shell override (hosts.yaml ``login_shell``), or None
+        if the host isn't registered / didn't set it. ``None`` means the caller
+        should fall back to the PORTAL_LOGIN_SHELL default."""
+        cfg = self._registry.get(normalize_host_name(name))
+        return cfg.login_shell if cfg is not None else None
 
     def register_host(self, name: str, host: str = "", user: str = "root",
                       port: int = 22, key: Optional[str] = None,
@@ -584,6 +624,7 @@ class ConnectionManager:
         With ``use_ssh_config=True`` the connection params come from
         ~/.ssh/config and ``host`` may be omitted (defaults to ``name``).
         """
+        name = normalize_host_name(name)
         self._registry[name] = HostConfig(
             name=name, host=host or name, port=port, user=user,
             key=self._resolve_path(key),
@@ -668,7 +709,7 @@ class ConnectionManager:
         This is deliberately config-only. Unknown hosts and ssh-config-only
         aliases default to false unless they have an explicit hosts.yaml entry.
         """
-        cfg = self._registry.get(host_name)
+        cfg = self._registry.get(normalize_host_name(host_name))
         return bool(cfg and cfg.sudo_password_same_as_ssh)
 
     def config_warnings(self) -> dict[str, list[str]]:
@@ -771,6 +812,7 @@ class ConnectionManager:
         registry (used by ``portal_local_exec(use_sudo=True)``).
         """
         from .sudo_creds import LOCAL_SUDO_KEY
+        host_name = normalize_host_name(host_name)
         if host_name == LOCAL_SUDO_KEY:
             cmd = self._local_sudo_password_command
             if not cmd:
@@ -832,27 +874,53 @@ class ConnectionManager:
             )
         return None
 
+    def _guard_hostname_merge(self, cfg: "HostConfig") -> None:
+        """Merge (use_ssh_config) HostName guard: hosts.yaml MAY omit host: to
+        inherit the alias's HostName, but if it sets host: it MUST agree with the
+        ssh_config alias's resolved HostName — otherwise refuse rather than
+        silently pick one. Raised at connection time (execution/connection tools
+        hard-fail); ``list`` / ``check`` surface the same conflict as a warning."""
+        if "host" not in cfg.specified_fields:
+            return
+        resolved = self._resolve_ssh_config_fields(cfg.name).get("host")
+        if resolved and cfg.host != resolved:
+            raise RuntimeError(
+                f"Host '{cfg.name}': use_ssh_config is on and hosts.yaml sets "
+                f"host: {cfg.host!r}, but the ssh_config alias resolves HostName "
+                f"to {resolved!r}. For a merged host the two must agree — either "
+                f"set 'HostName {cfg.host}' under 'Host {cfg.name}' in your ssh "
+                "config, or drop host: from this hosts.yaml entry so it is "
+                "inherited from ssh_config.")
+
     async def _build_connect_kwargs(self, cfg: HostConfig) -> dict:
         if cfg.use_ssh_config:
-            # asyncssh resolves HostName/User/Port/IdentityFile/ProxyJump from
-            # the OpenSSH client config using the alias. Pass our explicit file
-            # list (PORTAL_SSH_CONFIG override else user + system fallback) so
-            # connection and detection read exactly the same files. An empty
-            # list — PORTAL_SSH_CONFIG=none (ssh -F none) or no config present —
-            # is passed as-is so asyncssh reads NOTHING, rather than '() which
-            # would re-trigger its built-in ~/.ssh/config default.
-            # Defer host-key behaviour to the same policy as explicit hosts.
-            return dict(
+            # MERGE (opt-in): connect with host=<alias> + the ssh config files so
+            # asyncssh matches `Host <alias>` and inherits its options (HostName /
+            # User / Port / IdentityFile / IdentityAgent / ProxyJump / …).
+            # hosts.yaml fields layer ON TOP as explicit kwargs (asyncssh
+            # precedence: explicit kwarg > config), but ONLY the fields the user
+            # actually set — an unset field defers to ssh_config instead of
+            # clobbering it with a HostConfig default. An empty file list
+            # (PORTAL_SSH_CONFIG=none / no config) is passed as-is so asyncssh
+            # reads NOTHING rather than re-triggering its ~/.ssh/config default.
+            self._guard_hostname_merge(cfg)
+            kwargs = dict(
                 host=cfg.name,
                 connect_timeout=cfg.connect_timeout,
                 known_hosts=self._known_hosts_arg(cfg),
                 config=[str(p) for p in self._ssh_config_files()],
             )
-        kwargs = dict(
-            host=cfg.host, port=cfg.port, username=cfg.user,
-            connect_timeout=cfg.connect_timeout,
-            known_hosts=self._known_hosts_arg(cfg),
-        )
+            spec = cfg.specified_fields
+            if "user" in spec:
+                kwargs["username"] = cfg.user
+            if "port" in spec:
+                kwargs["port"] = cfg.port
+        else:
+            kwargs = dict(
+                host=cfg.host, port=cfg.port, username=cfg.user,
+                connect_timeout=cfg.connect_timeout,
+                known_hosts=self._known_hosts_arg(cfg),
+            )
 
         # ── Optional ssh_config-style connection options ──
         # ProxyJump -> tunnel, ServerAliveInterval -> keepalive_interval,
@@ -913,12 +981,13 @@ class ConnectionManager:
             pass
         elif cfg.key:
             kwargs["client_keys"] = [cfg.key]
-        else:
-            # No explicit key file: enumerate the usual default keys. NOTE:
-            # asyncssh ALSO consults the ssh-agent (SSH_AUTH_SOCK) by default,
-            # so an agent-held key authenticates here too even though this loop
-            # only lists files. (The old comment claimed to "try the agent" but
-            # only ever checked files — the agent fallback is asyncssh's doing.)
+        elif not cfg.use_ssh_config:
+            # No explicit key file (and not a merge host): enumerate the usual
+            # default keys. NOTE: asyncssh ALSO consults the ssh-agent
+            # (SSH_AUTH_SOCK) by default, so an agent-held key authenticates here
+            # too even though this loop only lists files. A merge host is skipped
+            # on purpose so asyncssh reads IdentityFile / IdentityAgent from the
+            # ssh config instead of being pinned to the default key files.
             default_keys = []
             for k in ["~/.ssh/id_ed25519", "~/.ssh/id_rsa", "~/.ssh/id_ecdsa"]:
                 kp = Path(k).expanduser()
@@ -962,6 +1031,7 @@ class ConnectionManager:
           1. Explicitly registered host (registry / hosts.yaml)
           2. Alias defined in ~/.ssh/config (auto-registered on first use)
         """
+        host_name = normalize_host_name(host_name)
         if host_name not in self._registry:
             ssh_cfg_host = self._try_load_from_ssh_config(host_name)
             if ssh_cfg_host is not None:

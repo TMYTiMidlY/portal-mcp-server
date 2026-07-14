@@ -180,7 +180,7 @@ async def test_local_exec_disabled_by_default(monkeypatch):
     from portal_mcp_server import cli
     monkeypatch.delenv("PORTAL_ALLOW_LOCAL_EXEC", raising=False)
     with pytest.raises(ToolError, match="disabled"):
-        await cli.portal_local_exec("echo hi")
+        await cli.portal_local_exec("echo hi", timeout=30)
 
 
 @pytest.mark.asyncio
@@ -193,12 +193,12 @@ async def test_local_exec_injects_env_and_redacts(monkeypatch):
 
     # env injected correctly: command checks equality, prints MATCH not the value
     out = await cli.portal_local_exec(
-        'test "$MY_TOKEN" = VALUE-XYZ-789 && echo MATCH', secrets=["my_token"])
+        'test "$MY_TOKEN" = VALUE-XYZ-789 && echo MATCH', secrets=["my_token"], timeout=30)
     res = json.loads(out)
     assert res["output"] == "MATCH"
 
     # echo of the secret is redacted
-    out2 = await cli.portal_local_exec('echo "$MY_TOKEN"', secrets=["my_token"])
+    out2 = await cli.portal_local_exec('echo "$MY_TOKEN"', secrets=["my_token"], timeout=30)
     assert "VALUE-XYZ-789" not in out2
     assert "***" in out2
 
@@ -212,7 +212,7 @@ async def test_local_exec_value_never_in_audit(monkeypatch):
     ss.cache_secret("my_token", "VALUE-XYZ-789", ttl=60)
     # command references the secret by env var only — the value is injected via
     # the environment, so the mechanism must not leak it into the audit entry.
-    await cli.portal_local_exec('echo "$MY_TOKEN"', secrets=["my_token"])
+    await cli.portal_local_exec('echo "$MY_TOKEN"', secrets=["my_token"], timeout=30)
     latest = get_history(limit=1)[0]
     assert "VALUE-XYZ-789" not in str(latest)
     assert "my_token" in latest["command"]  # the NAME is fine to record
@@ -226,4 +226,4 @@ async def test_local_exec_unknown_secret_errors(monkeypatch, tmp_path):
     ss.reload_registry()
     ss.clear_secret()
     with pytest.raises(ToolError, match="not available"):
-        await cli.portal_local_exec("echo hi", secrets=["nope"])
+        await cli.portal_local_exec("echo hi", secrets=["nope"], timeout=30)

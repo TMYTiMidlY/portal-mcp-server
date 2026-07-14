@@ -181,7 +181,7 @@ async def test_sudo_password_never_in_audit_or_output(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo_exec)
 
-    out = await cli.portal_exec(host="web01", command="id", use_sudo=True)
+    out = await cli.portal_exec(host="web01", command="id", use_sudo=True, timeout=30)
     assert captured["password"] == PW           # mechanism got it (for sudo -S)
     assert PW not in out                         # ...never surfaced to the agent
     latest = get_history(limit=1)[0]

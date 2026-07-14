@@ -122,12 +122,45 @@ async def _conn_and_sftp(host_name: str):
         mgr.release_connection(host_name, conn)
 
 
+_RESUME_CHUNK = 256 * 1024
+
+
+async def _sftp_append_tail(sftp, local_path: str, remote_path: str,
+                            offset: int, total: int,
+                            progress_cb: ProgressCB) -> None:
+    """Resume path: append bytes ``[offset:]`` of the local file to an existing
+    (partial) remote file. The remote file is opened in append mode so writes
+    land at its current EOF (== ``offset``)."""
+    handler = _make_handler(progress_cb)
+    async with sftp.open(remote_path, "ab") as rf:
+        with open(local_path, "rb") as lf:
+            lf.seek(offset)
+            done = offset
+            while True:
+                chunk = lf.read(_RESUME_CHUNK)
+                if not chunk:
+                    break
+                await rf.write(chunk)
+                done += len(chunk)
+                if handler is not None:
+                    handler(local_path, remote_path, done, total)
+
+
 async def ssh_upload_file(host_name: str, local_path: str, remote_path: str,
-                          progress_cb: ProgressCB = None) -> dict:
-    """Upload a local file to the remote host via SFTP. Returns a status dict."""
+                          progress_cb: ProgressCB = None,
+                          resume: bool = True) -> dict:
+    """Upload a local file to the remote host via SFTP. Returns a status dict.
+
+    Large-file resume (``resume=True``, default): if a SMALLER partial already
+    exists at ``remote_path`` (a prior transfer was interrupted), only the
+    missing tail is appended instead of restarting from byte 0. After a resume
+    the whole file's sha256 is compared end-to-end and, on mismatch (a stale or
+    non-prefix partial), the file is re-uploaded fresh once. A fresh full upload
+    (no pre-existing partial, or ``resume=False``) skips that hash check and
+    trusts SFTP. ``resume=False`` forces a fresh overwrite."""
     res = {"status": "error", "direction": "upload", "host": host_name,
            "local_path": local_path, "remote_path": remote_path,
-           "bytes": 0, "duration_s": 0.0}
+           "bytes": 0, "duration_s": 0.0, "resumed": False}
     try:
         validate_remote_path(remote_path)
     except ValueError as e:
@@ -137,13 +170,34 @@ async def ssh_upload_file(host_name: str, local_path: str, remote_path: str,
     if not p.exists():
         res["error"] = f"Local file not found: {local_path}"
         return res
+    local_size = p.stat().st_size
     t0 = time.monotonic()
     try:
-        async with _sftp_session(host_name) as sftp:
-            await sftp.put(local_path, remote_path, preserve=True,
-                           progress_handler=_make_handler(progress_cb))
+        async with _conn_and_sftp(host_name) as (conn, sftp):
+            remote_size = None
+            if resume:
+                try:
+                    remote_size = (await sftp.stat(remote_path)).size
+                except Exception:
+                    remote_size = None  # missing / unstattable → fresh upload
+            if remote_size is not None and 0 < remote_size < local_size:
+                # Resume: append the missing tail, then verify the whole file.
+                await _sftp_append_tail(sftp, local_path, remote_path,
+                                        remote_size, local_size, progress_cb)
+                res["resumed"] = True
+                lh = await _local_sha256(local_path)
+                rh = await _remote_sha256(conn, remote_path)
+                if rh is not None and lh is not None and rh != lh:
+                    # Stale / non-prefix partial → re-upload from scratch once.
+                    await sftp.put(local_path, remote_path, preserve=True,
+                                   progress_handler=_make_handler(progress_cb))
+                    res["resumed"] = False
+                    res["restarted_after_mismatch"] = True
+            else:
+                await sftp.put(local_path, remote_path, preserve=True,
+                               progress_handler=_make_handler(progress_cb))
         res["status"] = "ok"
-        res["bytes"] = p.stat().st_size
+        res["bytes"] = local_size
         res["duration_s"] = round(time.monotonic() - t0, 3)
         return res
     except Exception as e:

@@ -29,7 +29,7 @@ async def test_exec_sudo_result_is_flagged_high_risk(monkeypatch):
 
     monkeypatch.setattr(sudo_creds, "resolve_sudo_password", fake_resolve)
     monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo)
-    out = json.loads(await cli.portal_exec("web01", "id", use_sudo=True))
+    out = json.loads(await cli.portal_exec("web01", "id", use_sudo=True, timeout=30))
     assert out["high_risk"] is True
     assert "high_risk_note" in out and out["high_risk_note"]
 
@@ -59,7 +59,7 @@ async def test_exec_sudo_and_secrets_coexist(monkeypatch, tmp_path):
     monkeypatch.setattr(sudo_creds, "resolve_sudo_password", fake_resolve)
     monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo)
     out = json.loads(await cli.portal_exec("web01", "echo $GITHUB_TOKEN",
-                                           use_sudo=True, secrets=["github_token"]))
+                                           use_sudo=True, secrets=["github_token"], timeout=30))
     assert captured["env"] == {"GITHUB_TOKEN": "ghp_SECRET"}
     assert "ghp_SECRET" not in out["stdout"]     # redacted out of the result
     assert "***" in out["stdout"]
@@ -77,18 +77,18 @@ async def test_exec_secrets_result_is_flagged_high_risk(monkeypatch):
 
     monkeypatch.setattr(cli, "_resolve_secrets", fake_resolve_secrets)
     monkeypatch.setattr(cli, "_re_exec_env", fake_exec_env)
-    out = json.loads(await cli.portal_exec("web01", "echo $X", secrets=["X"]))
+    out = json.loads(await cli.portal_exec("web01", "echo $X", secrets=["X"], timeout=30))
     assert out["high_risk"] is True
 
 
 @pytest.mark.asyncio
 async def test_plain_exec_is_not_flagged_high_risk(monkeypatch):
-    async def fake_exec(h, cmd, timeout=0):
+    async def fake_exec(h, cmd, timeout=0, login=True):
         return {"host": h, "command": cmd, "exit_code": 0,
                 "stdout": "hi", "stderr": ""}
 
     monkeypatch.setattr(cli, "ssh_exec", fake_exec)
-    out = json.loads(await cli.portal_exec("web01", "echo hi"))
+    out = json.loads(await cli.portal_exec("web01", "echo hi", timeout=30))
     assert "high_risk" not in out
 
 
@@ -229,7 +229,7 @@ async def test_commands_under_sudo_run_each_separately(monkeypatch):
     await cli.portal_exec("web01",
                           commands=["systemctl restart caddy", "sleep 4",
                                     "echo ok"],
-                          use_sudo=True)
+                          use_sudo=True, timeout=30)
     assert seen == ["systemctl restart caddy", "sleep 4", "echo ok"]
 
 
@@ -252,7 +252,7 @@ async def test_multiline_sudo_command_newlines_preserved(monkeypatch):
     monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo)
     await cli.portal_exec("web01",
                           command="systemctl restart caddy\nsleep 4\necho ok",
-                          use_sudo=True)
+                          use_sudo=True, timeout=30)
     assert seen[0] == "systemctl restart caddy\nsleep 4\necho ok"
 
 

@@ -149,7 +149,12 @@ class CredentialAgent:
     def _key_from_msg(self, kind: str, msg: dict[str, Any]) -> Optional[str]:
         field = "name" if kind == "secret" else "host"
         value = msg.get(field)
-        return value if isinstance(value, str) and value else None
+        if not isinstance(value, str):
+            return None
+        # Normalize the cache key: a stray leading/trailing space (tab-complete
+        # / copy-paste) must not split store vs fetch (see the sudo-for-host bug).
+        value = value.strip()
+        return value or None
 
     def _ttl_remaining(self, expiry: float) -> int:
         return max(0, int(expiry - time.monotonic()))

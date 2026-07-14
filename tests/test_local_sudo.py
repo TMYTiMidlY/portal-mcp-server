@@ -169,7 +169,7 @@ async def test_local_sudo_injects_secrets(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_local_sudo_exec_env", fake_local_sudo)
 
     out = await cli.portal_local_exec("echo $GITHUB_TOKEN", use_sudo=True,
-                                      secrets=["github_token"])
+                                      secrets=["github_token"], timeout=30)
     assert captured["password"] == "PW"
     assert captured["env"] == {"GITHUB_TOKEN": "ghp_SECRET"}
     assert "ghp_SECRET" not in out          # redacted out of the result
@@ -189,7 +189,7 @@ async def test_use_sudo_missing_password_message(monkeypatch, tmp_path):
     m = connection_manager.ConnectionManager(hosts_yaml=yml)
     monkeypatch.setattr(connection_manager, "get_manager", lambda: m)
     with pytest.raises(ToolError) as ei:
-        await cli.portal_local_exec(command="id", use_sudo=True)
+        await cli.portal_local_exec(command="id", use_sudo=True, timeout=30)
     msg = str(ei.value)
     # Names BOTH out-of-band sources, never asks for a pasted password.
     assert "set-local" in msg
@@ -221,7 +221,7 @@ async def test_local_sudo_password_never_in_output_or_audit(monkeypatch, tmp_pat
 
     monkeypatch.setattr(cli, "_local_sudo_exec_env", fake_local_sudo)
 
-    out = await cli.portal_local_exec(command="id", use_sudo=True)
+    out = await cli.portal_local_exec(command="id", use_sudo=True, timeout=30)
     assert captured["password"] == PW         # mechanism got it (for sudo -S)
     assert captured["cmd"] == "id"
     assert PW not in out                       # ...never surfaced to the agent

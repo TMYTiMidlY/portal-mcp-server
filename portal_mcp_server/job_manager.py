@@ -160,7 +160,7 @@ class JobManager:
 
     # ── submit ──────────────────────────────────────────────────────────────
 
-    async def submit(self, host: str, command: str) -> dict:
+    async def submit(self, host: str, command: str, login: bool = True) -> dict:
         await self._sweep_expired()
         async with self._lock:
             live = sum(1 for r in self._jobs.values() if r.status not in _TERMINAL)
@@ -174,20 +174,24 @@ class JobManager:
                     f"{self._max_live}); poll/cancel some before submitting more.")
             self._pending += 1
         try:
-            return await self._spawn_and_record(host, command)
+            return await self._spawn_and_record(host, command, login)
         finally:
             async with self._lock:
                 self._pending -= 1
 
-    async def _spawn_and_record(self, host: str, command: str) -> dict:
+    async def _spawn_and_record(self, host: str, command: str,
+                                login: bool = True) -> dict:
         token = uuid.uuid4().hex
         out_path = f"/tmp/portal-job-{token}.out"
         meta_path = f"/tmp/portal-job-{token}.meta"
         # Inner script: run the command, then record its exit status. The inner
         # bash evaluates $? AFTER the command (it is single-quoted into argv by
-        # quote_shell, so the OUTER shell does not expand it).
+        # quote_shell, so the OUTER shell does not expand it). A LOGIN shell
+        # (bash -lc) loads the user's ~/.profile / ~/.bashrc so long tasks see
+        # the same PATH/env as portal_exec; login=False keeps a plain bash -c.
         inner = f"{command}\necho \"{_DONE_MARKER}$?\" >> {quote_shell(meta_path)}\n"
-        spawn = (f"nohup bash -c {quote_shell(inner)} "
+        bash_flag = "-lc" if login else "-c"
+        spawn = (f"nohup bash {bash_flag} {quote_shell(inner)} "
                  f"> {quote_shell(out_path)} 2>&1 < /dev/null & echo $!")
 
         mgr = get_manager()

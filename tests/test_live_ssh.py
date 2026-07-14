@@ -263,7 +263,7 @@ class TestOrchestration:
         """Same command on multiple hosts simultaneously."""
         from portal_mcp_server import cli
         results = json.loads(await cli.portal_exec(
-            host=["fleet-01", "fleet-02"], command="hostname"))
+            host=["fleet-01", "fleet-02"], command="hostname", timeout=30))
         assert len(results) == 2
         for r in results:
             assert r["exit_code"] == 0, f"Parallel exec failed: {r}"
@@ -274,7 +274,7 @@ class TestOrchestration:
         from portal_mcp_server import cli
         results = json.loads(await cli.portal_exec(
             host=["fleet-01", "fleet-02"], command="echo rolling",
-            serialize=True, delay_s=0.1))
+            serialize=True, delay_s=0.1, timeout=30))
         assert len(results) == 2
         for r in results:
             assert "rolling" in r.get("stdout", "")
@@ -284,7 +284,7 @@ class TestOrchestration:
         """Execute on all hosts with a matching tag."""
         from portal_mcp_server import cli
         results = json.loads(await cli.portal_exec(
-            group_tag="fleet", command="echo tagged"))
+            group_tag="fleet", command="echo tagged", timeout=30))
         assert len(results) >= 1
         for r in results:
             assert r["exit_code"] == 0
@@ -295,7 +295,7 @@ class TestOrchestration:
         from portal_mcp_server import cli
         out = json.loads(await cli.portal_exec(
             host=TEST_HOST_NAME,
-            commands=["echo step1", "echo step2", "echo step3"]))
+            commands=["echo step1", "echo step2", "echo step3"], timeout=30))
         assert len(out["results"]) == 3
         assert out["host"] == TEST_HOST_NAME
 

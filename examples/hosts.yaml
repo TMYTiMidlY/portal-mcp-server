@@ -125,6 +125,31 @@ hosts:
   #   key: ~/.ssh/id_ed25519
   #   tags: [bastion, jump]
 
+  # ── Merge with ~/.ssh/config (use_ssh_config: true) ──────────────────────
+  # Opt in per host: portal connects using the alias's OpenSSH client-config
+  # entry (`Host <name>`) as the BASE — inheriting its HostName, User, Port,
+  # IdentityFile, IdentityAgent, ProxyJump, ciphers, … — and layers the fields
+  # you set HERE on top. hosts.yaml wins for anything you explicitly set;
+  # everything else defers to ssh_config. (Without this flag, a name that also
+  # exists in ssh_config is handled purely from hosts.yaml and the ssh_config
+  # entry is ignored, with a warning.) Great for reusing an IdentityAgent
+  # (1Password / yubikey / gpg-agent) or a ProxyJump already in ~/.ssh/config.
+  #   • host: MAY be omitted — the HostName is inherited from the alias.
+  #   • If you DO set host:, it MUST equal the alias's resolved HostName, or
+  #     any tool call for this host is REFUSED (portal won't silently pick one).
+  # gw:
+  #   use_ssh_config: true            # merge with `Host gw` in ~/.ssh/config
+  #   tags: [gateway]                 # hosts.yaml-only metadata
+  #   sudo_password_command: pass show sudo/gw
+  #   # user: deploy                  # optional override of ssh_config's User
+
+  # ── Host names ───────────────────────────────────────────────────────────
+  # A host name / alias (the yaml key above, e.g. `web01`) follows OpenSSH
+  # `Host` conventions: no surrounding or embedded whitespace. Any stray
+  # leading/trailing space is trimmed automatically (so `web01 ` and `web01`
+  # are the same host — this also keeps a stored sudo password from being
+  # missed by a later lookup).
+
 
 # ── Local-machine sudo for portal_local_exec(use_sudo=True) ──────────────────
 # `<local>` is a RESERVED top-level key (a sibling of `hosts:`, NOT a host under

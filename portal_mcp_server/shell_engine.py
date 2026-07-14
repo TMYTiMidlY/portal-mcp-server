@@ -34,9 +34,49 @@ from .safety import (
 logger = logging.getLogger("portal_mcp.shell")
 
 
+# Per-host cache: does the remote have bash? Populated lazily on the first
+# login-shell exec for a host and reused for the process lifetime. A host
+# without bash cannot run ``bash -lc``, so the login wrap silently degrades to a
+# plain (non-login) exec — portal_exec's contract still holds on a sh-only host.
+_HOST_HAS_BASH: dict[str, bool] = {}
+
+
+async def _host_has_bash(host_name: str) -> bool:
+    """True if ``bash`` is on PATH on <host> (cached). Best-effort: any probe
+    failure is treated as 'no bash' so the caller falls back to a plain exec."""
+    cached = _HOST_HAS_BASH.get(host_name)
+    if cached is not None:
+        return cached
+    mgr = get_manager()
+    try:
+        conn = await mgr.get_connection(host_name)
+    except Exception:
+        # A transient connect failure isn't 'no bash' — don't cache it; the
+        # real exec that follows will surface the connection error itself.
+        return False
+    try:
+        r = await conn.run(
+            "command -v bash >/dev/null 2>&1 && echo y || echo n",
+            check=False, errors=DEFAULT_DECODE_ERRORS)
+        has = (r.stdout or "").strip() == "y"
+    except Exception:
+        has = False
+    finally:
+        mgr.release_connection(host_name, conn)
+    _HOST_HAS_BASH[host_name] = has
+    return has
+
+
 async def ssh_exec(host_name: str, command: str, timeout: int = 60,
-                   env: dict = None, cwd: str = None) -> dict:
-    """Execute a single command on a remote host and return result."""
+                   env: dict = None, cwd: str = None,
+                   login: bool = False) -> dict:
+    """Execute a single command on a remote host and return result.
+
+    ``login=True`` runs the command in a LOGIN shell (``bash -lc``) so the
+    user's ``~/.profile`` / ``~/.bashrc`` environment (PATH additions for conda
+    / nvm / pyenv, …) is loaded. Silently degrades to a plain exec on a host
+    without bash (see :func:`_host_has_bash`).
+    """
     try:
         env_clean = validate_env_dict(env)
         full_cmd = build_cwd_prefix(cwd, command)
@@ -44,6 +84,10 @@ async def ssh_exec(host_name: str, command: str, timeout: int = 60,
         return {"host": host_name, "command": command,
                 "error": f"Invalid input: {e}", "exit_code": -1}
     mgr = get_manager()
+    if login and await _host_has_bash(host_name):
+        # Login shell so PATH/env from the user's rc/profile applies. Still
+        # non-interactive, so interactive-guarded rc noise won't fire.
+        full_cmd = f"bash -lc {quote_shell(full_cmd)}"
     conn = await mgr.get_connection(host_name)
     t0 = time.time()
     try:
