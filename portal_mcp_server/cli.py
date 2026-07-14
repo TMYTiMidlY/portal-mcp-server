@@ -2232,6 +2232,15 @@ def _credential_main(argv: list[str]) -> int:
     return args.func(args)
 
 
+def _is_loopback_host(host: str) -> bool:
+    """True if an HTTP bind address is loopback-only (safe without auth).
+
+    ``0.0.0.0`` / ``::`` (all interfaces) and any concrete non-127 address are
+    reachable off-box and therefore NOT loopback."""
+    h = (host or "").strip().lower()
+    return h in ("localhost", "127.0.0.1", "::1") or h.startswith("127.")
+
+
 def main() -> None:
     """CLI entrypoint registered as `portal-mcp-server` / `portal`.
 
@@ -2281,7 +2290,9 @@ def main() -> None:
     parser.add_argument("--transport", choices=["stdio", "streamable_http"], default="stdio",
                         help="MCP transport (default: stdio)")
     parser.add_argument("--port", type=int, default=8000, help="HTTP port (default: 8000)")
-    parser.add_argument("--host", default="0.0.0.0", help="HTTP bind address")
+    parser.add_argument("--host", default="127.0.0.1",
+                        help="HTTP bind address (default: 127.0.0.1, loopback "
+                             "only; a non-loopback bind requires PORTAL_AUTH_TOKEN)")
     args = parser.parse_args()
 
     _set_server_transport(args.transport)
@@ -2290,11 +2301,26 @@ def main() -> None:
 
     if args.transport == "streamable_http":
         import uvicorn
+        loopback = _is_loopback_host(args.host)
+        if not loopback and not PORTAL_AUTH_TOKEN:
+            # Every MCP tool here can drive remote hosts / read-write local
+            # files; exposing that unauthenticated on a reachable interface is
+            # a footgun. Refuse rather than silently bind wide open.
+            raise SystemExit(
+                f"refusing to start HTTP transport on non-loopback address "
+                f"{args.host!r} without authentication. Set PORTAL_AUTH_TOKEN "
+                f"(and terminate TLS in front, e.g. a reverse proxy), or bind "
+                f"--host 127.0.0.1 for local-only access.")
         app = mcp.streamable_http_app()
         if PORTAL_AUTH_TOKEN:
             app.add_middleware(TokenAuthMiddleware)
             logger.info("Bearer token auth enabled")
         logger.info(f"HTTP transport on {args.host}:{args.port}/mcp")
+        if not loopback:
+            logger.warning(
+                "HTTP transport bound to non-loopback %s — portal serves "
+                "plaintext HTTP, so terminate TLS in front (reverse proxy).",
+                args.host)
         uvicorn.run(app, host=args.host, port=args.port)
     else:
         logger.info("stdio transport active")
