@@ -5,7 +5,7 @@ Unlike every other portal_* capability (which runs over SSH on a remote host),
 this executes locally — which **departs from** this project's core goal of
 driving *remote* hosts as if they were local. It's a useful but off-target
 derivative (it happens to reuse the secret / sudo credential machinery), so the
-``portal_local_exec`` tool is OFF by default and must be explicitly enabled with
+``local_exec`` tool is OFF by default and must be explicitly enabled with
 ``PORTAL_ALLOW_LOCAL_EXEC=1`` (see :mod:`cli`).
 
 Secrets are passed through the child process **environment** (never on argv, so

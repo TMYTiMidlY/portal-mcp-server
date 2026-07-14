@@ -17,19 +17,19 @@ import pytest
 # ────────────────────────────────────────────────────────────────────────────
 
 def test_portal_exec_has_no_password_parameter():
-    """portal_exec exposes a boolean `use_sudo` switch, never a password."""
-    from portal_mcp_server.cli import portal_exec
-    params = inspect.signature(portal_exec).parameters
+    """remote_exec exposes a boolean `use_sudo` switch, never a password."""
+    from portal_mcp_server.cli import remote_exec
+    params = inspect.signature(remote_exec).parameters
     assert "use_sudo" in params
     assert params["use_sudo"].annotation is bool
     assert not any("password" in p.lower() or "passwd" in p.lower() for p in params), (
-        "portal_exec must not take a password — it would leak into tool-call traces"
+        "remote_exec must not take a password — it would leak into tool-call traces"
     )
 
 
 def test_portal_transfer_has_no_password_parameter():
-    from portal_mcp_server.cli import portal_transfer
-    params = inspect.signature(portal_transfer).parameters
+    from portal_mcp_server.cli import remote_transfer
+    params = inspect.signature(remote_transfer).parameters
     assert not any("password" in p.lower() for p in params)
 
 
@@ -181,7 +181,7 @@ async def test_sudo_password_never_in_audit_or_output(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_re_sudo_exec", fake_sudo_exec)
 
-    out = await cli.portal_exec(host="web01", command="id", use_sudo=True, timeout=30)
+    out = await cli.remote_exec(host="web01", command="id", use_sudo=True, timeout=30)
     assert captured["password"] == PW           # mechanism got it (for sudo -S)
     assert PW not in out                         # ...never surfaced to the agent
     latest = get_history(limit=1)[0]

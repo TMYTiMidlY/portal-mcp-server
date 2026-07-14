@@ -45,7 +45,7 @@ from .safety import strip_ansi
 
 logger = logging.getLogger("portal_mcp.remote_bash")
 
-# Guidance returned (never raised) when a portal_shell command wedged on an
+# Guidance returned (never raised) when a remote_shell command wedged on an
 # interactive prompt. The persistent PTY has no input channel, so the fix for a
 # sudo command is the one-shot sudo path, not a retry (which would wedge again).
 # Unlike the old sentinel scheme the session is NOT destroyed: the command is
@@ -54,11 +54,11 @@ _INTERACTIVE_BLOCKED_GUIDANCE = (
     "This command wedged on an interactive prompt that reads from the terminal "
     "(most often sudo asking for a password, but also ssh's first-connect "
     "host-key/password prompt, mysql -p, read, or a gpg passphrase unlock). "
-    "portal_shell's persistent PTY has no channel to feed user input, so the "
+    "remote_shell's persistent PTY has no channel to feed user input, so the "
     "command was automatically Ctrl-C'd. The session and its cwd / env / shell "
     "functions are PRESERVED — the next non-interactive command can run straight "
     "away. To run a privileged command use "
-    "portal_exec(host=..., command=..., use_sudo=True): it runs one-shot and "
+    "remote_exec(host=..., command=..., use_sudo=True): it runs one-shot and "
     "feeds the stored sudo password to `sudo -S -k` on stdin. If no password is "
     "stored yet, ask the user to run `portal sudo set <host>` in a separate "
     "terminal first (never have them paste the password into the conversation)."
@@ -168,7 +168,7 @@ def _interactive_blocked_result(host: str, cmd: str,
     """Structured fast-fail result for a command that wedged on an interactive
     prompt and was soft-cancelled.
 
-    Returned (not raised) so portal_shell hands the agent an exit_code + clear
+    Returned (not raised) so remote_shell hands the agent an exit_code + clear
     guidance immediately instead of a ``[timeout]`` after up to an hour. The
     session is PRESERVED (``session_preserved: true``): the wedged command was
     Ctrl-C'd and the shell verified back at a clean prompt, so cwd / env / shell
@@ -197,7 +197,7 @@ async def remote_bash(host: str, cmd: str, timeout: float = 3600.0) -> Dict[str,
     If the cached session's SSH channel has died (remote shell exited, TCP
     dropped, codec failure, …) this transparently recreates the session and
     retries the command **once** so the agent doesn't have to call
-    ``portal_close_shell`` and reissue.
+    ``remote_close`` and reissue.
 
     If the command wedged on an interactive prompt (sudo / ssh / passphrase /
     …) it is Ctrl-C'd — not retried — and the result carries ``exit_code: -1``,
@@ -244,7 +244,7 @@ async def remote_bash_many(host: str, cmds: List[str], stop_on_error: bool = Tru
 
     This is the multi-step counterpart to ``remote_bash``: ``cd`` /
     ``export`` / ``source venv/bin/activate`` in an earlier command are visible
-    to later ones (unlike ``portal_exec``'s multi-command path, which opens a
+    to later ones (unlike ``remote_exec``'s multi-command path, which opens a
     fresh channel + shell per step and keeps no state between them).
 
     The whole batch holds the session's ``_read_lock`` so a concurrent single
@@ -339,6 +339,41 @@ def remote_bash_status() -> Dict[str, str]:
     return dict(_HOST_SESSIONS)
 
 
+async def _run_sudo_raw(host: str, command: str, password: str, *,
+                        stdin_extra: str = "", encoding: str = "utf-8",
+                        timeout: float = 3600.0):
+    """Low-level one-shot sudo primitive shared by the exec and file-read paths.
+
+    Runs ``sudo -S -k -p '' <command>`` on <host> with the sudo password fed on
+    stdin, and returns the **raw** asyncssh completed process (``.returncode`` /
+    ``.stdout`` / ``.stderr``) with NO output post-processing. The caller decides
+    whether to strip trailing newlines:
+
+    * command execution strips them (shell convention — ``$(cmd)`` does the same);
+    * a byte-exact file read (``cat``) must **never** strip, or the content's
+      SHA-256 won't match and ``remote_patch``'s hash precondition breaks.
+
+    ``-p ''`` suppresses the prompt; ``-k`` forces fresh auth so a cached sudo
+    ticket can't mask a wrong password. ``stdin_extra`` is appended after the
+    password + newline (e.g. secret values read back inside the elevated shell).
+    The password never lands on argv (stdin only) and is never logged. Raises
+    :class:`asyncio.TimeoutError` on timeout (caller formats the result)."""
+    from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
+
+    mgr = get_manager()
+    conn = await mgr.get_connection(host)
+    wrapped = f"sudo -S -k -p '' {command}"
+    stdin_data = password + "\n" + stdin_extra
+    try:
+        return await asyncio.wait_for(
+            conn.run(wrapped, input=stdin_data, check=False, encoding=encoding,
+                     errors=DEFAULT_DECODE_ERRORS),
+            timeout=timeout,
+        )
+    finally:
+        mgr.release_connection(host, conn)
+
+
 async def remote_sudo_exec(host: str, command: str, password: str,
                            env: "dict | None" = None,
                            timeout: float = 3600.0) -> Dict[str, object]:
@@ -346,9 +381,8 @@ async def remote_sudo_exec(host: str, command: str, password: str,
 
     Uses a one-shot ``conn.run`` (not the persistent session): ``sudo -S`` reads
     the password from stdin, which would collide with the persistent shell's
-    boundary protocol. ``-p ''`` suppresses the prompt; ``-k`` forces a fresh
-    auth so a previously-cached sudo ticket can't mask a wrong password. cwd/env
-    from the persistent ``portal_shell`` session therefore do NOT apply here.
+    boundary protocol. cwd/env from the persistent ``remote_shell`` session
+    therefore do NOT apply here.
 
     ``env`` (already-resolved ``ENV_VAR_NAME -> value`` secrets) is injected
     WITHOUT relying on sudoers ``env_keep``: each value is fed on stdin right
@@ -356,35 +390,27 @@ async def remote_sudo_exec(host: str, command: str, password: str,
     :func:`secrets_store.sudo_stdin_secret_script`), so it survives sudo's
     ``env_reset`` and never lands on argv.
 
-    Returns ``{host, command, exit_code, stdout, stderr, elapsed_s}`` —
-    ``conn.run`` natively splits the streams (sudo auth failures land on
-    stderr). The password is never logged and never echoed (``sudo -S`` reads
-    silently) and never appears on argv (it goes in on stdin).
+    Returns ``{host, command, exit_code, stdout, stderr, elapsed_s}`` — the
+    streams are split (sudo auth failures land on stderr). Output has its
+    trailing newlines stripped (shell convention); do NOT reuse this for a
+    byte-exact read — see :func:`_run_sudo_raw`.
     """
-    from .connection_manager import DEFAULT_DECODE_ERRORS, get_manager
     from .safety import quote_shell
     from . import secrets_store
 
     env = env or {}
     names = list(env.keys())
     body = secrets_store.sudo_stdin_secret_script(command, names)
-    mgr = get_manager()
-    conn = await mgr.get_connection(host)
-    wrapped = f"sudo -S -k -p '' -- bash -c {quote_shell(body)}"
-    stdin_data = password + "\n" + "".join(f"{env[n]}\n" for n in names)
+    wrapped = f"-- bash -c {quote_shell(body)}"
+    stdin_extra = "".join(f"{env[n]}\n" for n in names)
     t0 = time.monotonic()
     try:
-        result = await asyncio.wait_for(
-            conn.run(wrapped, input=stdin_data, check=False,
-                     errors=DEFAULT_DECODE_ERRORS),
-            timeout=timeout,
-        )
+        result = await _run_sudo_raw(host, wrapped, password,
+                                     stdin_extra=stdin_extra, timeout=timeout)
     except asyncio.TimeoutError:
         return {"host": host, "command": command, "exit_code": -1, "stdout": "",
                 "stderr": f"[timeout] sudo command timed out after {timeout}s",
                 "elapsed_s": round(time.monotonic() - t0, 3)}
-    finally:
-        mgr.release_connection(host, conn)
 
     return {"host": host, "command": command, "exit_code": result.returncode,
             "stdout": (result.stdout or "").rstrip("\n"),
@@ -402,7 +428,7 @@ async def remote_exec_with_env(host: str, command: str, env: dict,
     :func:`remote_sudo_exec` this is a one-shot ``conn.run`` (not the persistent
     session): the command's own stdin is therefore already at EOF (fine for
     ``curl``/CLI tools that read flags, not stdin). cwd/env from prior
-    ``portal_shell`` calls do NOT apply.
+    ``remote_shell`` calls do NOT apply.
 
     ``env`` maps already-resolved ``ENV_VAR_NAME -> value``. Returns
     ``{host, command, exit_code, stdout, stderr, elapsed_s}``; the caller is

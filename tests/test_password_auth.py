@@ -5,7 +5,7 @@ Scope:
   * Pin the LLM-facing safety invariants (the original audit finding):
     - HostConfig has no `password` field
     - ConnectionManager.register_host has no `password` kwarg
-    - portal_host MCP tool has no `password` parameter
+    - hosts MCP tool has no `password` parameter
     - hosts.yaml plaintext `password:` is rejected with an ERROR
     - _build_connect_kwargs never injects a password from a HostConfig
       attribute or a yaml field that did not go through password_command
@@ -57,13 +57,13 @@ def test_connection_manager_register_host_signature_has_no_password():
 
 def test_portal_host_register_signature_has_no_password():
     from portal_mcp_server import cli
-    sig = inspect.signature(cli.portal_host)
+    sig = inspect.signature(cli.hosts)
     assert "password" not in sig.parameters, (
-        "portal_host MCP tool must not expose a password parameter "
+        "hosts MCP tool must not expose a password parameter "
         "(would let LLMs leak credentials into prompt logs)."
     )
     assert "password_command" not in sig.parameters, (
-        "portal_host MCP tool must not expose a password_command parameter "
+        "hosts MCP tool must not expose a password_command parameter "
         "either — the command string is itself sensitive (it can name a "
         "secret store entry) and would land in tool-call traces."
     )

@@ -2,7 +2,7 @@
 
 Findings addressed
 ------------------
-1. **portal_host register/remove bypass _gate** — an agent could register
+1. **hosts register/remove bypass _gate** — an agent could register
    an alias pointing at any IP, then operate on that alias unimpeded
    because host_allowlist only sees the alias name, not the target IP.
 
@@ -58,14 +58,14 @@ def fresh_mgr(monkeypatch, tmp_path):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 1. portal_host register/remove now go through _gate
+# 1. hosts register/remove now go through _gate
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestPortalHostGate:
     async def test_register_with_target_in_allowlist_succeeds(self, policy, fresh_mgr):
         from portal_mcp_server import cli
         # Target host alias matches 'safe-*' allowlist
-        out = await cli.portal_host(action="register", name="alias1", host="safe-target")
+        out = await cli.hosts(action="register", name="alias1", host="safe-target")
         assert "registered" in out.lower(), out
 
     async def test_register_with_target_outside_allowlist_blocked(self, policy, fresh_mgr):
@@ -76,7 +76,7 @@ class TestPortalHostGate:
         """
         from portal_mcp_server import cli
         with pytest.raises(ToolError, match="BLOCKED:"):
-            await cli.portal_host(action="register", name="safe-pivot", host="evil-host")
+            await cli.hosts(action="register", name="safe-pivot", host="evil-host")
         assert "evil-host" not in [h["name"] for h in fresh_mgr.list_hosts()]
         assert "safe-pivot" not in [h["name"] for h in fresh_mgr.list_hosts()]
 
@@ -91,7 +91,7 @@ class TestPortalHostGate:
             "evil-host"
         ) or _make_hostconfig("evil-host")
         with pytest.raises(ToolError, match="BLOCKED:"):
-            await cli.portal_host(action="remove", name="evil-host")
+            await cli.hosts(action="remove", name="evil-host")
 
 
 def _make_hostconfig(name: str):
@@ -100,7 +100,7 @@ def _make_hostconfig(name: str):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 2. portal_tunnel(action="close") now goes through _gate
+# 2. remote_tunnel(action="close") now goes through _gate
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestPortalTunnelCloseGate:
@@ -129,7 +129,7 @@ class TestPortalTunnelCloseGate:
         )
 
         with pytest.raises(ToolError, match="BLOCKED:"):
-            await cli.portal_tunnel(action="close", tunnel_id="t1")
+            await cli.remote_tunnel(action="close", tunnel_id="t1")
         # Tunnel still alive after blocked close.
         assert "t1" in tm._tunnels
 
@@ -139,7 +139,7 @@ class TestPortalBashCloseGate:
     async def test_bash_close_blocked_when_host_not_in_allowlist(
         self, policy, monkeypatch,
     ):
-        """portal_close_shell is state-changing (tears down a session) and
+        """remote_close is state-changing (tears down a session) and
         must respect the same host allowlist as every other gated entry.
         """
         from portal_mcp_server import cli
@@ -154,7 +154,7 @@ class TestPortalBashCloseGate:
         monkeypatch.setattr(cli, "_re_bash_close", _must_not_be_called)
 
         with pytest.raises(ToolError, match="BLOCKED:"):
-            await cli.portal_close_shell("evil-host")
+            await cli.remote_close("evil-host")
 
     @pytest.mark.asyncio
     async def test_bash_close_passes_when_host_in_allowlist(
@@ -168,7 +168,7 @@ class TestPortalBashCloseGate:
             return f"closed {host}"
 
         monkeypatch.setattr(cli, "_re_bash_close", _ok)
-        out = await cli.portal_close_shell("safe-01")
+        out = await cli.remote_close("safe-01")
         assert out == "closed safe-01"
         assert called["with"] == "safe-01"
 
@@ -243,7 +243,7 @@ class TestGateExec:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-# 5. portal_check is a dry-run: it must NOT consume rate-limit quota
+# 5. policy_check is a dry-run: it must NOT consume rate-limit quota
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestPortalCheckDryRun:
@@ -265,13 +265,13 @@ class TestPortalCheckDryRun:
         assert await pol.enforce("h") is not None  # 3rd real call blocked at 2/s
 
     async def test_portal_check_never_self_throttles(self, monkeypatch, tmp_path):
-        """portal_check called many times in a row must never report a spurious
+        """policy_check called many times in a row must never report a spurious
         'Rate limit exceeded' (the dry-run path used to consume quota and
-        self-throttle). Regression for the portal_check rate-limit burn."""
+        self-throttle). Regression for the policy_check rate-limit burn."""
         from portal_mcp_server import security, cli
 
         pol = security.SecurityPolicy(policies_yaml=tmp_path / "none.yaml")
         pol.rate_limit_rps = 2.0
         monkeypatch.setattr(cli, "get_policy", lambda: pol)
-        outs = [await cli.portal_check("h") for _ in range(6)]
+        outs = [await cli.policy_check("h") for _ in range(6)]
         assert all("BLOCKED" not in o for o in outs), outs

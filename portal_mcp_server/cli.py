@@ -2,7 +2,7 @@
 portal-mcp-server — Agent-feels-local SSH orchestration MCP server.
 Exposes 14 portal_* tools covering: read/patch/grep/glob/
 shell(+close_shell)/exec/job core + local_exec + host/transfer/tunnel/audit/
-check. (portal_patch sweeps its own orphan tmp files — no separate tool.)
+check. (remote_patch sweeps its own orphan tmp files — no separate tool.)
 """
 import asyncio
 import hmac
@@ -93,7 +93,7 @@ async def _gate(host: str, command: str = "", *,
     """Returns error string if blocked, None if allowed.
 
     ``commit_rate_limit=False`` runs the host/command checks without consuming
-    a rate-limit token (for the ``portal_check`` dry-run).
+    a rate-limit token (for the ``policy_check`` dry-run).
 
     Async because the underlying ``SecurityPolicy.enforce`` may invoke the
     optional ``safety_net`` subprocess gate; running it synchronously would
@@ -179,7 +179,7 @@ async def _safe_report(ctx: "Context", done: int, total: "int | None" = None) ->
 
 
 def _heartbeat_interval() -> float:
-    """Seconds between portal_shell/portal_exec keepalive pings (env-overridable)."""
+    """Seconds between remote_shell/remote_exec keepalive pings (env-overridable)."""
     raw = os.environ.get("PORTAL_BASH_HEARTBEAT_INTERVAL", "")
     try:
         v = float(raw)
@@ -188,11 +188,11 @@ def _heartbeat_interval() -> float:
     return v if v > 0 else 5.0
 
 
-# Hard ceiling (seconds) on a FOREGROUND blocking exec call — portal_exec /
-# portal_shell / portal_local_exec. `timeout` is a REQUIRED argument on those
+# Hard ceiling (seconds) on a FOREGROUND blocking exec call — remote_exec /
+# remote_shell / local_exec. `timeout` is a REQUIRED argument on those
 # tools (no default: the agent must consciously choose a cut-off), and a value
 # ABOVE this ceiling is refused. A genuinely long task must be backgrounded with
-# portal_job (no ceiling) so the agent isn't pinned on one blocking call and can
+# remote_job (no ceiling) so the agent isn't pinned on one blocking call and can
 # inspect / intervene between steps. Operator-tunable via PORTAL_MAX_TIMEOUT
 # (seconds); defaults to 5 minutes.
 _DEFAULT_MAX_TIMEOUT = 300.0
@@ -205,7 +205,7 @@ def _max_command_timeout() -> float:
     to the built-in 5-minute default when unset, non-numeric, or non-positive.
     This is a safety ceiling, NOT a default the agent inherits — the exec tools
     have no default `timeout` at all; the agent must always pass one, and any
-    value above this ceiling is refused with guidance to use portal_job.
+    value above this ceiling is refused with guidance to use remote_job.
     """
     raw = os.environ.get("PORTAL_MAX_TIMEOUT", "")
     try:
@@ -220,7 +220,7 @@ def _enforce_timeout_cap(timeout: float, *, job_hint: bool) -> None:
 
     Rejects non-positive values and any value above the PORTAL_MAX_TIMEOUT
     ceiling. ``job_hint`` steers the over-ceiling guidance: remote exec / shell
-    can offload a long task to portal_job; portal_local_exec has no local
+    can offload a long task to remote_job; local_exec has no local
     background runner, so it is told to split the work into shorter steps.
     """
     if timeout is None or timeout <= 0:
@@ -231,11 +231,11 @@ def _enforce_timeout_cap(timeout: float, *, job_hint: bool) -> None:
             raise ToolError(
                 f"timeout {timeout:g}s exceeds the foreground ceiling {cap:g}s "
                 "(PORTAL_MAX_TIMEOUT). Don't pin a long task on a blocking call "
-                "— background it with portal_job (submit → poll → cancel; no "
+                "— background it with remote_job (submit → poll → cancel; no "
                 "ceiling), so you can keep working and step in while it runs.")
         raise ToolError(
             f"timeout {timeout:g}s exceeds the foreground ceiling {cap:g}s "
-            "(PORTAL_MAX_TIMEOUT). portal_local_exec has no background runner — "
+            "(PORTAL_MAX_TIMEOUT). local_exec has no background runner — "
             "split the work into shorter steps under the ceiling.")
 
 
@@ -269,7 +269,7 @@ async def _await_with_heartbeat(coro, ctx: "Context | None",
                                 interval: "float | None" = None):
     """Await ``coro`` while emitting periodic MCP progress notifications.
 
-    Unlike portal_transfer, a remote command produces no output until it
+    Unlike remote_transfer, a remote command produces no output until it
     finishes, so a slow command would leave the client hearing nothing. Many
     clients abort a silent request after a fixed idle window even though the
     server-side ``timeout`` is far
@@ -307,7 +307,7 @@ async def _await_with_heartbeat(coro, ctx: "Context | None",
 
 
 async def _gate_exec(hosts: list[str], commands: list[str]) -> str | None:
-    """Multi-host / multi-command policy gate for portal_exec.
+    """Multi-host / multi-command policy gate for remote_exec.
 
     Two-phase to avoid burning rate-limit quota on hosts that pass when a
     later host fails: first run all *non-mutating* checks (every command
@@ -391,7 +391,7 @@ def _local_sudo_missing_message() -> str:
 
 
 # Substrings sudo itself prints when it needs a password but has no tty and no
-# `-S`/askpass (i.e. a plain portal_exec command containing a bare `sudo`).
+# `-S`/askpass (i.e. a plain remote_exec command containing a bare `sudo`).
 # The command fails fast (good) but with a cryptic message — we attach a hint
 # pointing at the right tool so the agent doesn't have to guess.
 _SUDO_TTY_SIGNS = (
@@ -410,7 +410,7 @@ def _maybe_hint_sudo_tty(res: dict) -> None:
     if any(sign in text for sign in _SUDO_TTY_SIGNS):
         res["hint"] = (
             "sudo needs a password but had no tty to prompt on. Re-run this as "
-            "portal_exec(host=..., command=..., use_sudo=True): it feeds the "
+            "remote_exec(host=..., command=..., use_sudo=True): it feeds the "
             "stored sudo password to `sudo -S` over stdin. If none is stored "
             "yet, ask the user to run `portal sudo set <host>` in a separate "
             "terminal first — never have them paste the password into the chat."
@@ -438,11 +438,11 @@ def _resolve_group(group_tag: str) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 1. HOST REGISTRY  (portal_host)
+# 1. HOST REGISTRY  (hosts)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_host(action: Literal["list", "register", "remove"], name: str = "",
+async def hosts(action: Literal["list", "register", "remove"], name: str = "",
                        host: str = "", user: str = "root", port: int = 22,
                        key_path: str = "", tags: str = "") -> str:
     """Manage the SSH host registry.
@@ -456,17 +456,17 @@ async def portal_host(action: Literal["list", "register", "remove"], name: str =
         HostName/User/Port. Each entry has a `source` field: "hosts.yaml",
         "runtime", "ssh-config", or a "…+ssh-config" overlay (metadata from the
         declared origin, connection params from ssh config).
-        Example: portal_host(action="list")
+        Example: hosts(action="list")
     - action="register": add a host to the registry. Pass `host` (ip/hostname),
         or just `name` if ~/.ssh/config has a matching Host alias (registers a
         use_ssh_config overlay). Optional: user (default root), port (default
         22), key_path (else asyncssh falls back to ~/.ssh/id_* or ssh-agent),
-        tags (comma-separated, used by portal_exec's group_tag).
-        Example: portal_host(action="register", name="web01", host="10.0.0.1",
+        tags (comma-separated, used by remote_exec's group_tag).
+        Example: hosts(action="register", name="web01", host="10.0.0.1",
                               user="ubuntu", tags="web,prod")
     - action="remove": remove a host from the registry.
         Required: name.
-        Example: portal_host(action="remove", name="web01")
+        Example: hosts(action="remove", name="web01")
 
     Hosts already defined in ~/.ssh/config are auto-resolved on first use; explicit
     registration is only needed for tag-based grouping. This MCP tool only
@@ -537,11 +537,11 @@ async def portal_host(action: Literal["list", "register", "remove"], name: str =
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 2. FILE TRANSFER  (portal_transfer — SFTP-based, binary safe)
+# 2. FILE TRANSFER  (remote_transfer — SFTP-based, binary safe)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_transfer(
+async def remote_transfer(
         direction: Literal["upload", "download", "sync", "mirror",
                            "upload-list", "download-list"],
         host: str, local_path: str, remote_path: str,
@@ -551,11 +551,11 @@ async def portal_transfer(
 
     ## Modes
     - direction="upload": local_path → remote_path (single file).
-        Example: portal_transfer(direction="upload", host="web01",
+        Example: remote_transfer(direction="upload", host="web01",
                                   local_path="/tmp/app.jar",
                                   remote_path="/opt/app/app.jar")
     - direction="download": remote_path → local_path (single file).
-        Example: portal_transfer(direction="download", host="web01",
+        Example: remote_transfer(direction="download", host="web01",
                                   remote_path="/var/log/syslog",
                                   local_path="/tmp/syslog")
     - direction="sync": recursively sync local_path directory → remote_path
@@ -563,7 +563,7 @@ async def portal_transfer(
         (or sha256 when checksum=True) are skipped.
     - direction="mirror": recursively mirror remote_path directory → local_path
         directory (download); the remote→local counterpart of "sync".
-        Example: portal_transfer(direction="mirror", host="web01",
+        Example: remote_transfer(direction="mirror", host="web01",
                                   remote_path="/srv/www/", local_path="./www/")
     - direction="upload-list" / "download-list": transfer an explicit list of
         file pairs given in paths_json (an arbitrary local→remote mapping, not a
@@ -572,7 +572,7 @@ async def portal_transfer(
         the changed files; a single pair's failure is collected in failed[]
         without aborting the batch. local_path / remote_path are ignored in
         these modes.
-        Example: portal_transfer(direction="upload-list", host="web01",
+        Example: remote_transfer(direction="upload-list", host="web01",
             paths_json='[{"local":"/tmp/a.conf","remote":"/etc/app/a.conf"},
                          {"local":"/tmp/b.conf","remote":"/etc/app/b.conf"}]')
 
@@ -596,7 +596,7 @@ async def portal_transfer(
     uploaded|downloaded, skipped, failed[], bytes_total, bytes_transferred,
     duration_s}.
 
-    For text-only edits prefer portal_patch (hash-protected). Use portal_transfer
+    For text-only edits prefer remote_patch (hash-protected). Use remote_transfer
     when SFTP semantics are needed: binary files, large files, whole directory
     trees. Note: directory modes copy *files* only — symlinks and special files
     are skipped, and empty directories are not created on their own.
@@ -650,41 +650,41 @@ async def portal_transfer(
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 3. SSH TUNNELS  (portal_tunnel — action=open|close|list)
+# 3. SSH TUNNELS  (remote_tunnel — action=open|close|list)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_tunnel(action: Literal["open", "close", "list"],
+async def remote_tunnel(action: Literal["open", "close", "list"],
                         kind: Literal["local", "reverse", "socks"] = "local",
                         host: str = "", tunnel_id: str = "",
                         local_port: int = 0, local_bind: str = "127.0.0.1",
                         remote_host: str = "", remote_port: int = 0) -> str:
-    """Manage SSH tunnels — a single entry point (like portal_host) where
+    """Manage SSH tunnels — a single entry point (like hosts) where
     `action` selects the operation and the other args parameterise it.
 
     ## Actions
     - action="open": open a tunnel through `host`. `kind` picks the type:
         - kind="local"  : forward localhost:local_port → remote_host:remote_port
             via host. Required: remote_host, remote_port (local_port 0 = auto).
-            Example: portal_tunnel(action="open", kind="local", host="bastion",
+            Example: remote_tunnel(action="open", kind="local", host="bastion",
                                    local_port=5432, remote_host="db.internal",
                                    remote_port=5432)
         - kind="reverse": expose local_bind:local_port to host as host:remote_port.
             Required: remote_port, local_bind, local_port.
-            Example: portal_tunnel(action="open", kind="reverse", host="bastion",
+            Example: remote_tunnel(action="open", kind="reverse", host="bastion",
                                    remote_port=8080, local_bind="127.0.0.1",
                                    local_port=3000)
         - kind="socks"  : SOCKS5 proxy on localhost:local_port via host.
             Required: local_port (default 1080).
-            Example: portal_tunnel(action="open", kind="socks", host="bastion",
+            Example: remote_tunnel(action="open", kind="socks", host="bastion",
                                    local_port=1080)
       Returns {tunnel_id, type, host, local, remote}.
     - action="close": close a live tunnel. Required: tunnel_id (from open).
-        Example: portal_tunnel(action="close", tunnel_id="ab12cd34")
+        Example: remote_tunnel(action="close", tunnel_id="ab12cd34")
     - action="list": list all active tunnels (JSON array).
 
     Tunnels are a resource you manage explicitly (open → close), so `list`
-    lives here rather than in portal_audit.
+    lives here rather than in inspect.
     """
     tm = get_tunnel_manager()
 
@@ -730,17 +730,17 @@ async def portal_tunnel(action: Literal["open", "close", "list"],
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 5. POLICY DRY-RUN  (portal_check)
+# 5. POLICY DRY-RUN  (policy_check)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_check(host: str, command: str = "") -> str:
+async def policy_check(host: str, command: str = "") -> str:
     """Dry-run a host (and optional command) through the security policy.
 
     - command="" : check whether the host is accessible at all.
-        Example: portal_check(host="web01")
+        Example: policy_check(host="web01")
     - command="rm -rf /" : check whether this command would be allowed on this host.
-        Example: portal_check(host="web01", command="systemctl stop nginx")
+        Example: policy_check(host="web01", command="systemctl stop nginx")
 
     Returns "ALLOWED" or "BLOCKED: <reason>". Does not execute anything.
     Use this before risky multi-host operations to surface policy errors early.
@@ -749,11 +749,11 @@ async def portal_check(host: str, command: str = "") -> str:
 
     ⚠️  Default policy is PERMISSIVE — out of the box `policies.yaml` has an
     empty host_allowlist (any host), empty command_blocklist / allowlist
-    (any command), and only a per-host rate limit. So `portal_check` will
+    (any command), and only a per-host rate limit. So `policy_check` will
     return ALLOWED for almost anything until you populate
     `$XDG_CONFIG_HOME/portal-mcp-server/policies.yaml` (default
     `~/.config/portal-mcp-server/policies.yaml`)
-    with explicit rules. Use `portal_audit(view="policy")` to inspect what
+    with explicit rules. Use `inspect(view="policy")` to inspect what
     the server actually has loaded. ALLOWED therefore means "no rule
     currently blocks this", not "this is safe to run".
     """
@@ -768,11 +768,11 @@ async def portal_check(host: str, command: str = "") -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# 7. AUDIT & STATE  (portal_audit)
+# 7. AUDIT & STATE  (inspect)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-def portal_audit(view: Literal["snapshot", "server", "sessions",
+def inspect(view: Literal["snapshot", "server", "sessions",
                                "history", "stats", "policy"] = "snapshot",
                   limit: int = 50, host_filter: str = "") -> str:
     """Inspect MCP server internal state and the audit log — the read-only
@@ -781,8 +781,8 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
 
     Note the "resource vs plumbing" split: things the agent manages explicitly
     (registered hosts, open tunnels) are listed by their own resource tools —
-    portal_host(action="list") and portal_tunnel(action="list") — NOT here.
-    portal_audit only surfaces server-internal plumbing the agent never
+    hosts(action="list") and remote_tunnel(action="list") — NOT here.
+    inspect only surfaces server-internal plumbing the agent never
     explicitly creates.
 
     ## Views
@@ -795,11 +795,11 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
         use this when you only need to know "which version am I talking to?"
         without pulling the full snapshot.
     - view="sessions": the `host → session_id` map of cached persistent bash
-        sessions (what portal_shell reuses per host). This is plumbing
+        sessions (what remote_shell reuses per host). This is plumbing
         diagnostics — the sessions are implicit, which is why they live in
-        portal_audit rather than carrying their own list like tunnels/hosts.
+        inspect rather than carrying their own list like tunnels/hosts.
     - view="history": last `limit` audit log entries (default 50). Optional `host_filter`.
-        Example: portal_audit(view="history", limit=20, host_filter="web01")
+        Example: inspect(view="history", limit=20, host_filter="web01")
     - view="stats": aggregate audit stats (counts by operation, error rate, etc.).
     - view="policy": current security policy details (host allowlist, command
         blocklist, allowlist, rate limit).
@@ -833,7 +833,7 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
     if view == "snapshot":
         mgr = get_manager()
         # Resource lists (hosts, tunnels) live in their own tools
-        # (portal_host / portal_tunnel action="list"); the snapshot carries
+        # (hosts / remote_tunnel action="list"); the snapshot carries
         # only server-internal plumbing + audit/policy state.
         snap = {
             "server": server_info(),
@@ -857,20 +857,20 @@ def portal_audit(view: Literal["snapshot", "server", "sessions",
 # These wrap server.remote_* modules. Designed to be the *primary* tools an
 # AI agent uses when working on a remote host. They share one SSH connection
 # per host (via the connection pool) and provide:
-#   - portal_read / portal_patch :  hash-protected concurrent-safe edits
-#   - portal_grep / portal_glob  :  remote ripgrep / find with structured output
-#   - portal_shell               :  single persistent bash session (cwd + env survive)
-#   - portal_exec                :  stateless one-shot exec (1 host; +sudo/secrets)
+#   - remote_read / remote_patch :  hash-protected concurrent-safe edits
+#   - remote_grep / remote_glob  :  remote ripgrep / find with structured output
+#   - remote_shell               :  single persistent bash session (cwd + env survive)
+#   - remote_exec                :  stateless one-shot exec (1 host; +sudo/secrets)
 
 @mcp.tool()
-async def portal_read(host: str, path: str, start: int = 1,
+async def remote_read(host: str, path: str, start: int = 1,
                       end: int | None = None, limit: int | None = None,
                       encoding: str = "utf-8", use_sudo: bool = False) -> str:
     """Read a file (or a 1-based line range) from a remote host with SHA-256 hashes.
 
     Returns JSON with: content, file_hash, range_hash, start, end, total_lines,
-    truncated. The file_hash MUST be supplied to portal_patch; if the file
-    changed in between, portal_patch will refuse to overwrite.
+    truncated. The file_hash MUST be supplied to remote_patch; if the file
+    changed in between, remote_patch will refuse to overwrite.
 
     The read is **paged** so a large file never has to come back as one
     oversized blob: a single call returns at most ``limit`` lines (default
@@ -881,12 +881,12 @@ async def portal_read(host: str, path: str, start: int = 1,
     Pages are cut on line boundaries, so ``range_hash`` stays valid for patching.
 
     Usage:
-        * Whole file (auto-paged): call ``portal_read(host, path)``; if the result
+        * Whole file (auto-paged): call ``remote_read(host, path)``; if the result
           has ``truncated: true``, call again with ``start=<next_start>`` and repeat
           until ``truncated`` is false, concatenating each page's ``content`` in order.
-        * A specific range: ``portal_read(host, path, start=40, end=80)`` (still
+        * A specific range: ``remote_read(host, path, start=40, end=80)`` (still
           paged if that range is huge).
-        * Just the first N lines: ``portal_read(host, path, limit=N)`` — handy to
+        * Just the first N lines: ``remote_read(host, path, limit=N)`` — handy to
           peek the head of a big file without pulling it all.
 
     Args:
@@ -902,7 +902,7 @@ async def portal_read(host: str, path: str, start: int = 1,
             (root-owned / mode 600). The sudo password is resolved out-of-band
             per host (never a parameter) and the result is flagged high_risk.
             Exact bytes are preserved (no newline stripping) so file_hash stays
-            valid for portal_patch.
+            valid for remote_patch.
     """
     err = await _gate(host)
     if err:
@@ -920,15 +920,15 @@ async def portal_read(host: str, path: str, start: int = 1,
 
 
 @mcp.tool()
-async def portal_patch(host: str, path: str, file_hash: str,
+async def remote_patch(host: str, path: str, file_hash: str,
                        patches_json: str, encoding: str = "utf-8",
                        auto_newline: bool = False,
                        use_sudo: bool = False) -> str:
     """Apply patches to a remote file with hash-based conflict detection.
 
     Workflow:
-      1. Call portal_read to obtain content + file_hash + range_hash for each region.
-      2. Call portal_patch with the SAME file_hash and per-patch range_hash.
+      1. Call remote_read to obtain content + file_hash + range_hash for each region.
+      2. Call remote_patch with the SAME file_hash and per-patch range_hash.
       3. If the file was modified by anyone else in between, this call returns
          {"result": "error", "reason": "Content hash mismatch ...", "current_file_hash": ...}
          — re-read and try again. The remote file is untouched.
@@ -974,7 +974,7 @@ async def portal_patch(host: str, path: str, file_hash: str,
 
 
 @mcp.tool()
-async def portal_grep(host: str, pattern: str, path: str = ".",
+async def remote_grep(host: str, pattern: str, path: str = ".",
                       glob: str = "", file_type: str = "",
                       output_mode: Literal["files_with_matches", "content",
                                            "count"] = "files_with_matches",
@@ -983,9 +983,9 @@ async def portal_grep(host: str, pattern: str, path: str = ".",
                       context: int = 0, head_limit: int = 250,
                       offset: int = 0, multiline: bool = False) -> str:
     """Search file contents with a regex on a remote host (ripgrep, fallback
-    grep). **Prefer this over running raw `rg`/`grep` through portal_exec** —
+    grep). **Prefer this over running raw `rg`/`grep` through remote_exec** —
     it returns structured JSON and caps output so a broad search can't blow up
-    your context. Pair it with portal_glob to *find files by name*.
+    your context. Pair it with remote_glob to *find files by name*.
 
     Args:
         host: SSH host alias / registered name.
@@ -1033,11 +1033,11 @@ async def portal_grep(host: str, pattern: str, path: str = ".",
 
 
 @mcp.tool()
-async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
+async def remote_glob(host: str, pattern: str, path: str = ".") -> str:
     """Find files by a glob pattern on a remote host, **newest first**.
-    **Prefer this over running raw `find`/`ls` through portal_exec** — it
+    **Prefer this over running raw `find`/`ls` through remote_exec** — it
     returns structured JSON, sorts by modification time, and hard-caps at 100
-    files. Use portal_grep when you need to match file *contents* instead.
+    files. Use remote_grep when you need to match file *contents* instead.
 
     Args:
         host: SSH host alias / registered name.
@@ -1046,7 +1046,7 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
             are relative to it.
 
     Returns {filenames:[…newest first], num_files, truncated, duration_ms}.
-    Unlike portal_grep this does NOT respect `.gitignore` (matches CC Glob).
+    Unlike remote_grep this does NOT respect `.gitignore` (matches CC Glob).
     """
     err = await _gate(host)
     if err:
@@ -1056,7 +1056,7 @@ async def portal_glob(host: str, pattern: str, path: str = ".") -> str:
 
 
 @mcp.tool()
-async def portal_shell(host: str, command: str = "",
+async def remote_shell(host: str, command: str = "",
                        commands: "list[str] | None" = None,
                        stop_on_error: bool = True, *,
                        timeout: float,
@@ -1064,8 +1064,8 @@ async def portal_shell(host: str, command: str = "",
     """Run a command (or a sequence) on ONE remote host in a **persistent shell
     session**: cwd and environment (cd / export / venv activation) survive
     across calls. Use it only when you need that continuity — otherwise
-    portal_exec is faster (no session setup) and can target many hosts; for a
-    long task to background and poll, use portal_job.
+    remote_exec is faster (no session setup) and can target many hosts; for a
+    long task to background and poll, use remote_job.
 
     Pick one:
       - command="pytest"  → {host, session_id, command, exit_code, output,
@@ -1082,8 +1082,8 @@ async def portal_shell(host: str, command: str = "",
 
     Behavior:
       - bash or zsh; an unknown login shell falls back to bash (if bash is
-        missing the call is refused — use portal_exec).
-      - Output is the COMBINED stdout+stderr stream (use portal_exec when you
+        missing the call is refused — use remote_exec).
+      - Output is the COMBINED stdout+stderr stream (use remote_exec when you
         need them split). Oversize output is capped and flagged truncated=true.
       - A command that wedges on an interactive prompt (sudo password, ssh
         first-connect, passphrase, …) is auto-aborted, returning exit_code -1 +
@@ -1091,8 +1091,8 @@ async def portal_shell(host: str, command: str = "",
         survive, so the next command runs straight away.
 
     ★ No sudo or secret injection here (both are one-shot by nature): to run as
-    root use portal_exec(use_sudo=True); for a command needing a secret use
-    portal_exec(secrets=[…]).
+    root use remote_exec(use_sudo=True); for a command needing a secret use
+    remote_exec(secrets=[…]).
 
     timeout (per command, seconds; REQUIRED — no default): the call is held open
     until the command exits or timeout elapses. Keepalive pings stop the client
@@ -1100,7 +1100,7 @@ async def portal_shell(host: str, command: str = "",
     an exploratory / re-runnable command (e.g. 10–30) to fail fast, raising it
     only for a genuinely slow but bounded command. Hard ceiling
     (PORTAL_MAX_TIMEOUT, default 300s): a request above it is refused — use
-    portal_job for a long task.
+    remote_job for a long task.
 
     ⚠️ By convention, write operations should target /tmp/ on the remote unless
     the user approved another path (not enforced here).
@@ -1108,7 +1108,7 @@ async def portal_shell(host: str, command: str = "",
     _enforce_timeout_cap(timeout, job_hint=True)
     host = normalize_host_name(host)
 
-    # command vs commands: exactly one, mirroring portal_exec.
+    # command vs commands: exactly one, mirroring remote_exec.
     if commands is not None:
         if command:
             raise ToolError("pass either command or commands, not both.")
@@ -1140,7 +1140,7 @@ async def portal_shell(host: str, command: str = "",
 
 
 @mcp.tool()
-async def portal_exec(host: "str | list[str]" = "", command: str = "",
+async def remote_exec(host: "str | list[str]" = "", command: str = "",
                       commands: "list[str] | None" = None,
                       group_tag: str = "", *,
                       timeout: float,
@@ -1154,14 +1154,14 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     result immediately (exit code + SEPARATE stdout/stderr). This is the default
     way to execute ANYTHING on a remote machine — reach for it instead of
     hand-rolling `ssh user@host …`; it reuses a warm connection pool and fans
-    out across hosts. Stateless: need cwd/exports to persist → portal_shell;
-    a long task to background and poll → portal_job.
+    out across hosts. Stateless: need cwd/exports to persist → remote_shell;
+    a long task to background and poll → remote_job.
 
     ★ sudo: to run a command as root, call this with use_sudo=True — NEVER put a
-    bare `sudo …` in the command or in portal_shell (there is no TTY and the
+    bare `sudo …` in the command or in remote_shell (there is no TTY and the
     password can't be fed). The password is supplied out-of-band; you never pass
     it. (For root on the server's OWN machine, sudo is not available — see
-    portal_local_exec.)
+    local_exec.)
 
     ★ credentials: when a command needs a secret (API token, deploy key, …), do
     NOT have the user paste it into the chat. They run
@@ -1191,7 +1191,7 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
     pass a SMALL one for an exploratory / re-runnable command (e.g. 10–30) to
     fail fast, raising it only for a genuinely slow but bounded command. Hard
     ceiling (PORTAL_MAX_TIMEOUT, default 300s): a request above it is REFUSED —
-    background a long task with portal_job instead of pinning it on a blocking
+    background a long task with remote_job instead of pinning it on a blocking
     call.
 
     login (default on): run the command in a LOGIN shell (bash -lc) so the
@@ -1363,12 +1363,12 @@ async def portal_exec(host: "str | list[str]" = "", command: str = "",
 
 
 @mcp.tool()
-async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
+async def local_exec(command: str, secrets: "list[str] | None" = None,
                             use_sudo: bool = False, *,
                             timeout: float,
                             ctx: "Context | None" = None) -> str:
     """Run a command on the **MCP SERVER's OWN machine** (local), NOT over SSH —
-    for anything on a remote host use portal_exec instead. This departs from the
+    for anything on a remote host use remote_exec instead. This departs from the
     project's core goal (driving *remote* hosts as if local); it's a useful but
     off-target derivative, so it is OFF by default: the operator must explicitly
     set PORTAL_ALLOW_LOCAL_EXEC=1 in the server process's env to enable it.
@@ -1386,7 +1386,7 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
     `<local>:` section's `sudo_password_command` in hosts.yaml. Fed to `sudo -S -k`
     on stdin (never on argv/audit). May be combined with secrets (their values
     ride the same stdin channel, read+exported inside the sudo'd shell). This is
-    the LOCAL counterpart of portal_exec(use_sudo=True); the reserved identity
+    the LOCAL counterpart of remote_exec(use_sudo=True); the reserved identity
     `<local>` is distinct from any SSH host named `local` / `localhost`.
 
     timeout (seconds, REQUIRED — no default): held open until the command exits
@@ -1403,7 +1403,7 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
         "1", "true", "yes", "on",
     ):
         raise ToolError(
-            "portal_local_exec is disabled. Running commands on the MCP "
+            "local_exec is disabled. Running commands on the MCP "
             "server's OWN machine is off by default. To enable it, set the "
             "environment variable PORTAL_ALLOW_LOCAL_EXEC=1 in the MCP server "
             "PROCESS's environment — this is a process-env switch, NOT a "
@@ -1474,12 +1474,12 @@ async def portal_local_exec(command: str, secrets: "list[str] | None" = None,
 
 
 @mcp.tool()
-async def portal_close_shell(host: str) -> str:
+async def remote_close(host: str) -> str:
     """Close the cached persistent bash session for <host> (the next
-    portal_shell call reopens a fresh one).
+    remote_shell call reopens a fresh one).
 
     Rarely needed: the session is created/reused/auto-recreated implicitly by
-    portal_shell — you don't manage its lifecycle. Use this only to reset a
+    remote_shell — you don't manage its lifecycle. Use this only to reset a
     session whose state has gotten dirty."""
     err = await _gate(host)
     if err:
@@ -1488,11 +1488,11 @@ async def portal_close_shell(host: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# BACKGROUND JOBS  (portal_job — action=submit|poll|cancel|list)
+# BACKGROUND JOBS  (remote_job — action=submit|poll|cancel|list)
 # ═══════════════════════════════════════════════════════════════════
 
 @mcp.tool()
-async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
+async def remote_job(action: Literal["submit", "poll", "cancel", "list"],
                      host: str = "", command: str = "", job_id: str = "",
                      since: int = 0, tail: int = 0, max_bytes: int = 65536,
                      signal: Literal["TERM", "KILL"] = "TERM",
@@ -1502,7 +1502,7 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
     """Run a command in the **background** and get a job_id back immediately, so
     you can keep thinking while it runs, poll for incremental output, and cancel
     it. Use this for long tasks; for a command that finishes quickly just use
-    portal_exec (it waits and returns the result).
+    remote_exec (it waits and returns the result).
 
     ## Actions
     - action="submit": start `command` on `host` in the background — in a LOGIN
@@ -1514,7 +1514,7 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
         background and passing use_sudo=True or secrets=[...] here is rejected
         with guidance (sudo -S needs a stdin the nohup process detaches;
         secrets would land on argv / `ps` for the whole job) — run those with
-        portal_exec (one-shot) or portal_shell instead.
+        remote_exec (one-shot) or remote_shell instead.
     - action="poll": fetch this job's status + new output **on demand, not all
         at once**. Required: job_id. Pass since=<new_offset from the previous
         poll> to get only the bytes produced since then; each poll returns at
@@ -1536,9 +1536,9 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
     recoverable via `ps`. Finished jobs are swept after a TTL (default 1h) and
     their tmp files removed. There is a cap on concurrent live jobs (default 50).
 
-    Manual fallback (no portal_job): you can always background a command
-    yourself with portal_exec(command="nohup mycmd >/tmp/x.log 2>&1 & echo $!")
-    and poll the log with portal_exec(command="tail /tmp/x.log").
+    Manual fallback (no remote_job): you can always background a command
+    yourself with remote_exec(command="nohup mycmd >/tmp/x.log 2>&1 & echo $!")
+    and poll the log with remote_exec(command="tail /tmp/x.log").
     """
     jm = get_job_manager()
 
@@ -1550,15 +1550,15 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
             raise ToolError('action="submit" requires `host` and `command`.')
         if use_sudo or secrets:
             raise ToolError(
-                "portal_job is background-only and can't inject sudo passwords "
+                "remote_job is background-only and can't inject sudo passwords "
                 "or secrets: the nohup process detaches stdin (nothing to feed "
                 "`sudo -S`), and an exported secret would sit on the process "
                 "argv (visible in `ps`) for the whole job lifetime. Use "
-                "portal_exec(use_sudo=True / secrets=[...]) — it's synchronous, "
-                "one-shot, and feeds them over stdin — or portal_shell for an "
+                "remote_exec(use_sudo=True / secrets=[...]) — it's synchronous, "
+                "one-shot, and feeds them over stdin — or remote_shell for an "
                 "interactive session. If the job is genuinely long AND needs "
                 "elevation, configure NOPASSWD on the remote, or pre-stage the "
-                "secret into a 0600 file with a one-shot portal_exec and read "
+                "secret into a 0600 file with a one-shot remote_exec and read "
                 "it inside the job."
             )
         err = await _gate(host, command)
@@ -1582,7 +1582,7 @@ async def portal_job(action: Literal["submit", "poll", "cancel", "list"],
         if not job_id:
             raise ToolError('action="cancel" requires `job_id`.')
         # Gate against the job's host so an agent that lost host access can't
-        # still kill its jobs (consistent with portal_tunnel close).
+        # still kill its jobs (consistent with remote_tunnel close).
         jobs = await jm.list_jobs()
         owner = next((j["host"] for j in jobs if j["job_id"] == job_id), None)
         if owner is not None:
@@ -2156,14 +2156,14 @@ def _build_kind_subparser(sub, kind: str):
     p_list.set_defaults(kind=kind, key=None, func=_kind_list_cli)
 
     if kind == "sudo":
-        # Local-machine sudo for portal_local_exec(use_sudo=True). The reserved
+        # Local-machine sudo for local_exec(use_sudo=True). The reserved
         # identity is `<local>` (illegal as a hostname, so it never collides with
         # a remote named `local`/`localhost`). A dedicated verb means the user
         # never has to type the angle-bracketed key or quote it for the shell.
         p_setlocal = ksub.add_parser(
             "set-local",
             help="Prompt (no echo) for THIS machine's sudo password (used by "
-                 "portal_local_exec(use_sudo=True)) and cache it.")
+                 "local_exec(use_sudo=True)) and cache it.")
         p_setlocal.add_argument(
             "--ttl", type=int, default=DEFAULT_TTL_SEC,
             help=f"seconds before the cached value expires (default {DEFAULT_TTL_SEC})")

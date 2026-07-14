@@ -55,8 +55,8 @@ policies:
   # This layer hands every command to cc-safety-net's *semantic* analyzer
   # before it runs, catching destructive git / rm / interpreter one-liners that
   # patterns miss — the same engine the Copilot-CLI PreToolUse hook uses, which
-  # would otherwise NEVER see commands run through portal_exec / local_exec /
-  # portal_shell (those are MCP tools, not the agent's `bash` tool).
+  # would otherwise NEVER see commands run through remote_exec / local_exec /
+  # remote_shell (those are MCP tools, not the agent's `bash` tool).
   #
   # Requires Node.js + cc-safety-net reachable via the `command` below.
   # Disabled unless `enabled: true`.

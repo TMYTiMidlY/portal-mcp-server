@@ -2,7 +2,7 @@
 
 Why this module exists
 ----------------------
-``portal_exec`` / ``portal_local_exec`` / ``portal_shell`` run shell commands
+``remote_exec`` / ``local_exec`` / ``remote_shell`` run shell commands
 that never pass through the agent's own ``bash`` tool. The Copilot-CLI
 cc-safety-net PreToolUse hook only inspects ``toolName == "bash"`` (see its
 ``isSupported`` adapter), so every command issued through a portal_* MCP tool

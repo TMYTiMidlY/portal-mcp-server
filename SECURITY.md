@@ -49,9 +49,9 @@ The defences below are layered:
 | Prompt-layer rules    | Agent system prompt / `AGENTS.md` | The agent is expected to default writes to remote `/tmp/`, ask before touching `$HOME` or project source, and never mix `portal_*` calls with raw `ssh`/`scp` in the same task. See the README's *Agent-side conventions* section. |
 | Server-side policy    | `policies.yaml` (default `~/.config/portal-mcp-server/policies.yaml`; override via `PORTAL_POLICIES_YAML`) | Host allowlist, command blocklist / allowlist, per-host rate limit |
 | Per-tool gate         | `cli.py:_gate*`                | Every state-changing tool runs the policy on every call                      |
-| Semantic command gate (opt-in) | `safety_net.py` → [`cc-safety-net`](https://github.com/kenryu42/cc-safety-net) | When `policies.safety_net.enabled`, every gated command is *also* run through cc-safety-net's bypass-resistant analyzer (unwraps `bash -c` / interpreter one-liners, real `rm` path analysis, destructive-git rules, custom rulebooks) before it executes. **Fail-closed** by default. Covers `portal_exec` / `portal_local_exec` / `portal_shell` / `portal_job`, whose commands never reach the agent's own `bash` PreToolUse hook. |
-| Hash-protected edits  | `portal_read` + `portal_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
-| Atomic write          | `portal_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
+| Semantic command gate (opt-in) | `safety_net.py` → [`cc-safety-net`](https://github.com/kenryu42/cc-safety-net) | When `policies.safety_net.enabled`, every gated command is *also* run through cc-safety-net's bypass-resistant analyzer (unwraps `bash -c` / interpreter one-liners, real `rm` path analysis, destructive-git rules, custom rulebooks) before it executes. **Fail-closed** by default. Covers `remote_exec` / `local_exec` / `remote_shell` / `remote_job`, whose commands never reach the agent's own `bash` PreToolUse hook. |
+| Hash-protected edits  | `remote_read` + `remote_patch` | SHA-256 conflict detection refuses concurrent overwrites                     |
+| Atomic write          | `remote_patch`                 | Tmp file + `posix_rename` + post-write rehash                                |
 | Audit log             | `audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`; override the directory via `PORTAL_LOG_DIR`) | Every state-changing op recorded; fail-closed by default                     |
 | Key-first auth        | `connection_manager.py`        | Keys are the recommended path; password auth is opt-in via `password_command` or out-of-band `portal ssh set`; encrypted-key passphrases use `passphrase_command` or out-of-band `portal passphrase set`; plaintext `password:` fields in yaml are rejected and logged at ERROR; sudo auth follows the same boundary (`sudo_password_command` / out-of-band `portal sudo set`); no MCP tool accepts a password/passphrase parameter |
 | Strict host-key check | `connection_manager.py`        | Defaults to OpenSSH-equivalent `StrictHostKeyChecking`                       |
@@ -95,17 +95,17 @@ For machine-level enforcement, add explicit patterns to
 
 Every state-changing entry point runs the gate; there are no side doors:
 
-- `portal_host(action="register")` gates against the **target host**
+- `hosts(action="register")` gates against the **target host**
   (the actual IP / DNS the connection will reach), so an agent cannot
   launder a non-allowlisted target through an alias whose name happens
   to match `safe-*`. `action="remove"` gates against the alias.
-- `portal_tunnel(action="open")` and `portal_tunnel(action="close")` both
+- `remote_tunnel(action="open")` and `remote_tunnel(action="close")` both
   gate the originating host — the close path resolves it from the
   active-tunnel record before tearing the listener down.
-- `portal_shell` and `portal_close_shell` both gate the host (and the
-  bash command, for `portal_shell`) — a persistent shell is **not** a
+- `remote_shell` and `remote_close` both gate the host (and the
+  bash command, for `remote_shell`) — a persistent shell is **not** a
   blanket authorisation for arbitrary commands.
-- The multi-host path of `portal_exec` (an explicit host list or a
+- The multi-host path of `remote_exec` (an explicit host list or a
   `group_tag`) is **two-phase**: every host is validated first, only then
   are per-host rate-limit tokens consumed. A single failing host cannot
   burn quota on the others.
@@ -149,7 +149,7 @@ section documents *why* the implementation is shaped the way it is.
 
 ##### Boundary: what enters and what does not
 
-The MCP `portal_host(action="register", ...)` tool has no `password`
+The MCP `hosts(action="register", ...)` tool has no `password`
 parameter — and no `password_command` parameter either. Both would
 defeat the same defence:
 
@@ -307,7 +307,7 @@ different injection points remain separate in the resolver code.
 
 #### Sudo auth — same boundary, credential agent side-channel
 
-`portal_exec(..., use_sudo=True)` runs a command under `sudo` on the
+`remote_exec(..., use_sudo=True)` runs a command under `sudo` on the
 remote. The boundary is identical to SSH password auth: **`use_sudo` is a
 boolean, not a password** — no sudo password (or path to one) is ever an
 MCP tool parameter, so nothing lands in the agent context or tool-call
@@ -327,7 +327,7 @@ trace. The password is resolved server-side from one of two sources:
   same TTL. This is intentionally config-only and defaults to false. It
   does **not** read or reuse `portal passphrase set`; private-key
   passphrases remain a separate local-key-unlock credential.
-- **Local sudo (`portal_local_exec(use_sudo=True)`)** — the LOCAL
+- **Local sudo (`local_exec(use_sudo=True)`)** — the LOCAL
   counterpart on the MCP server's OWN machine, using the reserved
   `<local>` identity (illegal as a hostname, so it never collides with an
   SSH host named `local` / `localhost`). Password source: `portal sudo
@@ -379,9 +379,9 @@ All state-changing tools write `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/
 - `exec` / `file write` / `patch` / `register` / `tunnel`
   / multi-host orchestration
 
-Read-only tools — `portal_read`, `portal_grep`, `portal_glob`,
-`portal_audit`, `portal_check`, and the read actions of `portal_tunnel`
-(`action="list"`) / `portal_job` (`poll`/`list`) — explicitly do
+Read-only tools — `remote_read`, `remote_grep`, `remote_glob`,
+`inspect`, `policy_check`, and the read actions of `remote_tunnel`
+(`action="list"`) / `remote_job` (`poll`/`list`) — explicitly do
 **not** audit, to keep the log signal-rich.
 
 The audit subsystem is **fail-closed by default**: if writing to disk
@@ -401,8 +401,8 @@ only — appropriate for dev / test, not production).
 
 ### Hash-protected file editing
 
-`portal_read` returns whole-file SHA-256 plus per-range SHA-256.
-`portal_patch` requires the same `file_hash` (and per-patch
+`remote_read` returns whole-file SHA-256 plus per-range SHA-256.
+`remote_patch` requires the same `file_hash` (and per-patch
 `range_hash`); if the file changed in the meantime, the patch is
 rejected and the file is left untouched. Hashes are compared with
 `hmac.compare_digest` (constant time) to remove timing-side-channel

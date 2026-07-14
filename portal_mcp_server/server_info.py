@@ -1,4 +1,4 @@
-"""Server-level metadata exposed via portal_audit (view="server" + snapshot).
+"""Server-level metadata exposed via inspect (view="server" + snapshot).
 
 Static fields (version, pid, python_version, started_at) are evaluated at
 module import / process start. ``transport`` is set later by ``cli.main()``
@@ -6,7 +6,7 @@ once argparse has decided. ``uptime_s`` is recomputed on every call.
 
 Used as a diagnostic surface so the agent can answer "which version of
 portal-mcp-server am I actually talking to?" without needing
-``portal_local_exec`` or shell access. Lives in its own module so the
+``local_exec`` or shell access. Lives in its own module so the
 metadata sources stay in one place rather than scattered across cli.py.
 """
 from __future__ import annotations

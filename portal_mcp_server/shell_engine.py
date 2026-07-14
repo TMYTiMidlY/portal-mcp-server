@@ -37,7 +37,7 @@ logger = logging.getLogger("portal_mcp.shell")
 # Per-host cache: does the remote have bash? Populated lazily on the first
 # login-shell exec for a host and reused for the process lifetime. A host
 # without bash cannot run ``bash -lc``, so the login wrap silently degrades to a
-# plain (non-login) exec — portal_exec's contract still holds on a sh-only host.
+# plain (non-login) exec — remote_exec's contract still holds on a sh-only host.
 _HOST_HAS_BASH: dict[str, bool] = {}
 
 

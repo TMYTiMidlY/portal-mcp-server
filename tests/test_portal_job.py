@@ -1,4 +1,4 @@
-"""portal_job — background (fire-and-poll) execution lifecycle (L1).
+"""remote_job — background (fire-and-poll) execution lifecycle (L1).
 
 These mock the SSH connection so the JobManager's submit/poll/cancel/list and
 the TTL sweep can be exercised without a live host. The fake conn routes by
@@ -76,16 +76,16 @@ async def test_submit_no_pid_raises(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_submit_use_sudo_is_rejected_with_redirect():
-    # background can't feed sudo's stdin -> guide the agent to portal_exec/shell
-    with pytest.raises(ToolError, match="portal_exec"):
-        await cli.portal_job(action="submit", host="h", command="x",
+    # background can't feed sudo's stdin -> guide the agent to remote_exec/shell
+    with pytest.raises(ToolError, match="remote_exec"):
+        await cli.remote_job(action="submit", host="h", command="x",
                              use_sudo=True)
 
 
 @pytest.mark.asyncio
 async def test_submit_secrets_is_rejected_with_redirect():
-    with pytest.raises(ToolError, match="portal_exec"):
-        await cli.portal_job(action="submit", host="h", command="x",
+    with pytest.raises(ToolError, match="remote_exec"):
+        await cli.remote_job(action="submit", host="h", command="x",
                              secrets=["GITHUB_TOKEN"])
 
 
@@ -246,7 +246,7 @@ async def test_ttl_sweep_removes_finished_and_cleans_remote(monkeypatch):
     assert any("rm -f" in c for c in rec), "remote tmp files should be cleaned"
 
 
-# ── cli portal_job dispatch + gating ────────────────────────────────────────
+# ── cli remote_job dispatch + gating ────────────────────────────────────────
 
 @pytest.fixture
 def permissive(monkeypatch, tmp_path):
@@ -258,7 +258,7 @@ def permissive(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_cli_submit_requires_host_and_command(permissive):
     with pytest.raises(ToolError, match="requires"):
-        await cli.portal_job(action="submit", command="x")
+        await cli.remote_job(action="submit", command="x")
 
 
 @pytest.mark.asyncio
@@ -270,7 +270,7 @@ async def test_cli_submit_blocked_command(monkeypatch, tmp_path):
     # fresh job manager so the singleton isn't polluted
     monkeypatch.setattr(cli, "get_job_manager", lambda: job_manager.JobManager())
     with pytest.raises(ToolError, match="BLOCKED"):
-        await cli.portal_job(action="submit", host="h", command="rm -rf /")
+        await cli.remote_job(action="submit", host="h", command="rm -rf /")
 
 
 @pytest.mark.asyncio
@@ -278,9 +278,9 @@ async def test_cli_submit_and_list_roundtrip(monkeypatch, permissive):
     _install_conn(monkeypatch, lambda c: "77\n" if "echo $!" in c else "")
     jm = job_manager.JobManager()
     monkeypatch.setattr(cli, "get_job_manager", lambda: jm)
-    out = json.loads(await cli.portal_job(action="submit", host="h", command="sleep 1"))
+    out = json.loads(await cli.remote_job(action="submit", host="h", command="sleep 1"))
     assert out["remote_pid"] == 77
-    listed = json.loads(await cli.portal_job(action="list"))
+    listed = json.loads(await cli.remote_job(action="list"))
     assert any(j["job_id"] == out["job_id"] for j in listed)
 
 

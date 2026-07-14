@@ -32,7 +32,7 @@ command that wedges on an interactive prompt becomes *recoverable*: we Ctrl-C it
 verify the shell came back (next D arrived) and keep the session — cwd / env /
 shell functions intact.
 
-The one-shot exec path (``portal_exec``) is unaffected: it opens a fresh channel
+The one-shot exec path (``remote_exec``) is unaffected: it opens a fresh channel
 per command and gets a native exit code from asyncssh, so it never needed any of
 this.
 """
@@ -203,7 +203,7 @@ class InteractivePromptBlocked(RuntimeError):
     password, but it also covers ``ssh`` host-key/password prompts, ``mysql
     -p``, ``read``-with-prompt, gpg passphrase unlock, etc.
 
-    portal_shell's persistent PTY has no channel to feed such input, so the
+    remote_shell's persistent PTY has no channel to feed such input, so the
     command would otherwise hang until ``timeout``. Unlike the old
     ``SudoPromptBlocked`` we do **not** destroy the session: the wedged command
     is Ctrl-C'd, we verify the shell returned to a clean prompt (the next OSC
@@ -239,13 +239,13 @@ class BashRequired(RuntimeError):
 
     The integration hooks need bash or zsh; any other default shell falls back
     to bash, but if bash itself is absent we cannot run a persistent session at
-    all and the caller should redirect the agent to ``portal_exec`` (one-shot,
+    all and the caller should redirect the agent to ``remote_exec`` (one-shot,
     which runs fine on plain ``sh``).
     """
 
     def __init__(self, host_name: str):
         super().__init__(
-            f"host {host_name!r} has no bash available for portal_shell"
+            f"host {host_name!r} has no bash available for remote_shell"
         )
         self.host_name = host_name
 
@@ -258,7 +258,7 @@ class ShellSession:
     # The pooled SSH connection that backs ``process``. Stored here so
     # ``close_session`` can release the pool slot back to ConnectionManager;
     # without this reference we leak ``in_use`` counters and the pool grows
-    # unboundedly under sustained portal_shell usage.
+    # unboundedly under sustained remote_shell usage.
     conn: asyncssh.SSHClientConnection
     # Which shell (and thus which integration script) this session runs.
     shell: str = "bash"
@@ -665,7 +665,7 @@ class SessionManager:
             # Release the pool slot regardless of how the bash process
             # terminated. Without this ``in_use`` keeps creeping up and
             # ``ConnectionManager`` opens a brand-new TCP connection for
-            # every subsequent ``portal_shell`` call once the per-conn cap
+            # every subsequent ``remote_shell`` call once the per-conn cap
             # is reached.
             get_manager().release_connection(session.host_name, session.conn)
         async with self._lock:

@@ -105,7 +105,7 @@ def wired(home, tmp_path, monkeypatch):
 
 async def test_register_name_only_uses_ssh_config(home, wired):
     _ssh_config(home, "Host web01\n  HostName 10.0.0.1\n")
-    out = await cli.portal_host(action="register", name="web01")
+    out = await cli.hosts(action="register", name="web01")
     assert "~/.ssh/config" in out
     assert wired._registry["web01"].use_ssh_config is True
 
@@ -113,11 +113,11 @@ async def test_register_name_only_uses_ssh_config(home, wired):
 async def test_register_name_only_without_alias_errors(home, wired):
     _ssh_config(home, "Host other\n  HostName 9.9.9.9\n")
     with pytest.raises(ToolError, match=r"no Host alias 'web01' found in"):
-        await cli.portal_host(action="register", name="web01")
+        await cli.hosts(action="register", name="web01")
 
 
 async def test_register_with_explicit_host_still_works(home, wired):
-    out = await cli.portal_host(action="register", name="db", host="10.0.0.5",
+    out = await cli.hosts(action="register", name="db", host="10.0.0.5",
                                  user="postgres")
     assert "10.0.0.5" in out
     assert wired._registry["db"].use_ssh_config is False

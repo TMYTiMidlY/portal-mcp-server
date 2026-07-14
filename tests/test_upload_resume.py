@@ -1,4 +1,4 @@
-"""T2 — portal_transfer UPLOAD resume: append the missing tail of an interrupted
+"""T2 — remote_transfer UPLOAD resume: append the missing tail of an interrupted
 transfer instead of restarting, verify sha256 on resume, restart once on
 mismatch, and honour resume=False.
 """

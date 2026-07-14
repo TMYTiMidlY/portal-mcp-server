@@ -1,4 +1,4 @@
-"""#5 — portal_exec / portal_job run in a LOGIN shell (bash -lc) by default,
+"""#5 — remote_exec / remote_job run in a LOGIN shell (bash -lc) by default,
 with graceful degrade on hosts without bash and a login=False escape.
 """
 import types

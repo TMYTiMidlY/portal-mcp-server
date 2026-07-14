@@ -1,5 +1,5 @@
-"""Local sudo for portal_local_exec — the LOCAL counterpart of the remote
-``portal_exec(use_sudo=True)`` path.
+"""Local sudo for local_exec — the LOCAL counterpart of the remote
+``remote_exec(use_sudo=True)`` path.
 
 The reserved identity is ``<local>`` (sudo_creds.LOCAL_SUDO_KEY): illegal as a
 hostname, so it can never collide with an SSH host named ``local`` /
@@ -22,11 +22,11 @@ from portal_mcp_server.cli import ToolError
 
 def test_portal_local_exec_exposes_use_sudo_bool_not_password():
     from portal_mcp_server import cli
-    params = inspect.signature(cli.portal_local_exec).parameters
+    params = inspect.signature(cli.local_exec).parameters
     assert "use_sudo" in params
     assert params["use_sudo"].annotation is bool
     assert not any("password" in p.lower() or "passwd" in p.lower() for p in params), (
-        "portal_local_exec must not take a password parameter"
+        "local_exec must not take a password parameter"
     )
 
 
@@ -121,7 +121,7 @@ async def test_resolve_local_none_when_no_source(monkeypatch, tmp_path):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  portal_local_exec(use_sudo=True) behaviour
+#  local_exec(use_sudo=True) behaviour
 # ────────────────────────────────────────────────────────────────────────────
 
 def test_sudo_stdin_secret_script_format():
@@ -168,7 +168,7 @@ async def test_local_sudo_injects_secrets(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cli, "_local_sudo_exec_env", fake_local_sudo)
 
-    out = await cli.portal_local_exec("echo $GITHUB_TOKEN", use_sudo=True,
+    out = await cli.local_exec("echo $GITHUB_TOKEN", use_sudo=True,
                                       secrets=["github_token"], timeout=30)
     assert captured["password"] == "PW"
     assert captured["env"] == {"GITHUB_TOKEN": "ghp_SECRET"}
@@ -189,7 +189,7 @@ async def test_use_sudo_missing_password_message(monkeypatch, tmp_path):
     m = connection_manager.ConnectionManager(hosts_yaml=yml)
     monkeypatch.setattr(connection_manager, "get_manager", lambda: m)
     with pytest.raises(ToolError) as ei:
-        await cli.portal_local_exec(command="id", use_sudo=True, timeout=30)
+        await cli.local_exec(command="id", use_sudo=True, timeout=30)
     msg = str(ei.value)
     # Names BOTH out-of-band sources, never asks for a pasted password.
     assert "set-local" in msg
@@ -221,7 +221,7 @@ async def test_local_sudo_password_never_in_output_or_audit(monkeypatch, tmp_pat
 
     monkeypatch.setattr(cli, "_local_sudo_exec_env", fake_local_sudo)
 
-    out = await cli.portal_local_exec(command="id", use_sudo=True, timeout=30)
+    out = await cli.local_exec(command="id", use_sudo=True, timeout=30)
     assert captured["password"] == PW         # mechanism got it (for sudo -S)
     assert captured["cmd"] == "id"
     assert PW not in out                       # ...never surfaced to the agent

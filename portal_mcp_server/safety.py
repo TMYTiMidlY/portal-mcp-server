@@ -134,7 +134,7 @@ def quote_shell(value: str) -> str:
 #   - CSI:  ESC [ ... <final byte A-Za-z>  (covers colours, cursor moves, and
 #           bracketed-paste ?2004l/h since `?` is allowed in the parameter run)
 #   - OSC:  ESC ] ... BEL
-# The one-shot exec path (portal_exec) runs without a PTY and needs none of
+# The one-shot exec path (remote_exec) runs without a PTY and needs none of
 # this. Both remote_bash and session_manager call through here so the coverage
 # can never drift apart again.
 _ANSI_CSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")

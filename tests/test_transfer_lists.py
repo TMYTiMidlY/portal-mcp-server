@@ -277,7 +277,7 @@ async def test_portal_transfer_upload_list_dispatch(patch_manager, tmp_path):
     patch_manager["conn"] = FakeConn(sftp)
 
     paths_json = _json.dumps([{"local": str(a), "remote": "/r/a"}])
-    out = await cli.portal_transfer(
+    out = await cli.remote_transfer(
         direction="upload-list", host="h", local_path="", remote_path="",
         ctx=None, paths_json=paths_json)
     res = _json.loads(out)
@@ -291,12 +291,12 @@ async def test_portal_transfer_bad_paths_json(patch_manager):
     from portal_mcp_server import cli
 
     with pytest.raises(ToolError, match="paths_json is not valid JSON"):
-        await cli.portal_transfer(
+        await cli.remote_transfer(
             direction="upload-list", host="h", local_path="", remote_path="",
             ctx=None, paths_json="not json")
 
     with pytest.raises(ToolError, match="non-empty JSON array"):
-        await cli.portal_transfer(
+        await cli.remote_transfer(
             direction="download-list", host="h", local_path="", remote_path="",
             ctx=None, paths_json="[]")
 
@@ -321,11 +321,11 @@ async def test_portal_transfer_list_blocked_by_policy(monkeypatch, tmp_path):
 
     paths_json = '[{"local": "/tmp/a", "remote": "/r/a"}]'
     with pytest.raises(ToolError, match="BLOCKED:"):
-        await cli.portal_transfer(
+        await cli.remote_transfer(
             direction="upload-list", host="evil-host", local_path="",
             remote_path="", ctx=None, paths_json=paths_json)
 
     with pytest.raises(ToolError, match="BLOCKED:"):
-        await cli.portal_transfer(
+        await cli.remote_transfer(
             direction="download-list", host="evil-host", local_path="",
             remote_path="", ctx=None, paths_json=paths_json)

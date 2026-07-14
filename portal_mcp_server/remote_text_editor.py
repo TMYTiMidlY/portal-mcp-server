@@ -39,6 +39,7 @@ Key design decisions a source reader needs to know
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -114,7 +115,7 @@ def _split_keepends_lf(text: str) -> List[str]:
     ``\\v``, lone ``\\r``, ``\\x1c``-``\\x1e``, ``\\x85``, ``\\u2028``, ``\\u2029``
     — this counts lines exactly like ``rg`` / ``grep`` / ``wc -l``, so
     ``total_lines`` and the 1-based offsets here line up with the line numbers
-    ``portal_grep`` reports (the toolkit's "grep to find the line, patch that
+    ``remote_grep`` reports (the toolkit's "grep to find the line, patch that
     line" workflow). ``\\r\\n`` stays attached to its line; a trailing ``\\n``
     does not yield an empty final element.
     """
@@ -146,7 +147,7 @@ class Patch:
 
 
 class RemoteEditError(Exception):
-    """Raised by portal_patch on hash mismatch or unrecoverable I/O failure."""
+    """Raised by remote_patch on hash mismatch or unrecoverable I/O failure."""
 
     def __init__(self, message: str, current_hash: Optional[str] = None,
                  current_content: Optional[str] = None):
@@ -193,7 +194,7 @@ async def _atomic_write(host: str, path: str, new_content: str,
        :class:`asyncio.CancelledError`), we make a best-effort cleanup and
        re-raise.
     3. If the connection itself dies mid-cleanup, the orphan tmp is picked up
-       by the opportunistic sweep the next time *any* portal_patch succeeds in
+       by the opportunistic sweep the next time *any* remote_patch succeeds in
        that directory.
     """
     validate_remote_path(path)
@@ -292,13 +293,15 @@ async def _sweep_orphan_tmps_in(sftp, directory: str, max_age_s: int,
 
 
 # ── Privileged (sudo) read/write for root-owned files ───────────────────────
-# portal_patch / portal_read normally use plain SFTP, which runs as the SSH
+# remote_patch / remote_read normally use plain SFTP, which runs as the SSH
 # login user and so CANNOT touch a file the user has no permission on (a
 # root-owned file, or one in a root-only directory). The sudo path keeps the
 # tool's exact contract — same before/after hashing, same atomicity, same
 # owner/mode — by splitting the work: file CONTENT moves over ordinary SFTP (so
 # sudo's stdin stays free for the password), and sudo is used only to read
-# (`cat`) and to place the staged file (atomic rename beside the target).
+# (`cat`) and to place the staged file (atomic rename beside the target). The
+# sudo plumbing itself is the shared ``remote_bash._run_sudo_raw`` primitive
+# (byte-exact: it does NOT strip output, unlike the exec helpers).
 _OWNER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.-]*\Z")
 _MODE_RE = re.compile(r"[0-7]{3,4}\Z")
 
@@ -311,28 +314,32 @@ def _sudo_missing_editor_msg(host: str) -> str:
         "host's sudo_password_command in hosts.yaml, then retry.")
 
 
-async def _sudo_cat(host: str, path: str, encoding: str) -> str:
-    """Read a file's EXACT content via ``sudo cat`` (for root-owned / unreadable
-    files). Unlike the exec helpers this does NOT strip trailing newlines, so
-    the hash contract is preserved."""
+async def _sudo_cat(host: str, path: str, encoding: str,
+                    read_cmd: str = "cat") -> str:
+    """Read a file's EXACT content as root via ``sudo <read_cmd> -- <path>``
+    (default ``cat``), for root-owned / unreadable files. Routes through
+    :func:`remote_bash._run_sudo_raw`, which does NOT strip trailing newlines,
+    so the SHA-256 hash contract with ``remote_patch`` is preserved.
+
+    ``read_cmd`` is swappable: ``cat`` suffices for portal's text / line-oriented
+    reads (decoded with the caller's ``encoding``, matching the non-sudo SFTP
+    path), and could be swapped for ``base64`` + a local decode if byte-exact
+    binary reads are ever needed."""
     validate_remote_path(path)
     from .sudo_creds import resolve_sudo_password
-    from .connection_manager import DEFAULT_DECODE_ERRORS
+    from .remote_bash import _run_sudo_raw
     from .safety import quote_shell
     pw = await resolve_sudo_password(host)
     if pw is None:
         raise RemoteEditError(_sudo_missing_editor_msg(host))
-    mgr = get_manager()
-    conn = await mgr.get_connection(host)
     try:
-        res = await conn.run(f"sudo -S -k -p '' cat -- {quote_shell(path)}",
-                             input=pw + "\n", check=False, encoding=encoding,
-                             errors=DEFAULT_DECODE_ERRORS)
-    finally:
-        mgr.release_connection(host, conn)
+        res = await _run_sudo_raw(host, f"{read_cmd} -- {quote_shell(path)}", pw,
+                                  encoding=encoding)
+    except asyncio.TimeoutError:
+        raise RemoteEditError(f"sudo {read_cmd} timed out on {host}:{path}")
     if res.returncode != 0:
         raise RemoteEditError(
-            f"sudo cat failed on {host}:{path} (exit {res.returncode}): "
+            f"sudo {read_cmd} failed on {host}:{path} (exit {res.returncode}): "
             f"{(res.stderr or '').strip()[:200]}")
     return res.stdout or ""
 
@@ -343,37 +350,42 @@ async def _sudo_write_atomic(host: str, path: str, new_content: str,
     target's existing owner/group/mode. Content is staged over ordinary SFTP
     into the SSH user's HOME (private, not world-writable → no /tmp TOCTOU),
     then a single sudo step copies it to a temp BESIDE the target and renames it
-    (atomic within the target's filesystem). The target must already exist."""
+    (atomic within the target's filesystem). The target must already exist. The
+    stat + place sudo calls share :func:`remote_bash._run_sudo_raw`."""
     validate_remote_path(path)
     from .sudo_creds import resolve_sudo_password
-    from .connection_manager import DEFAULT_DECODE_ERRORS
+    from .remote_bash import _run_sudo_raw
     from .safety import quote_shell
     pw = await resolve_sudo_password(host)
     if pw is None:
         raise RemoteEditError(_sudo_missing_editor_msg(host))
-    mgr = get_manager()
-    conn = await mgr.get_connection(host)
-    stage_rel = f".portal-mcp-stage.{uuid.uuid4().hex[:12]}"
+
+    # 1) owner/group/mode of the EXISTING target (via sudo: the dir may be 700).
     try:
-        # owner/group/mode of the EXISTING target (via sudo: the dir may be 700)
-        st = await conn.run(
-            f"sudo -S -k -p '' stat -c '%U %G %a' -- {quote_shell(path)}",
-            input=pw + "\n", check=False, encoding="utf-8",
-            errors=DEFAULT_DECODE_ERRORS)
-        if st.returncode != 0:
-            raise RemoteEditError(
-                f"sudo stat failed on {host}:{path} (the target must already "
-                f"exist): {(st.stderr or '').strip()[:200]}")
-        parts = (st.stdout or "").split()
-        if len(parts) < 3:
-            raise RemoteEditError(f"unparseable stat output: {st.stdout!r}")
-        owner, group, mode = parts[0], parts[1], parts[2]
-        if not (_OWNER_RE.match(owner) and _OWNER_RE.match(group)
-                and _MODE_RE.match(mode)):
-            raise RemoteEditError(
-                f"refusing to trust unusual owner/group/mode "
-                f"{owner!r}/{group!r}/{mode!r} for {path!r}")
-        # stage content via ordinary SFTP into the user's private home
+        st = await _run_sudo_raw(
+            host, f"stat -c '%U %G %a' -- {quote_shell(path)}", pw,
+            encoding="utf-8")
+    except asyncio.TimeoutError:
+        raise RemoteEditError(f"sudo stat timed out on {host}:{path}")
+    if st.returncode != 0:
+        raise RemoteEditError(
+            f"sudo stat failed on {host}:{path} (the target must already "
+            f"exist): {(st.stderr or '').strip()[:200]}")
+    parts = (st.stdout or "").split()
+    if len(parts) < 3:
+        raise RemoteEditError(f"unparseable stat output: {st.stdout!r}")
+    owner, group, mode = parts[0], parts[1], parts[2]
+    if not (_OWNER_RE.match(owner) and _OWNER_RE.match(group)
+            and _MODE_RE.match(mode)):
+        raise RemoteEditError(
+            f"refusing to trust unusual owner/group/mode "
+            f"{owner!r}/{group!r}/{mode!r} for {path!r}")
+
+    # 2) stage content via ordinary SFTP into the user's private home.
+    mgr = get_manager()
+    stage_rel = f".portal-mcp-stage.{uuid.uuid4().hex[:12]}"
+    conn = await mgr.get_connection(host)
+    try:
         sftp = await conn.start_sftp_client()
         try:
             async with sftp.open(stage_rel, "w", encoding=encoding) as f:
@@ -385,25 +397,33 @@ async def _sudo_write_atomic(host: str, path: str, new_content: str,
                 await sftp.wait_closed()
             except Exception:  # pragma: no cover
                 pass
-        # atomic place: cp to a temp BESIDE the target (same fs), restore
-        # owner/mode, rename (atomic); clean up the temp on any failure.
-        tmp_beside = f"{path}.portal-mcp-sudo.{uuid.uuid4().hex[:12]}"
-        q_stage, q_tmp, q_path = (quote_shell(abs_stage), quote_shell(tmp_beside),
-                                  quote_shell(path))
-        script = (
-            f"cp -- {q_stage} {q_tmp} && chown {owner}:{group} {q_tmp} && "
-            f"chmod {mode} {q_tmp} && mv -f -- {q_tmp} {q_path} || "
-            f"{{ rm -f -- {q_tmp}; exit 1; }}")
-        res = await conn.run(f"sudo -S -k -p '' bash -c {quote_shell(script)}",
-                             input=pw + "\n", check=False, encoding="utf-8",
-                             errors=DEFAULT_DECODE_ERRORS)
-        if res.returncode != 0:
-            raise RemoteEditError(
-                f"sudo write/place failed on {host}:{path} (exit "
-                f"{res.returncode}): {(res.stderr or '').strip()[:200]}")
-        # best-effort remove the staged copy in home
+    finally:
+        mgr.release_connection(host, conn)
+
+    # 3) atomic place: cp to a temp BESIDE the target (same fs), restore
+    #    owner/mode, rename (atomic); clean up the temp on any failure.
+    tmp_beside = f"{path}.portal-mcp-sudo.{uuid.uuid4().hex[:12]}"
+    q_stage, q_tmp, q_path = (quote_shell(abs_stage), quote_shell(tmp_beside),
+                              quote_shell(path))
+    script = (
+        f"cp -- {q_stage} {q_tmp} && chown {owner}:{group} {q_tmp} && "
+        f"chmod {mode} {q_tmp} && mv -f -- {q_tmp} {q_path} || "
+        f"{{ rm -f -- {q_tmp}; exit 1; }}")
+    try:
+        res = await _run_sudo_raw(host, f"bash -c {quote_shell(script)}", pw,
+                                  encoding="utf-8")
+    except asyncio.TimeoutError:
+        raise RemoteEditError(f"sudo write/place timed out on {host}:{path}")
+    if res.returncode != 0:
+        raise RemoteEditError(
+            f"sudo write/place failed on {host}:{path} (exit "
+            f"{res.returncode}): {(res.stderr or '').strip()[:200]}")
+
+    # 4) best-effort remove the staged copy in home.
+    try:
+        conn2 = await mgr.get_connection(host)
         try:
-            sftp2 = await conn.start_sftp_client()
+            sftp2 = await conn2.start_sftp_client()
             try:
                 await sftp2.remove(stage_rel)
             finally:
@@ -412,10 +432,10 @@ async def _sudo_write_atomic(host: str, path: str, new_content: str,
                     await sftp2.wait_closed()
                 except Exception:  # pragma: no cover
                     pass
-        except Exception:  # pragma: no cover - staged-file cleanup is best-effort
-            logger.debug("staged file cleanup failed on %s", host, exc_info=True)
-    finally:
-        mgr.release_connection(host, conn)
+        finally:
+            mgr.release_connection(host, conn2)
+    except Exception:  # pragma: no cover - staged-file cleanup is best-effort
+        logger.debug("staged file cleanup failed on %s", host, exc_info=True)
 
 
 async def remote_read(host: str, path: str, start: int = 1,
@@ -430,7 +450,7 @@ async def remote_read(host: str, path: str, start: int = 1,
     whichever binds first — but always at least one line so the caller can
     always make progress. The page is cut on a line boundary, so
     ``range_hash`` always covers exactly the returned slice and stays valid
-    for a follow-up ``portal_patch``.
+    for a follow-up ``remote_patch``.
 
     Usage: call once with just ``(host, path)`` to read from the top; while the
     result has ``truncated=True``, call again with ``start=next_start`` to walk
@@ -440,7 +460,7 @@ async def remote_read(host: str, path: str, start: int = 1,
     Returns:
         {
           content: str,            # the returned page (whole lines)
-          file_hash: str,          # SHA-256 of the WHOLE file (for portal_patch)
+          file_hash: str,          # SHA-256 of the WHOLE file (for remote_patch)
           range_hash: str,         # SHA-256 of the returned page
           start: int, end: int,    # 1-based inclusive line range actually returned
           total_lines: int,
@@ -536,7 +556,7 @@ async def remote_patch(host: str, path: str, file_hash: str,
             "reason": "Content hash mismatch — file was modified after you read it",
             "current_file_hash": current_hash,
             "current_content": full,
-            "suggestion": "call portal_read again to get the current hash, then retry",
+            "suggestion": "call remote_read again to get the current hash, then retry",
         }
 
     lines = _split_keepends_lf(full)

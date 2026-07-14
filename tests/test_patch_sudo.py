@@ -1,4 +1,4 @@
-"""T1 — portal_patch / portal_read use_sudo: read+write root-owned files via a
+"""T1 — remote_patch / remote_read use_sudo: read+write root-owned files via a
 sudo path that preserves the patch hash contract, owner/mode, and atomicity.
 """
 import types
@@ -82,7 +82,13 @@ class _FakeMgr:
 def wired(monkeypatch):
     state = {"content": "line1\nline2\nline3\n", "stat": "root root 644\n",
              "store": {}, "runs": []}
-    monkeypatch.setattr(rte, "get_manager", lambda: _FakeMgr(state))
+    from portal_mcp_server import connection_manager
+    mgr = _FakeMgr(state)
+    # rte's staging path uses its import-bound get_manager; the shared
+    # remote_bash._run_sudo_raw resolves get_manager fresh from
+    # connection_manager — patch both so every sudo hop hits the fake pool.
+    monkeypatch.setattr(rte, "get_manager", lambda: mgr)
+    monkeypatch.setattr(connection_manager, "get_manager", lambda: mgr)
 
     async def fake_pw(host):
         return "sekret"

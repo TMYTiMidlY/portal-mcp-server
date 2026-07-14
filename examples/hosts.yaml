@@ -3,7 +3,7 @@
 # Copy this file to $XDG_CONFIG_HOME/portal-mcp-server/hosts.yaml
 # (default ~/.config/portal-mcp-server/hosts.yaml) and fill in your own values.
 # NEVER commit hosts.yaml — it contains real credentials.
-# Dynamic registration is also available via the portal_host MCP tool
+# Dynamic registration is also available via the hosts MCP tool
 # (key-based hosts only — see README §Authentication).
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -63,7 +63,7 @@ hosts:
   # Two non-negotiable rules:
   #   1. NEVER write `password: ...` in this file. Plaintext password
   #      fields are rejected at startup with an ERROR log.
-  #   2. The MCP `portal_host(action="register", ...)` tool does NOT accept
+  #   2. The MCP `hosts(action="register", ...)` tool does NOT accept
   #      a password — yaml is the only entry point, so the secret cannot
   #      land in LLM tool-call traces.
   # Two sources for the password (order: agent cache → password_command
@@ -91,7 +91,7 @@ hosts:
   #   # password_command: op read "op://Private/legacy-host/password"
   #   tags: [legacy]
 
-  # ── Non-interactive sudo (portal_exec use_sudo=True) ─────────────────────
+  # ── Non-interactive sudo (remote_exec use_sudo=True) ─────────────────────
   # Run sudo on a remote host WITHOUT the password ever becoming a tool
   # parameter or hitting a log. The password is fed over the existing SSH
   # channel to `sudo -S` on stdin. Two ways to provide it:
@@ -106,7 +106,7 @@ hosts:
   #       install --now` once per user session.
   # Lookup order at sudo time: agent cache (b) -> sudo_password_command
   # (a) -> error. NOTE: use_sudo runs a one-shot `sudo -S -k` exec, so it does
-  # NOT inherit the cwd/env of your persistent portal_shell session.
+  # NOT inherit the cwd/env of your persistent remote_shell session.
   # sudo-box:
   #   host: 10.0.0.50
   #   user: deploy
@@ -151,10 +151,10 @@ hosts:
   # missed by a later lookup).
 
 
-# ── Local-machine sudo for portal_local_exec(use_sudo=True) ──────────────────
+# ── Local-machine sudo for local_exec(use_sudo=True) ──────────────────
 # `<local>` is a RESERVED top-level key (a sibling of `hosts:`, NOT a host under
 # it). It configures sudo for the MCP server's OWN machine — used only by
-# portal_local_exec(use_sudo=True), which does NOT go over SSH. The angle
+# local_exec(use_sudo=True), which does NOT go over SSH. The angle
 # brackets are illegal in a hostname, so this reserved key never clashes with an
 # SSH host (don't confuse it with `localhost`, a normal SSH host to 127.0.0.1).
 # Password sources (lookup order: agent cache -> command -> error):

@@ -19,10 +19,10 @@ from mcp.server.fastmcp.exceptions import ToolError
 # ────────────────────────────────────────────────────────────────────────────
 
 def test_tools_take_secret_names_not_values():
-    """portal_exec / portal_local_exec accept a list of secret NAMES via
+    """remote_exec / local_exec accept a list of secret NAMES via
     `secrets`, never a token/value/secret parameter."""
-    from portal_mcp_server.cli import portal_exec, portal_local_exec
-    for fn in (portal_exec, portal_local_exec):
+    from portal_mcp_server.cli import remote_exec, local_exec
+    for fn in (remote_exec, local_exec):
         params = inspect.signature(fn).parameters
         assert "secrets" in params
         assert not any(
@@ -172,7 +172,7 @@ async def test_secrets_control_socket_roundtrip(agent_socket):
 
 
 # ────────────────────────────────────────────────────────────────────────────
-#  portal_local_exec: disabled by default, injects env, redacts, no value in audit
+#  local_exec: disabled by default, injects env, redacts, no value in audit
 # ────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
@@ -180,7 +180,7 @@ async def test_local_exec_disabled_by_default(monkeypatch):
     from portal_mcp_server import cli
     monkeypatch.delenv("PORTAL_ALLOW_LOCAL_EXEC", raising=False)
     with pytest.raises(ToolError, match="disabled"):
-        await cli.portal_local_exec("echo hi", timeout=30)
+        await cli.local_exec("echo hi", timeout=30)
 
 
 @pytest.mark.asyncio
@@ -192,13 +192,13 @@ async def test_local_exec_injects_env_and_redacts(monkeypatch):
     ss.cache_secret("my_token", "VALUE-XYZ-789", ttl=60)
 
     # env injected correctly: command checks equality, prints MATCH not the value
-    out = await cli.portal_local_exec(
+    out = await cli.local_exec(
         'test "$MY_TOKEN" = VALUE-XYZ-789 && echo MATCH', secrets=["my_token"], timeout=30)
     res = json.loads(out)
     assert res["output"] == "MATCH"
 
     # echo of the secret is redacted
-    out2 = await cli.portal_local_exec('echo "$MY_TOKEN"', secrets=["my_token"], timeout=30)
+    out2 = await cli.local_exec('echo "$MY_TOKEN"', secrets=["my_token"], timeout=30)
     assert "VALUE-XYZ-789" not in out2
     assert "***" in out2
 
@@ -212,7 +212,7 @@ async def test_local_exec_value_never_in_audit(monkeypatch):
     ss.cache_secret("my_token", "VALUE-XYZ-789", ttl=60)
     # command references the secret by env var only — the value is injected via
     # the environment, so the mechanism must not leak it into the audit entry.
-    await cli.portal_local_exec('echo "$MY_TOKEN"', secrets=["my_token"], timeout=30)
+    await cli.local_exec('echo "$MY_TOKEN"', secrets=["my_token"], timeout=30)
     latest = get_history(limit=1)[0]
     assert "VALUE-XYZ-789" not in str(latest)
     assert "my_token" in latest["command"]  # the NAME is fine to record
@@ -226,4 +226,4 @@ async def test_local_exec_unknown_secret_errors(monkeypatch, tmp_path):
     ss.reload_registry()
     ss.clear_secret()
     with pytest.raises(ToolError, match="not available"):
-        await cli.portal_local_exec("echo hi", secrets=["nope"], timeout=30)
+        await cli.local_exec("echo hi", secrets=["nope"], timeout=30)

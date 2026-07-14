@@ -104,7 +104,7 @@ class SecurityPolicy:
         """Run all checks. Returns first error found, or None if all pass.
 
         ``commit_rate_limit=False`` runs the host + command checks but does NOT
-        consume a rate-limit token — used by the ``portal_check`` dry-run so a
+        consume a rate-limit token — used by the ``policy_check`` dry-run so a
         pre-flight check never burns the real operation's quota (or
         self-throttles into a spurious "Rate limit exceeded").
 

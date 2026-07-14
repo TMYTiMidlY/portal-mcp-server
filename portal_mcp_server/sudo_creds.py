@@ -37,7 +37,7 @@ logger = logging.getLogger("portal_mcp.sudo")
 DEFAULT_TTL_SEC = 15 * 60
 
 # Reserved identity for the MCP server's OWN machine (used by
-# ``portal_local_exec(use_sudo=True)``). It deliberately reuses the ``<local>``
+# ``local_exec(use_sudo=True)``). It deliberately reuses the ``<local>``
 # token that ``cli`` already uses for the local exec gate/audit, so the local
 # identity is the SAME string across gate, audit and the sudo credential key.
 # The angle brackets are illegal in a hostname (RFC 1123) and are not a literal

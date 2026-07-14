@@ -1,6 +1,6 @@
 """P0: exec primitives must report exit codes + structured results.
 
-The persistent-session path (``portal_shell`` → ``remote_bash`` →
+The persistent-session path (``remote_shell`` → ``remote_bash`` →
 ``SessionManager.execute_in_session``) recovers each command's exit status from
 the **OSC 133 (FinalTerm)** ``\\x1b]133;D;<exit>\\x07`` marker the shell emits
 after every command. The one-shot exec path (``shell_engine.ssh_exec``) already

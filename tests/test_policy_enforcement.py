@@ -59,7 +59,7 @@ def populated_manager(monkeypatch, tmp_path):
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  portal_exec(group_tag=) — must gate command + every host in the group
+#  remote_exec(group_tag=) — must gate command + every host in the group
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestGroupExecGate:
@@ -77,7 +77,7 @@ class TestGroupExecGate:
         monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_exec(group_tag="fleet",
+            await cli.remote_exec(group_tag="fleet",
                                   command="rm -rf /", timeout=5)
         assert "BLOCKED" in str(exc_info.value)
         assert "blocked by policy" in str(exc_info.value).lower()
@@ -99,7 +99,7 @@ class TestGroupExecGate:
 
         # 'danger-01' is in the group but not in host_allowlist — must block.
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_exec(group_tag="fleet",
+            await cli.remote_exec(group_tag="fleet",
                                   command="uptime", timeout=5)
         assert "BLOCKED" in str(exc_info.value)
         assert "danger-01" in str(exc_info.value)
@@ -107,7 +107,7 @@ class TestGroupExecGate:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  portal_exec(host=[...], serialize=True) — rolling: gate command + every host
+#  remote_exec(host=[...], serialize=True) — rolling: gate command + every host
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestRollingGate:
@@ -125,7 +125,7 @@ class TestRollingGate:
         monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError, match="BLOCKED"):
-            await cli.portal_exec(
+            await cli.remote_exec(
                 host=["safe-01", "safe-02"],
                 command="rm -rf /tmp/x", serialize=True, timeout=5,
             )
@@ -142,7 +142,7 @@ class TestRollingGate:
         monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_exec(
+            await cli.remote_exec(
                 host=["safe-01", "danger-01"],
                 command="uptime", serialize=True, timeout=5,
             )
@@ -151,7 +151,7 @@ class TestRollingGate:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  portal_exec(commands=[...]) — every command in the sequence must pass
+#  remote_exec(commands=[...]) — every command in the sequence must pass
 # ════════════════════════════════════════════════════════════════════════════
 
 class TestBroadcastBatchGate:
@@ -167,7 +167,7 @@ class TestBroadcastBatchGate:
         monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError, match="BLOCKED"):
-            await cli.portal_exec(
+            await cli.remote_exec(
                 host=["safe-01", "safe-02"],
                 commands=["uptime", "rm -rf /opt"],
                 timeout=5,
@@ -185,7 +185,7 @@ class TestBroadcastBatchGate:
         monkeypatch.setattr(cli, "ssh_exec", fake_exec)
 
         with pytest.raises(ToolError, match="commands must be a list of strings"):
-            await cli.portal_exec(
+            await cli.remote_exec(
                 host=["safe-01"],
                 commands=["uptime", 42],
                 timeout=5,
@@ -194,7 +194,7 @@ class TestBroadcastBatchGate:
 
 
 # ════════════════════════════════════════════════════════════════════════════
-#  portal_exec(group_tag=, commands=[...]) — multi-command over a group still
+#  remote_exec(group_tag=, commands=[...]) — multi-command over a group still
 #  gates every command + every resolved host (the old playbook gate semantics)
 # ════════════════════════════════════════════════════════════════════════════
 
@@ -213,7 +213,7 @@ class TestGroupMultiCommandGate:
         # 'danger-01' is in the fleet group but not allowlisted → blocked even
         # before any of the sequence's commands run.
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_exec(group_tag="fleet",
+            await cli.remote_exec(group_tag="fleet",
                                   commands=["uptime", "echo done"], timeout=5)
         assert "BLOCKED" in str(exc_info.value)
         assert "danger-01" in str(exc_info.value)
@@ -231,7 +231,7 @@ class TestGroupMultiCommandGate:
 
         # A blocked command anywhere in the sequence rejects the whole run.
         with pytest.raises(ToolError) as exc_info:
-            await cli.portal_exec(
+            await cli.remote_exec(
                 host=["safe-01"],
                 commands=["uptime", "rm -rf /var", "echo done"], timeout=5)
         msg = str(exc_info.value)
@@ -241,8 +241,8 @@ class TestGroupMultiCommandGate:
 
 # ════════════════════════════════════════════════════════════════════════════
 #  Note: the ssh_run/ssh_session_*/ssh_playbook families were removed during the
-#  agent-first redesign. Use portal_shell for a single persistent session per
-#  host (policy-gated per command) or portal_exec for one-shot / fan-out /
+#  agent-first redesign. Use remote_shell for a single persistent session per
+#  host (policy-gated per command) or remote_exec for one-shot / fan-out /
 #  multi-command execution (gated here). The session_manager module remains.
 # ════════════════════════════════════════════════════════════════════════════
 

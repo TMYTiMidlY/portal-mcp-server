@@ -1,4 +1,4 @@
-"""portal_grep / portal_glob — Claude-Code-faithful schema, structured output.
+"""remote_grep / remote_glob — Claude-Code-faithful schema, structured output.
 
 These mock the SSH connection to feed canned rg/grep/glob stdout, so they pin
 the parsing + the output-shape contract (output modes, mtime ordering,
@@ -186,7 +186,7 @@ async def test_grep_fallback_forces_filename_and_ere(monkeypatch):
         assert "-E" in toks, f"{mode}: missing -E -> {rec[0]}"
 
 
-# ── portal_glob ─────────────────────────────────────────────────────────────
+# ── remote_glob ─────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_glob_newest_first_and_shape(monkeypatch):

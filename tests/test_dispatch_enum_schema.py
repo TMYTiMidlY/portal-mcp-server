@@ -16,16 +16,16 @@ from portal_mcp_server import cli
 
 # (tool name, param name, expected enum values)
 _DISPATCH_ENUMS = [
-    ("portal_host", "action", {"list", "register", "remove"}),
-    ("portal_transfer", "direction",
+    ("hosts", "action", {"list", "register", "remove"}),
+    ("remote_transfer", "direction",
      {"upload", "download", "sync", "mirror", "upload-list", "download-list"}),
-    ("portal_tunnel", "action", {"open", "close", "list"}),
-    ("portal_tunnel", "kind", {"local", "reverse", "socks"}),
-    ("portal_grep", "output_mode",
+    ("remote_tunnel", "action", {"open", "close", "list"}),
+    ("remote_tunnel", "kind", {"local", "reverse", "socks"}),
+    ("remote_grep", "output_mode",
      {"files_with_matches", "content", "count"}),
-    ("portal_job", "action", {"submit", "poll", "cancel", "list"}),
-    ("portal_job", "signal", {"TERM", "KILL"}),
-    ("portal_audit", "view",
+    ("remote_job", "action", {"submit", "poll", "cancel", "list"}),
+    ("remote_job", "signal", {"TERM", "KILL"}),
+    ("inspect", "view",
      {"snapshot", "server", "sessions", "history", "stats", "policy"}),
 ]
 
@@ -50,4 +50,4 @@ async def test_framework_rejects_invalid_dispatch_value():
     from mcp.server.fastmcp.exceptions import ToolError
 
     with pytest.raises(ToolError):
-        await cli.mcp.call_tool("portal_audit", {"view": "not-a-real-view"})
+        await cli.mcp.call_tool("inspect", {"view": "not-a-real-view"})

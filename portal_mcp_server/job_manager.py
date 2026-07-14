@@ -1,9 +1,9 @@
 """job_manager — background ("fire-and-poll") command execution (L1).
 
-portal_job runs a command in the *background* on a remote host and hands the
+remote_job runs a command in the *background* on a remote host and hands the
 agent a job_id, so the agent gets control back immediately and can think while
 the command runs, poll for incremental output, and cancel at will. This is the
-async counterpart to portal_exec (synchronous) and portal_shell (stateful).
+async counterpart to remote_exec (synchronous) and remote_shell (stateful).
 
 Capture strategy (remote tmp files)
 -----------------------------------
@@ -24,7 +24,7 @@ L1 limits (intentional)
   keeps running regardless and is recoverable via ``ps``.
 * ``use_sudo`` / ``secrets`` are NOT supported in the background (sudo -S wants
   stdin; injecting secrets into a backgrounded ``bash -c`` would put them on
-  argv, visible in ``ps``). Use portal_exec for those.
+  argv, visible in ``ps``). Use remote_exec for those.
 * A bounded number of concurrent live jobs (``PORTAL_JOB_MAX_LIVE``, default
   50); finished jobs are swept after ``PORTAL_JOB_TTL`` (default 3600s) and
   their remote tmp files removed.
@@ -188,7 +188,7 @@ class JobManager:
         # bash evaluates $? AFTER the command (it is single-quoted into argv by
         # quote_shell, so the OUTER shell does not expand it). A LOGIN shell
         # (bash -lc) loads the user's ~/.profile / ~/.bashrc so long tasks see
-        # the same PATH/env as portal_exec; login=False keeps a plain bash -c.
+        # the same PATH/env as remote_exec; login=False keeps a plain bash -c.
         inner = f"{command}\necho \"{_DONE_MARKER}$?\" >> {quote_shell(meta_path)}\n"
         bash_flag = "-lc" if login else "-c"
         spawn = (f"nohup bash {bash_flag} {quote_shell(inner)} "

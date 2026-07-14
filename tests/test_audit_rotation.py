@@ -64,7 +64,7 @@ def test_audit_log_fail_open_swallows(monkeypatch):
 
 
 def test_audit_log_still_fills_history(monkeypatch):
-    """The in-memory ring buffer (portal_audit views) is independent of the
+    """The in-memory ring buffer (inspect views) is independent of the
     file write and must still be populated."""
     class Sink:
         def info(self, msg):

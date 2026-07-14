@@ -244,7 +244,7 @@ class TestPersistentSessions:
 
 
 # ════════════════════════════════════════════════════════
-# TEST 4: Multi-host orchestration (now portal_exec fan-out)
+# TEST 4: Multi-host orchestration (now remote_exec fan-out)
 # ════════════════════════════════════════════════════════
 
 class TestOrchestration:
@@ -262,7 +262,7 @@ class TestOrchestration:
     async def test_parallel_exec(self):
         """Same command on multiple hosts simultaneously."""
         from portal_mcp_server import cli
-        results = json.loads(await cli.portal_exec(
+        results = json.loads(await cli.remote_exec(
             host=["fleet-01", "fleet-02"], command="hostname", timeout=30))
         assert len(results) == 2
         for r in results:
@@ -272,7 +272,7 @@ class TestOrchestration:
     async def test_rolling_exec(self):
         """Sequential (serialized) exec with delay."""
         from portal_mcp_server import cli
-        results = json.loads(await cli.portal_exec(
+        results = json.loads(await cli.remote_exec(
             host=["fleet-01", "fleet-02"], command="echo rolling",
             serialize=True, delay_s=0.1, timeout=30))
         assert len(results) == 2
@@ -283,7 +283,7 @@ class TestOrchestration:
     async def test_group_exec(self):
         """Execute on all hosts with a matching tag."""
         from portal_mcp_server import cli
-        results = json.loads(await cli.portal_exec(
+        results = json.loads(await cli.remote_exec(
             group_tag="fleet", command="echo tagged", timeout=30))
         assert len(results) >= 1
         for r in results:
@@ -293,7 +293,7 @@ class TestOrchestration:
     async def test_command_sequence(self):
         """Run a multi-step command sequence and verify all steps complete."""
         from portal_mcp_server import cli
-        out = json.loads(await cli.portal_exec(
+        out = json.loads(await cli.remote_exec(
             host=TEST_HOST_NAME,
             commands=["echo step1", "echo step2", "echo step3"], timeout=30))
         assert len(out["results"]) == 3

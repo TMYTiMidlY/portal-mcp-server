@@ -172,7 +172,7 @@ class HostConfig:
     # Shell command that prints this host's *sudo* password to stdout. Same
     # execution model as ``password_command`` (run on demand, never persisted,
     # never logged, never exposed via any MCP tool parameter). Used by
-    # ``portal_exec(use_sudo=True)`` to feed ``sudo -S`` on stdin. The
+    # ``remote_exec(use_sudo=True)`` to feed ``sudo -S`` on stdin. The
     # alternative source is the per-user credential agent populated
     # out-of-band by ``portal sudo set`` (see sudo_creds.py).
     sudo_password_command: Optional[str] = None
@@ -193,16 +193,16 @@ class HostConfig:
     # (omit client_keys, authenticate with the keys the agent holds); ``False``
     # = hard-disable the agent (key files only). See ``_build_connect_kwargs``.
     use_ssh_agent: Optional[bool] = None
-    # Run one-shot portal_exec commands in a LOGIN shell (``bash -lc``) so the
+    # Run one-shot remote_exec commands in a LOGIN shell (``bash -lc``) so the
     # user's ``~/.profile`` / ``~/.bashrc`` environment (PATH additions for
     # conda / nvm / pyenv, …) is loaded. ``None`` = defer to PORTAL_LOGIN_SHELL
     # (on by default); ``True`` / ``False`` = per-host override. Ignored on
-    # hosts without bash (the wrap degrades to a plain exec) and by portal_shell
+    # hosts without bash (the wrap degrades to a plain exec) and by remote_shell
     # (its persistent session is deliberately ``--norc`` for the OSC 133
     # boundary protocol).
     login_shell: Optional[bool] = None
     # Where this entry was declared, surfaced by ``list_hosts``: "hosts.yaml"
-    # (the config file), "runtime" (a ``portal_host`` register call), or
+    # (the config file), "runtime" (a ``hosts`` register call), or
     # "ssh-config" (auto-resolved from the OpenSSH client config). Combined with
     # ``use_ssh_config`` to produce the list's ``source`` label.
     source: str = "hosts.yaml"
@@ -265,7 +265,7 @@ class ConnectionManager:
         # sudo_password_command for the MCP server's OWN machine, read from a
         # TOP-LEVEL ``<local>:`` section in hosts.yaml (a reserved key, NOT a host
         # under ``hosts:``, so it never enters the host namespace). Consumed by
-        # ``resolve_sudo_password("<local>")`` for ``portal_local_exec(use_sudo=True)``.
+        # ``resolve_sudo_password("<local>")`` for ``local_exec(use_sudo=True)``.
         self._local_sudo_password_command: Optional[str] = None
         self._pool: dict[str, list[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
@@ -809,7 +809,7 @@ class ConnectionManager:
 
         The reserved local identity ``<local>`` resolves to the top-level
         ``local:`` section's ``sudo_password_command`` instead of the host
-        registry (used by ``portal_local_exec(use_sudo=True)``).
+        registry (used by ``local_exec(use_sudo=True)``).
         """
         from .sudo_creds import LOCAL_SUDO_KEY
         host_name = normalize_host_name(host_name)

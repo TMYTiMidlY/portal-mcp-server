@@ -1,4 +1,4 @@
-"""portal_shell / portal_exec keepalive heartbeat.
+"""remote_shell / remote_exec keepalive heartbeat.
 
 A remote command produces no output until it finishes, so without a keepalive a
 slow command leaves the MCP client hearing nothing and many clients abort the
@@ -149,14 +149,14 @@ def test_enforce_timeout_cap_rejects_over_ceiling(monkeypatch):
     monkeypatch.setenv("PORTAL_MAX_TIMEOUT", "300")
     with pytest.raises(cli.ToolError) as ei:
         cli._enforce_timeout_cap(600, job_hint=True)
-    assert "portal_job" in str(ei.value)
+    assert "remote_job" in str(ei.value)
 
 
 def test_enforce_timeout_cap_local_hint_omits_job(monkeypatch):
     monkeypatch.setenv("PORTAL_MAX_TIMEOUT", "300")
     with pytest.raises(cli.ToolError) as ei:
         cli._enforce_timeout_cap(600, job_hint=False)
-    assert "portal_job" not in str(ei.value)
+    assert "remote_job" not in str(ei.value)
 
 
 def test_enforce_timeout_cap_allows_within_ceiling(monkeypatch):
@@ -172,16 +172,16 @@ def test_ctx_detected_as_context_param():
     from mcp.server.fastmcp.utilities.context_injection import (
         find_context_parameter,
     )
-    assert find_context_parameter(cli.portal_shell) == "ctx"
-    assert find_context_parameter(cli.portal_exec) == "ctx"
+    assert find_context_parameter(cli.remote_shell) == "ctx"
+    assert find_context_parameter(cli.remote_exec) == "ctx"
 
 
 async def test_portal_shell_schema_excludes_ctx():
     tools = await cli.mcp.list_tools()
-    tool = next(t for t in tools if t.name == "portal_shell")
+    tool = next(t for t in tools if t.name == "remote_shell")
     props = (tool.inputSchema or {}).get("properties", {})
     assert "ctx" not in props
-    # portal_shell is the pure session: host/command/timeout, no sudo/secrets.
+    # remote_shell is the pure session: host/command/timeout, no sudo/secrets.
     assert {"host", "command", "timeout"} <= set(props)
     assert "use_sudo" not in props
     assert "secrets" not in props
@@ -189,7 +189,7 @@ async def test_portal_shell_schema_excludes_ctx():
 
 async def test_portal_exec_schema_excludes_ctx():
     tools = await cli.mcp.list_tools()
-    tool = next(t for t in tools if t.name == "portal_exec")
+    tool = next(t for t in tools if t.name == "remote_exec")
     props = (tool.inputSchema or {}).get("properties", {})
     assert "ctx" not in props
     # sudo + secrets moved here (one-shot paths).
@@ -200,13 +200,13 @@ def test_local_exec_ctx_detected_as_context_param():
     from mcp.server.fastmcp.utilities.context_injection import (
         find_context_parameter,
     )
-    assert find_context_parameter(cli.portal_local_exec) == "ctx"
+    assert find_context_parameter(cli.local_exec) == "ctx"
 
 
 async def test_portal_local_exec_schema_excludes_ctx():
     tools = await cli.mcp.list_tools()
-    tool = next(t for t in tools if t.name == "portal_local_exec")
+    tool = next(t for t in tools if t.name == "local_exec")
     props = (tool.inputSchema or {}).get("properties", {})
     assert "ctx" not in props
-    # timeout is still client-settable, mirroring portal_exec.
+    # timeout is still client-settable, mirroring remote_exec.
     assert {"command", "secrets", "timeout"} <= set(props)
