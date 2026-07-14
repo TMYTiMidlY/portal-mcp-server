@@ -173,6 +173,29 @@ asyncssh connection pool (reusing one TCP across tools, multiple per host);
 
 </details>
 
+#### <a id="cli-vs-mcp"></a>CLI vs. MCP server
+
+Two invocation modes of the **same package / one binary**: launched with no
+subcommand it is the **MCP server** (the agent runs remote tools through it);
+launched as `portal {ssh,passphrase,sudo,secret,agent} …` it is the **ops CLI**
+(a human, in another terminal). The two **never talk directly** — they coordinate
+only through three shared channels:
+
+- **Credential-agent socket** — the CLI's `set` writes a no-echo credential into
+  the per-user credential agent; the MCP server reads it on demand at connect
+  time (see [credential agent](#credential-agent) below). The protocol has no
+  version handshake and admits peers by uid, so it is loosely coupled across the
+  shared credential kinds.
+- **Config files** — `hosts.yaml` / `policies.yaml` / `secrets.yaml` are read
+  **independently by each side**; this is the behaviour surface, so a new field
+  or semantic only agrees once both ends are on a version that understands it.
+- **`agent.json`** — records the credential agent's socket path so the CLI and
+  the MCP server point at the same agent.
+
+So the CLI and the server can upgrade independently, even run briefly at
+different versions (credentials still interoperate); only new config-file
+semantics need both ends updated to agree.
+
 ### <a id="design-principles"></a>Design principles
 
 The single criterion: **keep a tool only when it provides a guarantee bash can't

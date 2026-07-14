@@ -120,6 +120,16 @@ MCP client 经 stdio（或可选 HTTP）连到 server；14 个工具先过安全
 
 </details>
 
+#### <a id="cli-vs-mcp"></a>CLI 与 MCP server 的关系
+
+同一个包、同一个二进制的**两种启动方式**：不带子命令启动就是 **MCP server**（agent 通过它跑远端工具）；带 `portal {ssh,passphrase,sudo,secret,agent} …` 子命令就是**运维 CLI**（人在另一个终端手敲）。两者**从不直接通信**，只通过三条共享通道协同：
+
+- **凭据 agent socket** —— CLI 的 `set` 把无回显凭据写进 per-user 凭据 agent，MCP server 在建连时按需读取（详见下文 [凭据 agent](#credential-agent)）。协议无版本握手、按 uid 放行，对共享的凭据 kind 松耦合。
+- **配置文件** —— `hosts.yaml` / `policies.yaml` / `secrets.yaml` 双方**各自独立读取**，是行为对齐面；新增字段 / 语义需要读写两端版本一致才生效。
+- **`agent.json`** —— 记录凭据 agent 的 socket 路径，让 CLI 和 MCP server 指向同一个 agent。
+
+因此 CLI 与 server 可以各自升级、甚至短暂跑在不同版本（凭据仍互通）；只是配置文件里的新语义要等两端都更新后才一致。
+
 ### <a id="design-principles"></a>设计理念
 
 判据只有一条：**一个工具只在它能提供 bash 难以廉价合成的保证时才保留**。下面每条原则默认折叠，标题即要点。
