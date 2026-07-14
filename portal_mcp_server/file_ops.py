@@ -187,7 +187,15 @@ async def ssh_upload_file(host_name: str, local_path: str, remote_path: str,
                 res["resumed"] = True
                 lh = await _local_sha256(local_path)
                 rh = await _remote_sha256(conn, remote_path)
-                if rh is not None and lh is not None and rh != lh:
+                if lh is None or rh is None:
+                    # Can't verify the appended result end-to-end (e.g. the
+                    # remote has no sha256sum): a non-prefix partial would go
+                    # undetected, so don't trust it — re-upload fresh.
+                    await sftp.put(local_path, remote_path, preserve=True,
+                                   progress_handler=_make_handler(progress_cb))
+                    res["resumed"] = False
+                    res["restarted_unverifiable"] = True
+                elif rh != lh:
                     # Stale / non-prefix partial → re-upload from scratch once.
                     await sftp.put(local_path, remote_path, preserve=True,
                                    progress_handler=_make_handler(progress_cb))

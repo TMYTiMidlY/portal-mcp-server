@@ -113,3 +113,17 @@ async def test_remote_not_smaller_uploads_fresh(monkeypatch, localfile):
     res = await file_ops.ssh_upload_file("h", localfile, "/r/big.bin")
     assert res["status"] == "ok" and res["resumed"] is False
     assert sftp.put_called and not sftp.append_opened
+
+
+@pytest.mark.asyncio
+async def test_resume_unverifiable_restarts_fresh(monkeypatch, localfile):
+    """No remote sha256sum (rh=None) => can't verify the appended prefix, so
+    the resume is not trusted: re-upload fresh and flag it."""
+    sftp = _FakeSFTP(remote_size=40)
+    _wire(monkeypatch, sftp, local_hash="H", remote_hash=None)
+    res = await file_ops.ssh_upload_file("h", localfile, "/r/big.bin")
+    assert res["status"] == "ok"
+    assert sftp.append_opened                      # tried the tail first
+    assert sftp.put_called                          # then re-uploaded fresh
+    assert res["resumed"] is False
+    assert res.get("restarted_unverifiable") is True
