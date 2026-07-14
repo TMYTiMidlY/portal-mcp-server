@@ -184,7 +184,7 @@ target-version = "py310"
 line-length = 100
 
 [tool.commitizen]
-name = "cz_conventional_commits"
+name = "cz_customize"
 tag_format = "v$version"
 version_scheme = "pep440"
 version_provider = "uv"
@@ -206,3 +206,23 @@ pre_bump_hooks = [
     "uv run ruff check portal_mcp_server/ tests/",
     "uv run python -m pytest tests/ -q",
 ]
+
+# ── Custom cz: conventional-commits + `security` as a first-class type ────────
+# We use `cz_customize` (not `cz_conventional_commits`) ONLY so that `security:`
+# commits appear in the changelog under their own section. The built-in plugin's
+# `commit_parser` is a class attribute that ignores a `[tool.commitizen]`
+# override (commitizen 4.16.4, commands/changelog.py uses `self.cz.commit_parser`
+# at parse time, BEFORE change_type_map is applied), so `security:` commits were
+# silently dropped. Everything below is a faithful copy of cz_conventional_commits
+# with `security` added to `commit_parser` + `change_type_map` ONLY — `bump_map`
+# is left identical, so `security:` stays a NON-version-bumping type. Re-verify
+# against `ConventionalCommitsCz` if you upgrade commitizen.
+[tool.commitizen.customize]
+bump_pattern = '^((BREAKING[\-\ ]CHANGE|\w+)(\(.+\))?!?):'
+bump_map = {'^.+!$' = "MAJOR", '^BREAKING[\-\ ]CHANGE' = "MAJOR", '^feat' = "MINOR", '^fix' = "PATCH", '^refactor' = "PATCH", '^perf' = "PATCH"}
+bump_map_major_version_zero = {'^.+!$' = "MINOR", '^BREAKING[\-\ ]CHANGE' = "MINOR", '^feat' = "MINOR", '^fix' = "PATCH", '^refactor' = "PATCH", '^perf' = "PATCH"}
+commit_parser = '^((?P<change_type>feat|fix|refactor|perf|security|BREAKING CHANGE)(?:\((?P<scope>[^()\r\n]*)\)|\()?(?P<breaking>!)?|\w+!):\s(?P<message>.*)?'
+changelog_pattern = '^((BREAKING[\-\ ]CHANGE|\w+)(\(.+\))?!?):'
+change_type_map = {feat = "Feat", fix = "Fix", refactor = "Refactor", perf = "Perf", security = "Security"}
+change_type_order = ["BREAKING CHANGE", "Feat", "Security", "Fix", "Refactor", "Perf"]
+schema_pattern = '(build|ci|docs|feat|fix|perf|refactor|style|test|chore|revert|bump|security)(\(\S+\))?!?:( [^\n\r]+)'
