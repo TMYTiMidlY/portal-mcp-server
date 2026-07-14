@@ -194,11 +194,15 @@ annotated_tag = true
 # This is the gate that catches "maintainer forgot to run ruff before bump"
 # (which produced the v2.0.1 → v2.0.2 follow-up: F541 slipped into v2.0.1
 # because `cz bump` ran on a tree that ruff would have rejected).
-# Hooks run BEFORE cz touches pyproject.toml / uv.lock / CHANGELOG.md, so a
-# failed hook leaves no half-applied bump state. The hook names must
-# correspond to commands that exit non-zero on failure -- cz aborts on the
-# first non-zero exit.
+# Hooks run as part of `cz bump`; a failed hook aborts the bump. Note: this
+# commitizen version updates pyproject.toml / uv.lock / CHANGELOG.md BEFORE
+# running these hooks, so a failed hook can leave those files modified (but
+# WITHOUT a bump commit or tag) -- recover with `git checkout`/`git stash` on
+# those files. The hook names must correspond to commands that exit non-zero
+# on failure -- cz aborts on the first non-zero exit. Use `python -m pytest`
+# (not bare `pytest`) so the gate doesn't depend on console-script spawn
+# resolution under `uv run`.
 pre_bump_hooks = [
     "uv run ruff check portal_mcp_server/ tests/",
-    "uv run pytest tests/ -q",
+    "uv run python -m pytest tests/ -q",
 ]
