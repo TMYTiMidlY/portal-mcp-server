@@ -18,96 +18,139 @@ Lets coding agents (Claude Code, Copilot CLI, Cursor, …) drive remote machines
 
 </div>
 
-> ℹ️ **The Chinese [`README.md`](./README.md) is canonical.** This English
-> translation may lag behind it for the latest tool-surface changes; for the
-> authoritative 14-tool reference see [`README.md`](./README.md). (Tool count and
-> signatures here are current; some narrative prose may still describe
-> pre-refactor tool names.)
+> ℹ️ The Chinese [`README.md`](./README.md) is canonical; this file is kept in
+> lockstep with it.
 
 ---
 
 <details>
-<summary>📖 Table of Contents</summary>
+<summary>📖 Table of contents</summary>
 
 - [Overview](#overview)
 - [Highlights](#highlights)
-- [Why portal-mcp-server vs. plain SSH](#why-portal-mcp-server-vs-plain-ssh)
-- [Quick start](#quick-start)
-- [Architecture](#architecture)
-- [Tools](#tools)
-- [Design notes](#design-notes)
+- [Architecture & design](#architecture-design)
 - [Install](#install)
 - [Client integration](#client-integration)
-- [Environment variables](#environment-variables)
+- [Tools](#tools)
+- [Environment variables](#env-vars)
 - [Authentication](#authentication)
 - [Security](#security)
 - [Testing](#testing)
-- [CI / Release](#ci--release)
+- [CI / Release](#ci-release)
 - [FAQ](#faq)
 - [Contributing](#contributing)
-- [License & attribution](#license--attribution)
+- [License & credits](#license-credits)
 
 </details>
 
-## Overview
+## <a id="overview"></a>Overview
 
-`portal-mcp-server` is forked from [`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0): the lower-level SSH/asyncssh engine, connection pool, tunnel manager, multi-host orchestrator, and security policy are inherited from the upstream modules. The upper layer is a fresh agent-first portal tool surface — built around three execution paths (a persistent bash session, one-shot exec, and background jobs) plus primitives for hash-protected remote editing, structured search, SFTP transfer, tunnels, and auditing. The double-hash conflict-detection algorithm behind remote editing (`remote_read` / `remote_patch`) is referenced from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT) and reimplemented for SFTP.
+portal-mcp-server is built around three ideas: **few, orthogonal tools** (keep
+only the guarantees bash can't cheaply synthesize), **step-wise & interruptible**
+(the agent calls one step at a time, reads real output, then decides; long tasks
+go to the background), and **credential unification** (every connection goes
+through one in-process auth path; plaintext never enters the LLM / argv / disk).
 
-See [`NOTICE`](./NOTICE) and the [Security](#security) section for full provenance and security posture.
+`portal-mcp-server` is forked from
+[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)
+(Apache 2.0): the underlying SSH/asyncssh engine, connection pool, tunnel
+management, multi-host orchestration and security policy come from upstream. The
+upper layer is a redesigned agent-first tool surface built around three
+execution paths — persistent bash sessions, one-shot exec, and background jobs —
+plus hash-protected remote editing, structured search, SFTP transfer, tunnels
+and audit. The double-hash safe-edit algorithm behind `remote_read` /
+`remote_patch` is adapted from [`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor)
+(MIT) and rewritten for SFTP.
 
-## Highlights
+Full derivation and third-party algorithm provenance are in [`NOTICE`](./NOTICE)
+and the [Security](#security) section.
 
-- **Cross-tool connection reuse**: every portal tool shares the same in-process asyncssh pool; one TCP per host gets reused indefinitely, individual calls amortise to channel creation (~10–30 ms).
-- **Same speed on Windows**: no dependency on OpenSSH `ControlMaster`; the pool is plain Python objects, so the three major OSes get identical reuse performance.
-- **Persistent shell sessions**: `remote_shell` keeps an interactive shell (bash/zsh) per host with cwd / env preserved across calls, and can run a `commands=[…]` sequence in the same session — the agent doesn't have to rebuild context every command.
-- **Hash-protected remote edits**: `remote_read` + `remote_patch` use whole-file SHA-256 plus per-range hashes, write through tmp + `posix_rename` (atomic), then re-hash on disk to refuse stale or concurrent overwrites.
-- **Agent-first, minimal tool surface**: `action` / `mode` parameters collapse semantically overlapping entries, and each tool earns its place only by offering a guarantee bash can't cheaply synthesize — so the agent has fewer look-alike tools to choose between. The tool schemas (name + description + inputSchema) total **~8k tokens** (≈ **4%** of a 200k context window; `tiktoken o200k_base` estimate).
-- **Built-in security policy**: host allowlist, command blocklist/allowlist (fnmatch), per-host rate limit, and an audit log for every state-changing operation, fail-closed by default; plus an optional [cc-safety-net](https://github.com/kenryu42/cc-safety-net) semantic command gate (opt-in — unwraps `bash -c` / interpreter one-liners, blocks destructive git/rm, and covers `remote_exec`/`local_exec`/`shell`/`job`, which bypass the agent's own `bash` PreToolUse hook; fail-closed by default).
-- **OpenSSH-compatible**: native handling of `~/.ssh/config` aliases, `known_hosts`, ssh-agent — no need to re-register hosts.
-- **Zero deployment**: MCP clients launch it directly from GitHub via `uvx`, no clone or venv needed.
+## <a id="highlights"></a>Highlights
 
-## Why portal-mcp-server vs. plain SSH
+- **Cross-tool connection reuse**: all portal tools share one in-process asyncssh
+  connection pool; one handshake is reused for hours, and each call amortizes to
+  channel creation (~10–30 ms).
+- **Fast on Windows too**: no dependence on OpenSSH `ControlMaster`; the pool is
+  plain Python objects, so all three platforms get the same reuse performance.
+- **Persistent shell sessions**: `remote_shell` keeps one interactive shell
+  (bash/zsh) per host — cwd / env persist across calls, and `commands=[…]` runs
+  multiple steps in the same session; the agent needn't rebuild context per
+  command.
+- **Hash-protected remote edits**: `remote_read` + `remote_patch` use whole-file
+  SHA-256 + per-range hashes, write via tmp + `posix_rename` (atomic), and
+  re-hash after the write — **detecting** concurrent overwrites / mid-write
+  disconnects / line-number drift (optimistic checking that narrows the conflict
+  window; not a filesystem-level CAS).
+- **Agent-first minimal tool surface**: `action` / `mode` fields merge
+  semantically-overlapping entry points; each tool offers exactly one guarantee
+  bash can't cheaply synthesize, reducing tool-choice ambiguity. The tool schemas
+  (name + description + inputSchema) total about **~9k tokens** (≈ **4–5%** of a
+  200k context window; `tiktoken o200k_base` measures ~8.8k).
+- **Built-in security policy**: host allowlist, command blocklist/allowlist
+  (fnmatch), per-host rate limit, an audit log for every state-changing op,
+  fail-closed by default; optional [cc-safety-net](https://github.com/kenryu42/cc-safety-net)
+  semantic command gate (opt-in, unwraps `bash -c` / interpreter one-liners,
+  catches destructive git/rm, covering the `remote_exec`/`local_exec`/`shell`/`job`
+  paths that bypass the agent's own `bash` PreToolUse hook; fail-closed).
+- **OpenSSH config compatibility**: `~/.ssh/config` aliases, `known_hosts`,
+  ssh-agent are recognized automatically — no need to re-register hosts.
+- **Zero extra deployment**: the MCP client runs it straight from PyPI via
+  `uvx` — no clone, no venv.
 
-The naive way to give an agent remote access is to let it shell out to `ssh` / `scp` / `rsync`. That "plain" path is barely workable on Linux/macOS with `ControlMaster`, **effectively broken on Windows**, and missing essential affordances around file editing, sudo, multi-host orchestration, and audit. The table below puts the key differences in one place — each row is a concrete pitfall an agent hits with the plain approach and how portal-mcp-server addresses it.
+## <a id="architecture-design"></a>Architecture & design
+
+portal-mcp-server is designed around three ideas: **few, orthogonal tools** (keep
+only the guarantees bash can't cheaply synthesize), **step-wise & interruptible**
+(one call = one decidable step; read real output, then decide; long tasks go to
+the background), and **credential unification** (every connection goes through one
+in-process auth path; plaintext never enters the LLM / argv / disk). Below: first
+"how it differs from plain ssh" and the data flow, then the trade-offs behind
+those three ideas — everything but the three-idea intro is collapsed by default.
+
+### <a id="vs-traditional"></a>Versus plain ssh / scp
+
+The naive approach is to let the agent `bash` its way through `ssh` / `scp` /
+`rsync`. That is barely usable on Linux/macOS with `ControlMaster`, nearly
+unusable on Windows, and lacks key capabilities for file editing, sudo,
+multi-host and audit.
+
+<details><summary>Expand the per-dimension comparison (incl. the Windows reuse gap)</summary>
 
 | Dimension | Plain (bash + `ssh` / `scp` / `rsync`) | portal-mcp-server |
 |---|---|---|
-| **SSH reuse · Linux/macOS** | OpenSSH `ControlMaster auto` + Unix socket; default `ControlPersist 10m`, master dies after that | asyncssh **in-process pool**; reused for as long as the MCP server lives (hours) |
-| **SSH reuse · Windows** | ❌ **Doesn't work** — Microsoft's Win32-OpenSSH port has had `ControlMaster` broken since v0.0.3.0 (`muxclient socket(): Unknown error`), [issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) open since 2017 (the implementation needs Unix-domain-socket fd sharing, which Windows lacks) | ✅ **Identical to Linux** — the pool is a plain Python dict; asyncssh needs no OS-level socket sharing |
-| **First connect / subsequent latency** | First ~200–500ms; **without reuse every command is a fresh TCP+auth, ~300ms each** (the default on Windows); with ControlMaster, ~10–30ms after the first | First ~200–500ms, **then ~10–30ms (same on all three OSes)** — just channel creation |
-| **Cross-"tool" reuse** | `ssh` and `scp` only reuse a master if `ControlPath` matches exactly; in practice each binary opens its own connection | ✅ Every portal tool (bash / read / patch / transfer / tunnel …) naturally shares the same TCP |
-| **Persistent shell state** | Every `ssh host cmd` is a new shell; `cd` / `export` / venv activation **all reset**; the agent has to prepend `cd /path && source venv/bin/activate && ...` to every command | ✅ `remote_shell` keeps a sticky interactive shell (bash/zsh); cwd / env / venv survive across calls |
-| **Remote file editing (safe edit)** | All three options are unsafe: ① `scp` down → edit → `scp` up (no concurrency check, concurrent writer's changes silently lost, non-atomic); ② `ssh host "sed -i ..."` (no dry-run, no rollback, line numbers brittle); ③ `ssh host "cat > file"` (concurrent overwrite, half-written file if the connection drops mid-write) | ✅ `remote_read` returns SHA-256 + per-range hashes; `remote_patch` checks the hashes → writes to `*.mcp_tmp.*` → atomic `posix_rename` → re-hashes after write. **Concurrent edits / interrupted writes / line-number drift all fail instead of silently corrupting** |
-| **File / directory transfer** | `scp` has no incremental skip and a single failure kills the batch; `rsync` is better but forks a new process per invocation, and **its progress never reaches the agent** — MCP clients drop the connection on idle timeout during long transfers | ✅ `remote_transfer` does size+mtime (or sha256) incremental skipping, **emits MCP progress as a keepalive against idle timeout**, lands per-file failures in `failed[]` without aborting the batch, and `paths_json` supports arbitrary local↔remote pair batches |
-| **sudo password ergonomics** | All options are bad: ① `ssh -t host sudo cmd` **prompts every time** — the agent can't drive it; ② `echo $PASS \| ssh host "sudo -S cmd"` — **password lands in the LLM context**; ③ `sshpass -p $PASS ssh ...` — **password ends up in `ps` argv and the LLM**; ④ NOPASSWD sudoers — give up on auth entirely | ✅ `remote_exec(use_sudo=True)`: password source is either ① `sudo_password_command` (pulled from `pass` / `op` / `bw` on demand, fully automatic) or ② `portal sudo set <host>` (user types it once in another terminal via `getpass`, stored in the systemd `--user` credential agent's in-memory TTL cache). **Password never reaches the LLM, never appears in `ps` argv, never hits disk** |
-| **Multi-host parallel execution** | `for h in $hosts; do ssh $h cmd; done` — **serial** startup (one fork+auth per host), no policy gate, a single failure depends on `set -e` or hand-rolled error handling | ✅ `remote_exec(host=[...])` runs in true parallel with a two-phase safety gate (check every host *first*, then execute); `serialize=True`+`delay_s` does a rolling rollout, and a `commands` sequence covers multi-step playbooks with `stop_on_error` |
-| **SSH tunnel lifecycle** | `ssh -L 8080:db:5432 host -fN` runs unsupervised — **no one tracks when to close it**, who opened it, or whether it's still alive; you need `pgrep` to find it | ✅ `remote_tunnel(action=open)` returns a `tunnel_id`, `action=list` enumerates live tunnels, `action=close` shuts one down; everything is auditable |
-| **Command audit** | None — you'd have to wrap shell history with `script(1)` or a custom logger; agent calls are invisible | ✅ State-changing tools first pass the `_gate` policy check (blocked → not executed, not logged), then write a structured line to `audit.jsonl` (host, operation, command, result, timestamp); audit-write failure is fail-closed by default (operation aborts), relax with `PORTAL_AUDIT_FAIL_OPEN=1` |
-| **Structured search** | `ssh host "grep -rn ... \| head"` returns **raw text the agent must parse**; degrades gracefully only if you remember to install rg | ✅ `remote_grep` / `remote_glob` prefer `rg --json`, fall back to `grep -rn` / `find` automatically, and return `{file, line, text}` structured output |
+| **SSH reuse · Linux/macOS** | OpenSSH `ControlMaster auto` + Unix socket; default `ControlPersist 10m`, master drops after timeout | asyncssh **in-process pool**, reused as long as the MCP server lives (hours) |
+| **SSH reuse · Windows** | ❌ **broken** — Microsoft's Win32-OpenSSH has had failing `ControlMaster` since v0.0.3.0 (`muxclient socket(): Unknown error`); [issue #405](https://github.com/PowerShell/Win32-OpenSSH/issues/405) open since 2017 (relies on Unix-domain-socket fd sharing, which Windows lacks) | ✅ **same performance as Linux** — the pool is a plain Python dict; asyncssh needs no OS-level socket sharing |
+| **First / subsequent command latency** | first ~200–500 ms; **without reuse every command is a new TCP+auth ~300 ms** (Windows default); ~10–30 ms subsequently with ControlMaster | first ~200–500 ms, **~10–30 ms subsequently (all three platforms)** — only a channel opens |
+| **Cross-"tool" reuse** | `ssh` and `scp` reuse requires identical `ControlPath` on both sides; in practice most projects don't share the master | ✅ all portal tools (bash / read / patch / transfer / tunnel …) naturally share one TCP |
+| **Persistent shell state** | each `ssh host cmd` is a fresh shell; `cd` / `export` / venv activation **all lost**; the agent must repeat `cd /path && source venv/bin/activate && …` every command | ✅ `remote_shell` keeps a sticky interactive shell (bash/zsh); cwd / env / venv persist across calls |
+| **Remote file editing (safe edit)** | all three are unsafe: ① `scp` down→edit→`scp` up (no concurrency detection, silent loss; non-atomic); ② `ssh host "sed -i …"` (no dry-run/rollback, error-prone line numbers); ③ `ssh host "cat > file"` (concurrent overwrite, half-file on disconnect) | ✅ `remote_read` returns SHA-256 + range hashes; `remote_patch` verifies → writes `*.mcp_tmp.*` → `posix_rename` (atomic) → re-hash. **Concurrent edit / mid-write disconnect / line drift all fail instead of corrupting** |
+| **File / directory transfer** | `scp` has no incrementals, one failure sinks the batch; `rsync` is better but forks per run, **can't report progress to the agent**, and a large transfer can hit the MCP client's idle timeout | ✅ `remote_transfer` incremental short-circuit (size+mtime or sha256), **MCP progress heartbeat against idle timeout**, per-file failure goes to `failed[]` without aborting, `paths_json` batches arbitrary local↔remote pairs |
+| **sudo password ergonomics** | all footguns: ① `ssh -t host sudo cmd` **prompts every time**; ② `echo $PASS \| ssh host "sudo -S cmd"` — **password enters the LLM context**; ③ `sshpass -p $PASS ssh …` — **password in `ps` argv and the LLM**; ④ NOPASSWD sudoers — auth abandoned | ✅ `remote_exec(use_sudo=True)`: source = ① `sudo_password_command` (pulled fresh from `pass` / `op` / `bw`, fully automatic) or ② `portal sudo set <host>` (a one-time no-echo `getpass` in another terminal → per-user credential-agent memory TTL). **Never in the LLM / ps argv / disk** |
+| **Multi-host parallelism** | `for h in $hosts; do ssh $h cmd; done` — **serial** startup (fork+auth each), no policy gate, one failure handled by `set -e` or the script | ✅ `remote_exec(host=[…])` true parallelism + two-phase gate (check all hosts, then execute), `serialize=True`+`delay_s` for rolling, `commands=[…]` for a sequence |
+| **SSH tunnel lifecycle** | `ssh -L 8080:db:5432 host -fN` runs away in the background — **nobody tracks when it closes**, who opened it, or if it's alive; you `pgrep` for it | ✅ `remote_tunnel(action=open)` returns a `tunnel_id`, `action=list` shows all live tunnels, `action=close` closes explicitly; audit-traceable |
+| **Command audit** | none — you'd wrap it yourself with `script(1)` / a shell-history wrapper; agent calls are invisible | ✅ state-changing tools pass the policy gate `_gate` first (denied = not run, no trace), then write structured `audit.jsonl` (host, operation, command, result, timestamp); a failed audit write is fail-closed by default (abort), relax with `PORTAL_AUDIT_FAIL_OPEN=1` |
+| **Structured search** | `ssh host "grep -rn … \| head"` returns **raw text the agent parses**; degrades if rg is absent | ✅ `remote_grep` / `remote_glob` prefer `rg --json`, auto-fallback to `grep -rn` / `find`; return `{file, line, text}` structured |
 
-> **Windows users, this matters**: the "SSH reuse · Windows" row above isn't a footnote — it's a **fundamental gap**. The default Windows OpenSSH client has no ControlMaster, so every remote command an agent issues pays the ~300 ms TCP+auth tax; fifty calls is fifteen seconds of pure overhead. portal-mcp-server is ~280 ms first call and ~20 ms thereafter on Windows, identical to Linux — which is why we recommend it over a `ssh` subprocess approach by default.
+> **Windows users take note**: the "SSH reuse · Windows" row is not a detail, it's
+> a **fundamental gap**. The default Windows OpenSSH client has no ControlMaster,
+> so the agent pays ~300 ms TCP+auth per remote command; 50 commands = 15 s of
+> pure overhead. On Windows portal-mcp-server is ~280 ms first, ~20 ms after —
+> identical to Linux — which is why we recommend it over the `ssh` subprocess
+> approach.
 
-## Quick start
+</details>
 
-```bash
-# 1. Register with Claude Code (see "Client integration" for other MCP hosts)
-claude mcp add portal -- uvx portal-mcp-server@latest
+### <a id="architecture"></a>Architecture
 
-# 2. Make sure the target host is in ~/.ssh/config or hosts.yaml
-#    (hosts.yaml defaults to ~/.config/portal-mcp-server/hosts.yaml;
-#     override with PORTAL_HOSTS_YAML — see "Environment variables")
+The MCP client connects to the server over stdio (or optional HTTP); the 14 tools
+pass the security gate + audit first, then SSH tools go through the in-process
+asyncssh connection pool (reusing one TCP across tools, multiple per host);
+`local_exec` / control-plane tools don't use SSH.
 
-# 3. Use it in an agent conversation
-#    "Show me the last 50 lines of /var/log/syslog on myhost"
-#    → agent calls remote_shell("myhost", "tail -50 /var/log/syslog")
-```
-
-No clone, no venv — `uvx` pulls and runs automatically. For developer setup see [Install](#install).
-
-## Architecture
+<details><summary>Expand the data-flow diagram</summary>
 
 ```
-┌──────────────┐    stdio / SSE     ┌─────────────────────────────────────┐
+┌──────────────┐    stdio / http    ┌─────────────────────────────────────┐
 │  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
 │ (Claude Code │                    │                                     │
 │  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
@@ -116,9 +159,9 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
                                     │                  └───────┬────────┘  │
                                     │                          │           │
                                     │              ┌───────────▼────────┐  │
-                                    │              │  asyncssh pool     │  │
-                                    │              │  (in-process,      │  │
-                                    │              │   cross-tool reuse)│  │
+                                    │              │  asyncssh pool      │  │
+                                    │              │  (in-process, one   │  │
+                                    │              │   TCP across tools) │  │
                                     │              └──┬──────┬──────┬──┘  │
                                     └─────────────────┼──────┼──────┼─────┘
                                                       │      │      │
@@ -128,372 +171,247 @@ No clone, no venv — `uvx` pulls and runs automatically. For developer setup se
                                               └─────────┘ └─────┘ └────────┘
 ```
 
-## Tools
+</details>
 
-14 tools. The keep/drop test: **only keep guarantees the agent can't cheaply synthesize itself** (concurrency, atomic/hash anti-conflict, no credential leakage, the security gate, real structured output); anything that "just packages a script/state" (playbook, ping, rolling-as-a-tool, standalone tmp cleanup) is deleted or folded into a primitive.
+### <a id="design-principles"></a>Design principles
 
-### Running commands: the exec family (pick by "stateful / local / sync vs async")
+The single criterion: **keep a tool only when it provides a guarantee bash can't
+cheaply synthesize**. Each principle below is collapsed; the heading is the point.
 
-| Tool | When to use it |
-|---|---|
-| `remote_exec` | **Default workhorse.** Stateless one-shot, result immediately (**split** stdout/stderr + exit code). `host` can be one host / a list / a `group_tag`; one `command` or a `commands` sequence; multi-host is parallel by default, `serialize=True` (+`delay_s`) does a rolling rollout; `use_sudo` / `secrets` inject credentials out-of-band. Reuses the connection pool — fast. |
-| `remote_shell` | Only when you need **cwd/env to persist across calls** (`cd`/`export`/venv) — one sticky interactive shell (bash/zsh) per host, with optional `commands=[…]` multi-step (state carried across steps). Output is the **combined** stream (a PTY merges stdout/stderr). Otherwise use `remote_exec` (faster, multi-host). |
-| `remote_job` | **Background** long tasks. `submit` returns a `job_id` instantly (remote `nohup` + tmp files, **keeps running even if the connection drops**), `poll` fetches incremental output / status, `cancel` kills, `list` lists. Job table is best-effort persisted, bounded, TTL-swept; the background path does **not** support sudo/secrets (use `remote_exec`). |
-| `local_exec` | Run on the **MCP server's own machine** (not over SSH). OFF by default — an off-target derivative of the project's remote-driving goal — so the operator must explicitly set `PORTAL_ALLOW_LOCAL_EXEC=1`. Only for tasks that genuinely belong on the server host. `use_sudo=True` runs it under local `sudo -S -k` (reserved `<local>` identity; password from `portal sudo set-local` or a top-level `<local>:` section's `sudo_password_command`), and may be combined with `secrets`. |
-| `remote_close` | Close a host's sticky `remote_shell` session (the next `remote_shell` reopens). Rarely needed — only to reset a dirtied session. |
+### Few, orthogonal tools
+<details><summary>Expand</summary>
 
-> **★ `use_sudo` and `secrets` can be combined** — both `remote_exec` (remote) and `local_exec` (local) support elevating privileges and injecting a secret in the same call; behavior is consistent across both paths.
+Anthropic's [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents)
+says plainly: "More tools don't always lead to better outcomes… Tools that
+merely wrap existing software functionality is a common error… Too many tools or
+overlapping tools can also distract agents from pursuing efficient strategies."
 
-> **★ Two layers of "reuse" — don't conflate them**: *connection reuse* = asyncssh's TCP/channel pool, shared by **every** tool, purely for **speed** (~280ms first connect, ~10-30ms per call after); *session reuse* = the one sticky interactive shell (bash/zsh) per host that only `remote_shell` uses, for **state continuity**. That shell session rides on a pooled channel; the two are orthogonal. And because the session is implicit plumbing, its state table lives in `inspect(view="sessions")` rather than carrying its own `list` the way tunnel/host/job do.
-
-### File editing / search / transfer
-
-| Tool | What the agent gets |
-|---|---|
-| `remote_read` / `remote_patch` | Read a remote file and get its SHA-256; patch uses `file_hash` + per-range hash to prevent concurrent overwrite, writes via tmp + `posix_rename` (atomic) and re-hashes after write. **After a successful patch it opportunistically sweeps orphan `*.mcp_tmp.*` files >1h old in the same directory** (free-riding the already-open SFTP session, fully exception-isolated so it never affects the patch result) — which is why there is no standalone cleanup tool. |
-| `remote_grep` | A faithful port of Claude Code's Grep: `output_mode=files_with_matches` (default, paths newest-first by mtime) / `content` (matching lines + optional context, `head_limit` caps the **total** line count, `offset` paginates) / `count`. Clear parameter names (`before_context`/`after_context`/`context`/`ignore_case` instead of CC's `-B`/`-A`/`-C`/`-i`), respects `.gitignore`, every result carries a `truncated` flag. **Don't run raw `rg` through `remote_exec`.** |
-| `remote_glob` | A faithful port of CC's Glob: `rg --files --no-ignore --sort modified -g`, **newest-first by mtime**, hard cap 100, with `truncated`, returns `{filenames, num_files, truncated, duration_ms}`. Does NOT respect `.gitignore` (CC Glob's default). **Don't run raw `find` through `remote_exec`.** |
-| `remote_transfer` | `direction=upload\|download\|sync\|mirror\|upload-list\|download-list`. Binary-safe SFTP; `sync` pushes a dir, `mirror` pulls one, `*-list` moves a batch of arbitrary local↔remote file pairs from `paths_json`, all skipping unchanged files by size+mtime (`checksum=True` switches to sha256); a single file's failure lands in `failed[]` without aborting the batch; big transfers use MCP progress as a keepalive against client idle timeouts. |
-
-### Resources (agent-managed, so `list` rides with the tool)
-
-| Tool | action / params | Purpose |
-|---|---|---|
-| `hosts` | `action=list\|register\|remove` | Host registry. `register` needs `name`+`host` — or just `name` (if `~/.ssh/config` has a matching Host alias, it's registered with `use_ssh_config` overlay). `tags` feed `remote_exec`'s `group_tag`. `list` also enumerates `Host` aliases from ssh config (resolving real `HostName`/`User`/`Port`); every entry carries a `source` field (`hosts.yaml`/`runtime`/`ssh-config`/`…+ssh-config`) and may carry per-host `warnings` (e.g. a hosts.yaml↔ssh-config conflict) — relay them to the user. **No password parameter.** |
-| `remote_tunnel` | `action=open\|close\|list`, `kind=local\|reverse\|socks` | Single-entry SSH tunnels (mirrors `hosts`). `action` picks the operation, `kind` the tunnel type. `open` goes through the host gate; `close` takes a `tunnel_id` (gated on the source host). |
-
-### Introspection / policy
-
-| Tool | view / params | Purpose |
-|---|---|---|
-| `policy_check` | `host`, optional `command` | Security-policy dry-run, doesn't execute. Returns `ALLOWED` / `BLOCKED: <reason>`. ⚠️ The default policy is **permissive** — `ALLOWED` only means "no rule currently blocks it", not "this is safe". |
-| `inspect` | `view=snapshot\|server\|sessions\|history\|stats\|policy` | The read-only introspection **hub**: server metadata + connection pool + bash sessions + audit stats + policy. **hosts/tunnels are NOT here** — they're resources, listed by `hosts(action=list)` / `remote_tunnel(action=list)`. The `sessions` view is plumbing diagnostics (the host→session_id sticky-session table). |
-
-### Which to use: a purpose-built tool vs `remote_exec`/`remote_shell`
-
-`remote_exec` can run anything, but **don't reach for a raw command when a purpose-built tool exists** — the specific tools either carry a safety guarantee or return structured output:
-
-| What you want to do | Use this (**not** a raw command) | Why |
-|---|---|---|
-| Read / edit a remote file | `remote_read` → `remote_patch` | SHA-256 + per-range hash against concurrent overwrite, atomic rename, post-write rehash |
-| Search content / find files | `remote_grep` / `remote_glob` | structured JSON + token guardrails; don't run raw `rg`/`find` through `remote_exec` |
-| Transfer files / sync dirs | `remote_transfer` | binary-safe SFTP + incremental skip + progress keepalive |
-| Run on many hosts | `remote_exec(host=[...])` / `group_tag=` | parallel / rolling + two-phase gating; a bash `for h; ssh $h` loop has no gate |
-| Open a tunnel | `remote_tunnel` | managed lifecycle, listable; a bash `ssh -L` runs away unsupervised |
-| Background a long task | `remote_job` | exposes state + hands back control, poll/cancel-able; a raw `nohup &` is lost once it detaches |
-
-Rule of thumb: **don't mix portal and bash `ssh`/`scp` in the same task**, or you bypass hash checking or break the sudo flow.
-
-### Agent-side conventions
-
-`portal-mcp-server` only provides tools — it does not enforce how the agent uses them. To make agent behaviour on top of these tools predictable and safe, recommend pinning the following rules in `AGENTS.md` / `CLAUDE.md` or your system prompt:
-
-- **Confirm the host alias first** — if the target host is not in `~/.ssh/config` or `hosts.yaml`, ask the user. Don't just register a new host.
-- **Writes go through read → patch** — call `remote_read` for `file_hash` (and `range_hash` per region), then `remote_patch` with the same hashes; on conflict, `remote_patch` returns the new hash — re-read and retry.
-- **Default sandbox is `/tmp/`** — writes default to remote `/tmp/`. Ask before touching `$HOME` or project source.
-- **Don't mix tools within one task** — pick portal (hash-protected, pool-reused) *or* `ssh`/`scp` from bash, not both. Mixing them bypasses hash checking or breaks sudo flows.
-- **Use the multi-host tool** — `remote_exec(host=[...])` / `group_tag=...`, not a bash loop of `ssh host1; ssh host2; …`.
-- **Sudo, three ways** — when sudo is needed: ① prefer a host-level `sudo_password_command` (pulled from a password manager, fully automatic); ② or have the user pre-seed the password with `portal sudo set <host>` into the per-user credential agent from another terminal, then `remote_exec(..., use_sudo=True)`; ③ for genuinely interactive prompts (password change, first-time TTY check), have the user run `ssh -t host sudo …`. If a password-auth host's sudo password is explicitly the same as its SSH login password, set `sudo_password_same_as_ssh: true` in `hosts.yaml`; after that, `portal ssh set <host>` also seeds the sudo cache. The default remains separate prompts. `use_sudo` runs a one-shot exec and does **not** inherit `cwd` / env from prior `remote_shell` calls.
-- **Edit root-owned files with `remote_patch(use_sudo=True)` / `remote_read(use_sudo=True)`** — plain SFTP writes as the login user and can't touch a root file. The `use_sudo` implementation: `sudo cat` to read (exact bytes, hash-valid), content staged over ordinary SFTP into the user's **private home** (not /tmp → no TOCTOU), then one sudo step (`cp` → temp beside the target → restore owner/group/mode → atomic rename). It keeps the patch's **full double-hash safety + atomicity and restores the original owner/mode**; the target must already exist; the result is flagged `high_risk`.
-- **For work that must survive the agent closing, use `remote_job`, not `remote_exec`** — this is the exec-vs-job **design distinction**: `remote_exec` / `remote_shell` are foreground/synchronous and run inside the server process, so when the agent (stdio client) stops the server dies with it and the in-flight command is cancelled; `remote_job` `nohup`s the command on the **remote** and persists `jobs.json` across restarts, so it keeps running after the agent stops and stays pollable/cancellable on reconnect. Foreground exec/transfer do not self-persist; an interrupted large upload is cheaply recovered by re-issuing it (`resume`, see `remote_transfer`).
-
-<details>
-<summary>📋 Full per-tool reference (signatures · return shapes · source map)</summary>
-
-> The model-visible signature of every tool (`ctx` is the MCP progress / keepalive context, injected by FastMCP on the async tools — it **never** appears in the schema below). Every host-targeting tool takes a `host`, resolved hosts.yaml / runtime registry → OpenSSH client config (reusing asyncssh's `SSHClientConfig`, Include-aware) — see [Environment variables → File paths](#file-paths). State-changing tools write to `audit.jsonl`; read-only tools (`remote_read` / `remote_grep` / `remote_glob` / `policy_check` / `inspect` and the read actions of `remote_tunnel` / `remote_job`) are **intentionally not audited**.
-
-### Running commands: the exec family
-
-| Tool | Signature | Return shape / key behavior |
-| --- | --- | --- |
-| `remote_exec` | `(host='' \| [host…], command='', commands=None, group_tag='', *, timeout, login=None, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` | Stateless one-shot over the connection pool. **Single host + single command → one dict** (**split** stdout/stderr + exit code); multiple hosts / a `commands` sequence → a **list** (a multi-command host carries `{host, results:[…]}`). `timeout` is **required** (no default; a value over the `PORTAL_MAX_TIMEOUT` ceiling is refused → use `remote_job`); `login` defaults to a login shell (`bash -lc`). Parallel / rolling fan-out and `use_sudo` / `secrets` semantics: see the tool list above and [Authentication](#authentication). |
-| `remote_shell` | `(host, command='', commands=None, stop_on_error=True, *, timeout)` | One persistent interactive shell per host. Single command → `{host, session_id, command, exit_code, output, duration_s}` (`output` is the PTY-merged stream, capped + flagged `truncated` when oversize); `commands=[…]` runs in the SAME session → `{host, session_id, results:[…], duration_s}`, stopping at the first failure with `stopped_at` when `stop_on_error`. A command wedged on an interactive prompt is auto-Ctrl-C'd → `exit_code:-1` + `error:"interactive_prompt_blocked"` + `session_preserved:true`. `timeout` is **required**. Boundary protocol: see **Design notes · Persistent shell sessions** below. |
-| `remote_job` | `(action=submit\|poll\|cancel\|list, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal=TERM\|KILL, use_sudo=False, secrets=None)` | `submit` returns a `job_id` instantly (remote `nohup` + tmp files, survives a dropped connection); `poll` pages on demand (`since=<offset>` returns only newer bytes, capped at `max_bytes` — default 64 KiB — with a `more` flag; or `tail=N`), base64-transferred + boundary-aware UTF-8 decoded; `cancel` signals it, `list` shows all. Job table is best-effort persisted across restarts, bounded, TTL-swept (`PORTAL_JOB_*`). `use_sudo` / `secrets` are **background-unsafe — passing them is rejected** with a redirect to `remote_exec`. |
-| `local_exec` | `(command, secrets=None, use_sudo=False, *, timeout)` | Runs on the **MCP server's own machine** (**not** over SSH); OFF by default unless `PORTAL_ALLOW_LOCAL_EXEC=1`. `timeout` is **required** (same `PORTAL_MAX_TIMEOUT` ceiling; over-ceiling is refused with no background fallback). `use_sudo=True` runs under local `sudo -S -k` with the reserved **`<local>`** identity (≠ the ordinary SSH host `local` / `localhost`; password from `portal sudo set-local` or a top-level `<local>:` section in hosts.yaml), may be combined with `secrets`, flags `high_risk`. |
-| `remote_close` | `(host)` | Close a host's cached `remote_shell` session (the next `remote_shell` reopens). Rarely needed — only to reset a dirtied session. |
-
-### File editing (hash-protected)
-
-| Tool | Signature | Return shape / key behavior |
-| --- | --- | --- |
-| `remote_read` | `(host, path, start=1, end=None, limit=None, encoding='utf-8', use_sudo=False)` | → `{content, file_hash, range_hash, start, end, total_lines, truncated}`; the two SHA-256 hashes are required by `remote_patch`. **Paged**: at most `limit` lines per call (default `PORTAL_READ_MAX_LINES=2000`) + `PORTAL_READ_MAX_BYTES` (default 16384) of content; a page cut short sets `truncated=true` and `next_start` gives the continuation line. Pages cut on line boundaries, so `range_hash` stays valid for a follow-up patch. `use_sudo=True` reads a root-only (600) file via `sudo cat`, preserving exact bytes (hash stays valid); flags `high_risk`. |
-| `remote_patch` | `(host, path, file_hash, patches_json, encoding='utf-8', auto_newline=False, use_sudo=False)` | Hash-protected line-range patch: if the file changed since `remote_read` it's rejected (returns `current_file_hash`) and left untouched; patches apply bottom-to-top, overlap is rejected, writes go through `*.mcp_tmp.<12hex>` + `posix_rename` (atomic) and re-hash after write. After a successful write it opportunistically sweeps orphan tmp files >1h old in the same dir (free-riding the open SFTP session, isolated; swept paths under an optional `swept` key). `use_sudo=True` edits a root-owned file: `sudo cat` read + SFTP-stage into the user's private home + one sudo step (`cp` → temp beside target → restore owner/group/mode → atomic rename), keeping the same hash safety + atomicity; target must pre-exist; flags `high_risk`. `patches_json` = `[{"start":int,"end":int\|null,"contents":str,"range_hash":str}, …]`. |
-
-### Remote search (Claude-Code-faithful)
-
-| Tool | Signature | Return shape / key behavior |
-| --- | --- | --- |
-| `remote_grep` | `(host, pattern, path='.', glob='', file_type='', output_mode=files_with_matches\|content\|count, ignore_case=False, before_context=0, after_context=0, context=0, head_limit=250, offset=0, multiline=False)` | Regex content search (`rg`, fallback `grep`). `output_mode`: `files_with_matches` (default, paths newest-first) / `content` (matching lines + optional context, `head_limit` caps the **total** line count, `offset` paginates) / `count`. Respects `.gitignore`, every result carries `truncated`. Clear parameter names instead of CC's `-A`/`-B`/`-C`/`-i`. |
-| `remote_glob` | `(host, pattern, path='.')` | Find files by glob, `rg --files --no-ignore --sort modified -g`, **newest-first**, hard cap 100 + `truncated` → `{filenames, num_files, truncated, duration_ms}`. Does NOT respect `.gitignore` (matches CC Glob). |
-
-### File transfer (SFTP)
-
-| Tool | Signature | Return shape / key behavior |
-| --- | --- | --- |
-| `remote_transfer` | `(direction=upload\|download\|sync\|mirror\|upload-list\|download-list, host, local_path, remote_path, checksum=False, paths_json='', resume=True)` | Binary-safe, atomic SFTP. Single-file modes (`upload`/`download`) → `{status, direction, host, bytes, duration_s, …}`; incremental modes (`sync` pushes a dir / `mirror` pulls one / `*-list`) skip files matching size+mtime (`checksum=True` switches to sha256) → `{status, uploaded\|downloaded, skipped, failed[], bytes_total, bytes_transferred, duration_s}`, a single file's failure landing in `failed[]` without aborting. **upload resume** (`resume=True`, default): when a smaller partial exists remotely, only the missing tail is appended, then the whole file's sha256 is verified and re-uploaded fresh once on mismatch (`resumed`/`restarted_after_mismatch` in the result); `resume=False` forces a fresh overwrite. `*-list` needs `paths_json` = `[{"local":…,"remote":…}, …]`; copies regular files only. |
-
-### Resources (agent-managed)
-
-| Tool | Signature | Return shape / key behavior |
-| --- | --- | --- |
-| `remote_tunnel` | `(action=open\|close\|list, kind=local\|reverse\|socks, host='', tunnel_id='', local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` | `open` opens a tunnel through `host`: `local` forwards `localhost:local_port → remote_host:remote_port`, `reverse` exposes `local_bind:local_port` as `host:remote_port`, `socks` is a SOCKS5 proxy. `close` by `tunnel_id` (gated on the source host); `list` shows all active tunnels. |
-| `hosts` | `(action=list\|register\|remove, name='', host='', user='root', port=22, key_path='', tags='')` | Runtime host registry. `register` needs `name`+`host` — or just `name` (if `~/.ssh/config` has a matching `Host` alias it auto-registers a `use_ssh_config` overlay). `tags` (comma-separated) feed `group_tag`. `list` also enumerates ssh-config aliases (resolving real `HostName`/`User`/`Port`), each entry carrying a `source` (`hosts.yaml`/`runtime`/`ssh-config`/`…+ssh-config`) + optional per-host `warnings` — relay them to the user. **No password parameter.** |
-
-### Introspection & policy
-
-| Tool | Signature | Return shape / key behavior |
-| --- | --- | --- |
-| `policy_check` | `(host, command='')` | Security-policy dry-run, doesn't execute → `"ALLOWED"` or `"BLOCKED: <reason>"`. ⚠️ The default policy is **permissive** — `ALLOWED` only means "no rule currently blocks it", not "this is safe". |
-| `inspect` | `(view=snapshot\|server\|sessions\|history\|stats\|policy, limit=50, host_filter='')` | Read-only introspection of server **plumbing** + history. `snapshot` (metadata + pool + bash sessions + audit stats + policy) / `server` (version / metadata only) / `sessions` (the `host→session_id` map of persistent bash sessions) / `history` (last `limit` entries, filterable) / `stats` (counts by operation) / `policy`. **hosts / tunnels are NOT here** — they're resources, listed by `hosts` / `remote_tunnel`'s own `list`. |
-
-> **Credential CLIs (out-of-band, not MCP tools).** The agent never sees a credential value. Passwords / passphrases / secrets are provisioned by a human in a separate terminal with `portal {ssh,sudo,passphrase,secret} set` and held by a per-user agent; `show` / `list` return a sha256[:16] fingerprint + TTL, `confirm` re-prompts and compares. Full mechanism, cross-platform auto-install and the "plaintext never leaves the agent" principle: see [Authentication](#authentication) and [Credential agent](#credential-agent-linux-systemd--macos-launchd--windows-scheduled-task).
-
-### Source map
-
-| Module | Tools / responsibility |
-| --- | --- |
-| `connection_manager.py` | connection pool + host registry shared by every tool |
-| `shell_engine.py` | `remote_exec` (one-shot `ssh_exec`) |
-| `remote_bash.py` | `remote_shell` / `remote_close` + the one-shot sudo/secrets paths |
-| `session_manager.py` | persistent interactive-shell sessions (bash/zsh; cwd/env, exit codes, OSC 133 boundary protocol, soft-cancel) |
-| `job_manager.py` | `remote_job` (background submit/poll/cancel/list) |
-| `local_exec.py` | `local_exec` |
-| `remote_text_editor.py` | `remote_read`, `remote_patch` (+ orphan tmp sweep) |
-| `remote_search.py` | `remote_grep`, `remote_glob` |
-| `file_ops.py` | `remote_transfer` |
-| `network_tools.py` | `remote_tunnel` |
-| `credential_agent.py` | the per-user socket-activated TTL cache for `portal {ssh,sudo,secret} set` |
-| `ssh_creds.py` / `sudo_creds.py` / `secrets_store.py` | credential resolution + output redaction |
-| `security.py` | `_gate()` / `_gate_exec()` policy gates |
-| `audit.py` | `audit_log()` writes + `inspect` introspection |
+Accordingly the surface is a small, orthogonal set of primitives. Anything a
+one-line bash could do, or that overlaps another tool, is not its own tool —
+it's covered by `remote_shell` (persistent bash session) + `remote_exec`
+(one-shot, incl. multi-host fanout / sudo / secrets). Each surviving tool holds
+one such guarantee: `remote_read`+`remote_patch` (double hash vs. bare
+`cat`/`sed`/`>`), `remote_grep`/`remote_glob` (structured output, `rg --json`
+first, fallback `grep`/`find`), `remote_shell`/`remote_exec` (persistent shell +
+exit code; true parallel fanout + two-phase gate + no credential leak),
+`remote_transfer` (incremental short-circuit + progress heartbeat + per-file
+tolerance), `remote_job` (background submit/poll/cancel/list), and
+`remote_tunnel`/`hosts`/`inspect` (merge multiple actions of one resource into an
+`action`/`view` field). All dispatch params are `typing.Literal` (schema-level
+`enum`), so the agent needn't choose among overlapping tools. Tool schemas total
+about **~9k tokens** (`tiktoken o200k_base` ~8.8k, ~4–5% of a 200k window).
 
 </details>
 
-<details>
-<summary>🔀 Migrating from old tool names</summary>
+### <a id="step-wise-exec"></a>Step-wise & interruptible execution
+<details><summary>Expand</summary>
 
-> **From v4: all tools drop the `portal_` prefix** — remote-acting tools take a `remote_` prefix (`remote_exec` / `remote_shell` / `remote_read` / `remote_patch` / `remote_grep` / `remote_glob` / `remote_transfer` / `remote_tunnel` / `remote_job` / `remote_close`), local execution is `local_exec`, and the control-plane tools are `portal_host→hosts` / `portal_check→policy_check` / `portal_audit→inspect`. Clients already namespace tools by the config key (`portal-remote_exec`), so a `portal_` prefix on the name is redundant stutter; see [ADR-0001](./docs/adr/0001-tool-naming-scheme.md). The table below additionally covers the older `portal_bash`-era migration (merged / deleted tools):
+`remote_exec` / `remote_shell` are **single-step** primitives: one call = one
+decidable step. Read the *real* stdout / stderr / exit code, reconcile with
+expectations (an exit-0 step can still be wrong), then decide the next call — so
+the agent stays in the loop and can correct on error.
 
-| Old | New |
-|---|---|
-| `portal_bash(host, cmd)` | `remote_shell(host, cmd)` (persistent session) or `remote_exec(host, cmd)` (one-shot, faster) |
-| `portal_bash(..., use_sudo=True / secrets=[…])` | `remote_exec(..., use_sudo=True / secrets=[…])` |
-| `portal_bash_close` | `remote_close` |
-| `portal_multi_exec(mode=parallel, hosts_json=…)` | `remote_exec(host=[…])` |
-| `portal_multi_exec(mode=rolling, …)` | `remote_exec(host=[…], serialize=True, delay_s=N)` |
-| `portal_multi_exec(mode=broadcast, commands_json=…)` | `remote_exec(host=[…], commands=[…])` |
-| `portal_playbook(host=…/group_tag=…)` | `remote_exec(host=…/group_tag=…, commands=[…])` |
-| `portal_ping(hosts_json=…)` | `remote_exec(host=[…], command="echo pong")` |
-| `portal_tunnel_open/_close/_list` | `remote_tunnel(action=open\|close\|list, kind=…)` |
-| `portal_cleanup_tmps` | removed — `remote_patch` sweeps same-directory orphan tmps on success |
-| `portal_bash_status` | `inspect(view="sessions")` |
-| — | **new** `remote_job(action=submit\|poll\|cancel\|list)` for background tasks |
+- `commands=[…]` packs several commands into **one** call; the agent sees no
+  intermediate output, so it's only for fixed, dependency-free batches that need
+  no mid-inspection. Likewise don't bury a long branchy flow in one `a && b && c`.
+- Foreground `timeout` is **mandatory** (no default), forcing the agent to think
+  about "how long should this take" — small values (10–30 s) for exploratory /
+  re-runnable commands.
+- Foreground timeout is also capped by `PORTAL_MAX_TIMEOUT` (default 300 s); over
+  the cap is refused — **truly long unattended work goes to the background
+  `remote_job`** (instant submit, poll/cancel, survives disconnect).
 
 </details>
 
-## Design notes
+### <a id="connection-pool"></a>In-process connection pool
+<details><summary>Expand</summary>
 
-### Tool consolidation: few and orthogonal
+The server keeps an asyncssh connection pool inside its own process — every tool
+call shares one TCP. **All but the first connection amortize to channel creation
+(~10–30 ms).**
 
-Anthropic's [_Writing Tools for Agents_](https://www.anthropic.com/engineering/writing-tools-for-agents) is explicit:
+- **Pool shape**: `PORTAL_SSH_POOL_SIZE` caps TCP connections per host (default
+  5), `PORTAL_SSH_MAX_CHANNELS_PER_CONN` caps channels per TCP (default 5); over
+  that opens a new TCP, and beyond the pool it reuses the least-busy connection
+  with a warning. asyncio supports true concurrency of many channels on one TCP.
+- **Idle & aging**: `PORTAL_SSH_MAX_IDLE_TIME` default 600 s, `PORTAL_SSH_MAX_CONN_AGE`
+  default 3600 s; idle/aged connections with no active channel are closed to
+  avoid silent NAT/firewall drops.
+- **Micro-benchmark (sanitized)**: same LAN (<1 ms RTT), 100× `echo pong` — plain
+  ssh + ControlMaster ~23 ms avg; portal via `remote_shell` ~18 ms avg. First
+  connect ~280 ms both (auth dominates).
+- **On Windows**: plain ssh is ~300 ms × N (no reuse); portal is ~280 ms first,
+  ~20 ms after — asyncssh is pure Python, the pool lives in process memory, no
+  OS-level socket sharing (exactly where Windows OpenSSH ControlMaster fails).
 
-> "More tools don't always lead to better outcomes... Tools that merely wrap existing software functionality is a common error... Too many tools or overlapping tools can also distract agents from pursuing efficient strategies."
+</details>
 
-So portal-mcp-server collapses the tool surface to a **few orthogonal** primitives. The test is a single one: **a tool is kept only when it provides a guarantee bash can't cheaply synthesize** (concurrency safety, atomic / hash-protected writes, credential non-leakage, the security gate, real structured output). Anything that's just a one-line bash wrapper with overlapping semantics gets no tool of its own — it's covered by `remote_shell` (a persistent bash session) and `remote_exec` (one-shot, incl. multi-host fan-out / sudo / secrets). Each remaining tool holds exactly one such guarantee:
+### Persistent shell sessions & command boundaries
+<details><summary>Expand</summary>
 
-| Tool surface | The "bash can't cheaply synthesize this" guarantee |
-|---|---|
-| `remote_read` + `remote_patch` | Whole-file SHA-256 + per-range hashes, replacing the concurrent-overwrite and mid-stream-disconnect holes of raw `cat` / `sed` / `> file` |
-| `remote_grep` / `remote_glob` | Structured output faithfully ported from Claude Code's search schema (`rg --json` first, auto-fallback to `grep` / `find`) — the agent never parses raw text |
-| `remote_shell`(`_close`) / `remote_exec` | Persistent shell + exit codes; one-shot + true parallel multi-host fan-out + a two-phase security gate + credential non-leakage |
-| `remote_transfer` | SFTP incremental short-circuit (size+mtime or sha256) + progress heartbeat against idle timeouts + per-file fault tolerance |
-| `remote_job` | Background submit/poll/cancel/list — giving the agent the ability to background work, think, and interrupt at will |
-| `remote_tunnel` / `hosts` / `inspect` | An `action` / `view` field folds a resource's several actions into one tool instead of one tool per action |
+`remote_shell` gives the agent one per-host, cross-command `bash -i` / `zsh -i` —
+cwd, env and shell functions persist automatically (same underlying process).
+This is a second layer of reuse on top of the connection pool: the pool reuses
+TCP channels for **speed**, the persistent session reuses one interactive shell
+for **state continuity**.
 
-All dispatch parameters (`action` / `view` / `output_mode` / ...) are annotated with `typing.Literal`, so the schema carries `enum` and clients can validate — the agent never has to disambiguate between semantically overlapping tools. **Tool-schema context footprint**: the tools' name + description + inputSchema total **~8k tokens** (`tiktoken o200k_base` estimate, ≈ **4%** of a 200k context window; the descriptions carry sudo / secrets / safety-convention guardrail prose, so they run thick).
+The hard part: one `bash -i` runs many commands on the **same** SSH channel, and
+SSH reports the exit code only when the channel **closes**. To get each command's
+`$?` without tearing down the channel (which would lose cwd/env), we mark command
+boundaries. The old approach was an in-band sentinel (append `echo <sentinel>:$?`
+and scan stdout), which mixes control into the data stream and is fragile at the
+root.
 
-### In-process connection pool
+The current approach borrows **OSC 133 (FinalTerm) shell integration** (used by
+iTerm2 / VS Code / Kitty / WezTerm): the **shell itself emits** command
+boundaries. On first use a small integration script is injected via stdin
+(**stdin only, never on disk**), hooking `PROMPT_COMMAND` / `precmd` to print
+`\x1b]133;D;<exit>\x07` after each command; we degrade to a **pure parser**. The
+sequence starts with an ESC byte, so ordinary text — **even literally
+`]133;D;0`** — can't forge it; `$?` is read straight from the marker, and the
+whole class of sentinel fragility disappears.
 
-portal-mcp-server runs an asyncssh connection pool inside its own server process. Every tool invocation (`remote_shell`, `remote_read`, `remote_transfer`, …) shares the same TCP. **Everything except the first connect amortises down to channel creation (~10–30 ms).** The full comparison against `ControlMaster` / Windows OpenSSH / `ssh`↔`scp` reuse / persistent shell / cross-platform behaviour is already laid out in [§ Why portal-mcp-server vs. plain SSH](#why-portal-mcp-server-vs-plain-ssh) above; below are just the mechanism-level details:
+Two capabilities come free: a command wedged on an interactive prompt (sudo / ssh
+first-connect / `mysql -p` / gpg passphrase) is **auto-Ctrl-C'd with the session
+preserved** (soft-cancel); a foreground timeout likewise Ctrl-C's and resyncs,
+keeping the session if a clean prompt returns and dropping it otherwise. The
+one-shot `remote_exec` path opens a fresh channel per command and reads the
+native exit code from asyncssh, so it's immune to all of this.
 
-- **Pool shape**: `PORTAL_SSH_POOL_SIZE` caps TCP connections per host (default 5); `PORTAL_SSH_MAX_CHANNELS_PER_CONN` caps channels per TCP (default 5). When all connections hit the channel ceiling, the least-loaded one is reused with a warning. asyncio gives **true multi-channel parallelism over a single TCP**, unlike plain ssh where each parallel command requires a separate ssh process (fork + auth per channel).
-- **Idle / age**: `PORTAL_SSH_MAX_IDLE_TIME` defaults to 600 s, `PORTAL_SSH_MAX_CONN_AGE` defaults to 3600 s — idle-expired or aged-out connections close once they have no active channels, guarding against silent NAT / firewall drops.
-- **Long-session stability**: pool connections live as long as the MCP server (typically hours), not the 10-minute `ControlPersist` default — fewer reconnect spikes inside long sessions.
-- **Anonymised microbenchmark**: same LAN (< 1 ms RTT), 100× `echo pong`. Plain ssh + ControlMaster averaged 23 ms/call; portal-mcp-server through `remote_shell` averaged 18 ms/call (no ssh client process startup). First connect ~280 ms on both (auth dominated).
-- **What this looks like on Windows**: plain ssh pays ~300 ms × N (no reuse — and the experimental named-pipe fallback is also unreliable); portal-mcp-server is ~280 ms for the first call and ~20 ms thereafter, dropping to the channel-creation floor — because asyncssh is pure Python and the pool lives in the MCP server's own memory with zero OS-level socket-sharing dependency (which is exactly where Windows OpenSSH's ControlMaster falls over).
+> **Real-machine spikes** (recorded in `session_manager.py`): the shell must use
+> `--noprofile --norc` / `--no-rcs`, or a user rc overwrites the hook; **zsh must
+> `unsetopt zle`** (ZLE ignores `stty -echo` and leaks the command line); multi-line
+> commands are wrapped in `{ … }` so an interactive shell fires one marker per
+> top-level input line; fish is not verified and falls back to bash.
 
-### Persistent shell sessions: command boundaries borrowed from OSC 133 (the iTerm2 / VS Code scheme)
+</details>
 
-`remote_shell` hands the agent a **per-host, cross-call-persistent** `bash -i` / `zsh -i` — cwd, env, and shell functions survive between calls automatically (it's literally the same process). This is the **second layer of reuse** beyond the connection pool above: the pool reuses TCP channels for **speed**, the persistent session reuses one interactive shell for **state continuity** (the ★ note in the tool list above calls these two layers out explicitly as "don't conflate them").
+### Choosing asyncssh over subprocess
+<details><summary>Expand</summary>
 
-The catch: one `bash -i` runs many commands over **a single SSH channel**, and SSH only reports an exit status when the channel **closes**. To recover each command's `$?` without tearing the channel down (which would lose cwd/env), we have to draw the command boundaries ourselves. The old way was an in-band sentinel (`echo <sentinel>:$?` after each command, then scan stdout) — mixing a control signal into the data stream, fragile at the root (details below).
+[asyncssh](https://github.com/ronf/asyncssh) (EPL-2.0 / GPL-2.0 dual-licensed) is
+an independent pure-Python SSHv2 implementation, protocol-equivalent to OpenSSH.
+Choosing it over shelling out to `ssh`/`scp` is what makes the in-process pool,
+cross-tool channel reuse, the no-argv-password credential path, and identical
+Windows performance possible — a shelled-out subprocess shares none of them (see
+[Credential unification](#credential-unification)).
 
-**The current design borrows OSC 133 (FinalTerm) Shell Integration — the scheme iTerm2 / VS Code's integrated terminal / Kitty / WezTerm use**: let the **shell itself emit the command boundary**. On first use a tiny integration script is injected over stdin (**stdin only, never written to disk**), registering a `PROMPT_COMMAND` / `precmd` hook that prints `\x1b]133;D;<exit>\x07` after every command; we collapse to a **pure parser**. The sequence starts with an ESC byte, so ordinary text — **even output that literally spells `]133;D;0`** — can't forge it, `$?` is read straight from the marker, and the whole class of sentinel fragilities disappears at the root.
+</details>
 
-Two capabilities come for free: a command wedged on an interactive prompt (sudo / ssh first-connect / `mysql -p` / gpg passphrase) is **auto-Ctrl-C'd and the session kept** (soft-cancel — cwd/env survive, the next command runs immediately), while the one-shot path `remote_exec` is untouched (it opens a fresh channel per command and gets a native exit code straight from asyncssh).
+### <a id="credential-unification"></a>One in-process auth path
+<details><summary>Expand</summary>
 
-> **Why the old sentinel was fragile at the root** (the motivation to drop it): ① `sudo` (or anything that grabs stdin) **swallows the sentinel as a bogus password** and the command hangs until `timeout` (default 3600 s); ② large output bloats an unbounded buffer; ③ a command whose stdout literally contains the sentinel string is mistaken for completion. An ESC-led OSC 133 marker kills all three at once.
+Every credential kind — SSH key, login password, key passphrase, sudo password,
+named secret — is resolved on one in-process asyncssh path and handed only to its
+real consumer (the handshake, `sudo -S` stdin, an injected env var); plaintext
+never reaches the agent conversation, argv/`ps`, or disk.
 
-> **Pitfalls surfaced by real-hardware spikes** (all recorded in `session_manager.py`, commits `466108b` / `46b1440`): the shell must start `--noprofile --norc` / `--no-rcs`, or a user's rc clobbers the hook and silently breaks the protocol; **zsh needs `unsetopt zle`** — the ZLE line editor echoes the command line back regardless of `stty -echo`, leaking command text into the output (only zsh 5.9 tripped this on real hardware; bash's readline honours `stty -echo`, so bash was clean from the start); **multi-line commands are wrapped in `{ … }`** — an interactive shell fires the marker once per top-level input line, so without wrapping a multi-line command emits one D per line and desyncs later calls, and it's a brace group rather than a `( … )` subshell so `cd`/`export` persist; **fish is deferred** — `fish_postexec` wasn't validated on real hardware, so fish falls back to bash.
+The trade-off: treat credential unification as an inviolable invariant —
+"survive the agent stopping" goes to `remote_job` (the command is `nohup`-ed on
+the **remote** host, so the credential was already consumed at connect time and no
+local child holds it), and an interrupted foreground transfer recovers via
+`remote_transfer`'s `resume`, neither of which forks a credential-diverging
+subprocess. Full rationale and rejected options in [ADR-0003](./docs/adr/0003-credential-unification.en.md).
 
-### Stack choice: asyncssh, not subprocess-wrapped OpenSSH
+</details>
 
-[asyncssh](https://github.com/ronf/asyncssh) (EPL-2.0 / GPL-2.0 dual-licensed) is an **independent pure-Python SSHv2 implementation**, protocol-equivalent to OpenSSH:
+### Feedback channel: warnings ride the tool result
+<details><summary>Expand</summary>
 
-- **One process, many connections, many sessions per connection** — the pool is a Python dict; no process boundaries, no fd sharing required. That's also why portal gets the same reuse performance on Windows as on Linux (the OpenSSH master/child model just doesn't work on Windows).
-- **Full protocol coverage** — local/remote/dynamic port forwarding, SFTP, SCP, X11 forwarding, TUN/TAP — anything OpenSSH does at the protocol layer, asyncssh does too.
-- **OpenSSH-compatible** — natively parses `~/.ssh/config`, `known_hosts`, `authorized_keys`, ssh-agent / Pageant. portal's host-alias detection and the ssh-config enumeration behind `hosts(action=list)` are built **directly on asyncssh's `SSHClientConfig` parser** (Include-aware, cross-platform), not a hand-rolled scanner.
-- **Only depends on PyCA `cryptography`** — install Python and you're done; no C deps, no OS-specific IPC.
+A stdio MCP server's stderr is invisible to the user, so operationally important
+warnings (misconfigured yaml, missing credentials, ignored fields, host conflicts)
+are collected server-side and returned on `hosts(action="list")` rather than only
+logged. The agent is expected to relay them to the user.
 
-Versus "shell out to `ssh` / `scp`": no ~50–100 ms fork per command, no need to coordinate SSH reuse across OS processes (the root cause of the Windows ControlMaster failure), and error handling / retries / timeouts are first-class Python async primitives rather than stderr-string parsing.
+</details>
 
-### Feedback channel: warnings ride tool results, not stderr
+<details><summary>Maintainer boundaries & footguns</summary>
 
-Every runtime warning or error a **user needs to see** is emitted inside the tool result returned to the agent — never relied on landing in `stderr` or a server log file. This isn't an aesthetic choice; it's forced by how MCP clients actually treat the protocol's diagnostic channels.
+- **exec-output-strip vs. file-read-must-not-strip**: one-shot exec strips
+  trailing newlines (shell convention), but `remote_read` must preserve bytes
+  exactly (the hash depends on it) — don't unify them.
+- **ssh_config merge internals**: to inherit an alias's long-tail options you must
+  connect with `host=<alias>`, which pins `HostName`; see [ADR-0002](./docs/adr/0002-ssh-config-merge.en.md).
+- **sudo write preserves owner/mode**: the sudo patch path stats and restores
+  owner:group:mode; the staged plaintext copy is created `0600` and removed even
+  on failure.
 
-**Protocol layer** — [MCP 2025-06-18 spec · transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports#stdio):
+</details>
 
-> The server **MAY** write UTF-8 strings to its standard error (`stderr`) for logging purposes. **Clients MAY capture, forward, or ignore this logging.**
+## <a id="install"></a>Install
 
-The second candidate, `notifications/message` ([logging capability](https://modelcontextprotocol.io/specification/2025-06-18/server/utilities/logging)), is equally permissive: *"Implementations are free to expose logging through any interface pattern that suits their needs—the protocol itself does not mandate any specific user interaction model."*
+portal-mcp-server is installed like any other MCP server — register it with your
+MCP client (see [modelcontextprotocol.io](https://modelcontextprotocol.io/) for
+what MCP is). It needs **no clone and no persistent install**: the client launches
+it straight from PyPI via [`uv`](https://docs.astral.sh/uv/)'s `uvx`, caching
+dependencies on first run and starting in seconds afterward.
 
-**What major clients actually do**:
+If you don't have `uv`, install it (`curl -LsSf https://astral.sh/uv/install.sh | sh`;
+Windows: [uv install docs](https://docs.astral.sh/uv/getting-started/installation/)).
+How to enter `uvx portal-mcp-server@latest` per client is in
+[Client integration](#client-integration).
 
-| Client | Where server stderr goes | User-visible? |
-|---|---|---|
-| Claude Desktop ([docs](https://modelcontextprotocol.io/docs/develop/connect-local-servers#getting-logs-from-claude-desktop)) | Written to `~/Library/Logs/Claude/mcp-server-<name>.log` | ❌ No in-app indicator; user must `tail -f` the log file |
-| Claude Code ([docs](https://docs.anthropic.com/en/docs/claude-code/debug-your-config#check-mcp-servers)) | Discarded by default; official advice: *"run `claude --debug mcp` to see the server's stderr output"* | ❌ Only after a debug-mode relaunch |
-| Generic Python MCP SDK client | `errlog: TextIO = sys.stderr` — forwarded to the client process's own stderr | Depends on whatever the client process does with its own stderr |
+Fastest start (Claude Code shown; other clients under [Client integration](#client-integration)):
 
-**The only reliable feedback paths** are the tool result `content` array (the agent always reads it) and JSON-RPC error responses (most clients surface them). So:
+```bash
+# 1. Register (--scope user applies to all repos)
+claude mcp add --scope user portal -- uvx portal-mcp-server@latest
+# 2. Make sure the target host is in ~/.ssh/config or hosts.yaml
+# 3. In chat, say "show the last 50 lines of /var/log/syslog on myhost";
+#    the agent calls remote_exec("myhost", "tail -50 /var/log/syslog", timeout=30)
+```
 
-- **Important warnings** (misconfigured yaml, missing credentials, ignored fields, …) → collected into the server's `_config_warnings` set and attached to the return value of `hosts(action="list")` (see `connection_manager.py`)
-- **Fatal config errors** → raised inline in the relevant tool result, not just logged at server startup
-- **Info-level stderr** → only useful for the server author at debug time; never assumed to reach the user
-- **Audit log** → written to `$XDG_STATE_HOME/portal-mcp-server/log/` ([XDG Base Directory Spec](https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html) explicitly places "logs, history" in the state-home tier — persistent but non-critical state); for ops review and post-hoc audit, never assumed to be read live
+### Terminal users (use the MCP server, don't touch source)
 
-The rule cuts the other way too: **anything the user should know but the server cannot raise immediately** must be attached to the next relevant tool call's return value. A bare `logger.error()` is a dead letter.
-
-### Internal boundaries / maintainer footguns
-
-A few internal invariants that are easy to "helpfully" break later:
-
-- **Exec output is newline-stripped — don't reuse it to read a file.** `remote_sudo_exec` / `remote_exec_with_env` (`remote_bash.py`) `rstrip("\n")` their stdout/stderr. That's correct for *running commands* (mirrors the shell's `$(cmd)`, gives the agent clean output) but **lossy for file content**: once trailing newlines are gone the bytes aren't exact and `remote_read`/`remote_patch`'s SHA-256 precondition won't match. So the `use_sudo` file read goes through a separate `remote_text_editor._sudo_cat` (`cat`, **no** strip). Both share one low-level primitive, `remote_bash._run_sudo_raw` (runs `sudo -S -k -p '' <cmd>`, password on stdin, returns the **raw** result), and **whether to strip is decided at the call site**: exec strips, read never does. Preserve that boundary when touching this code. The read command is `cat` (`_sudo_cat`'s `read_cmd` arg can swap to `base64` + local decode if byte-exact binary reads are ever needed).
-- **Why the ssh_config merge is opt-in + HostName-guarded.** asyncssh matches the ssh_config `Host` stanza against the host you actually connect to (`config.py`), each option resolved as "explicit kwarg else config". To inherit an alias's long-tail options (`IdentityAgent` / `ProxyJump` / …) you must connect with `host=<alias>`, which pins `HostName` to ssh_config's value — hosts.yaml's `host:` can't override it (other fields can). "Inherit the alias's options *and* use hosts.yaml's address" is inherently impossible in a single connect, which is exactly why the merge is **opt-in (`use_ssh_config: true`) + hard-errors on a HostName disagreement** rather than a silent default merge. See [ADR-0001](./docs/adr/0001-tool-naming-scheme.md) and `CONTEXT.md`.
-- **sudo placement preserves the original owner/mode.** When `remote_patch(use_sudo=True)` writes a root file it first `sudo stat`s the original `owner:group:mode` and the placement script `cp → temp-beside → chown → chmod → mv` restores each — don't simplify to "just land it root:root with default perms", which would silently rewrite the ownership/permissions of files under `/etc`.
-
-## Install
-
-Two paths depending on what you're doing.
-
-### End user (use the MCP server, never touch the source)
-
-No clone needed — let your MCP client launch it via `uvx` straight from PyPI. See [Client integration](#client-integration). `uvx` caches deps on first run; subsequent restarts are instant.
-
-Manual smoke test in a shell:
+No clone needed — let the client pull and run via `uvx` (see
+[Client integration](#client-integration)). Manual smoke test:
 
 ```bash
 uvx portal-mcp-server@latest --help
 ```
 
-### Developer (will modify code or run tests)
+### Developers (change code / run tests)
 
-Recommended: `uv sync` will set up `.venv` from `pyproject.toml` + `uv.lock` in one shot:
+<details><summary>Expand the dev setup</summary>
 
 ```bash
 git clone git@github.com:TMYTiMidlY/portal-mcp-server.git
 cd portal-mcp-server
 uv sync --all-extras
 source .venv/bin/activate
-pytest                        # should be all green (live SSH tests skip by default)
+pytest                              # all green (live SSH tests skip by default)
+uv tool install --force --editable .   # run this checkout as the MCP server (edits apply live)
 ```
 
-To point an MCP client at this local checkout, install it as a fixed executable:
+</details>
 
-```bash
-uv tool install --force --editable .  # point at this checkout; source edits apply immediately
-```
+### The `portal` short command
 
-If you'd rather not use uv, plain pip editable install works:
+`portal` and `portal-mcp-server` are the same entry point. With no subcommand it
+starts the MCP server; the credential-agent CLI lives under
+`portal {agent,ssh,passphrase,sudo,secret} …` (see [Authentication](#authentication)).
 
-```bash
-pip install -e ".[dev]"       # -e/--editable points at this source tree; prod + dev
-# or runtime only
-pip install -e .
-```
+### <a id="credential-agent"></a>Credential agent (systemd / launchd / scheduled task)
 
-### Short alias `portal`
+<details><summary>Expand credential-agent install</summary>
 
-After `uv tool install portal-mcp-server` (or the `uv tool install --force --editable .` above), two equivalent entry points are on your `PATH`:
+`portal agent install` installs a per-user credential agent that holds
+interactively-entered credentials in memory with a TTL. Auto-install covers
+**Linux + macOS + Windows**, always running **as the logged-in user** (never a
+system/root service): systemd user units (Linux, `.socket` + `.service`,
+socket-activated), a launchd LaunchAgent (macOS), or a per-user logon scheduled
+task (Windows, Task Scheduler with an InteractiveToken principal). Linux/macOS
+supervise it on an AF_UNIX socket; Windows uses a named pipe. The installer
+records the resolved socket/pipe address in `~/.config/portal-mcp-server/agent.json`
+so clients read it directly (or an explicit `PORTAL_CREDENTIAL_AGENT_SOCKET`). A
+running MCP server discovers a freshly-installed agent on the next credential
+request (it re-reads `agent.json`); no restart needed. See [Authentication](#authentication).
 
-```bash
-portal agent install --now           # install/start the systemd --user credential agent
-portal agent uninstall               # disable/remove agent user units/config
-portal-mcp-server sudo set web01     # full name
-portal sudo set web01                # short name (recommended for typing)
-portal ssh set web01                 # SSH login password
-portal passphrase set web01          # SSH private-key passphrase
-portal secret set GITHUB_TOKEN
-```
+</details>
 
-The `uvx portal-mcp-server xxx` form still requires the full name (`uvx` does not accept aliases). The short name only applies to persistent commands after `uv tool install` / `pip install`.
+## <a id="client-integration"></a>Client integration
 
-> **⚠️ Known name collision**: [`SpatiumPortae/portal`](https://github.com/SpatiumPortae/portal) (a P2P file-transfer CLI, packaged in Homebrew core) is also called `portal`. **Homebrew users may collide** — `uv tool install` drops the binary at `~/.local/bin/portal`, Homebrew puts it at `/opt/homebrew/bin/portal` or `/usr/local/bin/portal`, and whichever comes first in `$PATH` wins. To investigate:
->
-> ```bash
-> which -a portal      # lists every matching executable; the top one is active
-> ```
->
-> If it collides, fall back to the full `portal-mcp-server`, or reorder your PATH. `uv tool install` will *not* silently overwrite another tool's binary — it errors out and lets you decide.
-
-### Credential agent (Linux systemd / macOS launchd / Windows scheduled task)
-
-> **⚠️ Auto-install: Linux + macOS + Windows, all per-user.** `portal agent install` dispatches by OS and every backend runs the agent **as you, in your own session**: **Linux** ships a pair of **systemd user units** (`.socket` + `.service` under `~/.config/systemd/user/`, lazily started via socket activation); **macOS** ships a **launchd LaunchAgent** (`~/Library/LaunchAgents/com.tmytimidly.portal-credential-agent.plist`, run-and-keepalive — the agent self-binds its AF_UNIX socket, sidestepping the `launch_activate_socket` ctypes dance); **Windows** registers a **per-user logon scheduled task** (Task Scheduler, **InteractiveToken** principal — runs as you, only while you're logged on, **never as SYSTEM**, no stored password; the XML sets `ExecutionTimeLimit=PT0S` to dodge the 72h default kill and a `RestartOnFailure` keepalive) with a **named-pipe** IPC transport (no AF_UNIX). Windows's named pipe + scheduled-task install are both exercised on a real kernel by the `windows-latest` CI job.
->
-> Where there's no agent at all (other platforms), the alternative: use the `password_command` / `passphrase_command` / `sudo_password_command` fields in `hosts.yaml`, or the `command:` field in `secrets.yaml`, to pull credentials on demand from the system password manager (Keychain, `pass`, `secret-tool`, `gopass`, 1Password CLI, etc.) — see [Authentication](#authentication) below. The MCP server itself (`remote_shell` and every remote tool) runs fine on Windows / macOS / Linux.
-
-No-echo interactive values from `portal ssh set` / `portal passphrase set` / `portal sudo set` / `portal secret set` no longer live in one MCP server process. They go into a per-user, systemd socket-activated **credential agent**. Before using those interactive credential commands, explicitly install and start the user socket:
-
-```bash
-portal agent install --now
-```
-
-This writes `~/.config/systemd/user/portal-credential-agent.{socket,service}`. The `.socket` and `.service` units are paired by default: when the socket unit receives its first connection, systemd starts the same-named service and hands it the listening fd via `LISTEN_PID` / `LISTEN_FDS` (socket activation). The `.socket` listens on the systemd user manager path `%t/portal-mcp-server/credentials.sock`, with creation/removal owned by systemd. The installer also records the systemd-specifier-expanded absolute socket path in `~/.config/portal-mcp-server/agent.json`, so MCP clients can read it directly (or honour an explicit `PORTAL_CREDENTIAL_AGENT_SOCKET`) instead of guessing the runtime directory — a `XDG_RUNTIME_DIR` derived from a GUI app's child process isn't always correct, so this cache is necessary.
-
-> **Order of operations**: `portal {secret,sudo,ssh,passphrase} set` auto-installs and starts the credential agent on first use (it runs the equivalent of `portal agent install --now`, prints the install output, then takes the no-echo input), so you can usually just run `set` directly. **But** for the MCP server (the one inside your IDE/agent) to read the credentials, the agent must be reloaded once relative to the MCP server's start: if your IDE was already running when you first `set`, reload the MCP/plugin integration or restart it afterwards (reload MCP/plugin in Claude Code, `/restart` in Copilot CLI, or restart the IDE/agent). For fully manual control you can also `portal agent install --now` before launching the IDE.
-
-What stays enabled is the systemd socket unit: a same-user local listening endpoint. The credential agent service is socket-activated on first connection and holds TTL credentials in memory. Stopping the service clears the in-memory credentials while the socket can still activate it again. To remove the units and config:
-
-```bash
-portal agent uninstall
-```
-
-Day-to-day inspection / maintenance:
-
-```bash
-portal agent status                  # socket path + running state + cache counts per kind
-portal agent clear                   # flush every cached entry across all kinds (service keeps running)
-portal ssh    list                   # one row per cached host: sha256 fingerprint + remaining TTL
-portal ssh    show web01             # single host: fingerprint + TTL (NO plaintext)
-portal ssh    confirm web01          # prompt twice, cache only if both entries match (no-echo)
-portal ssh    clear web01            # drop a single entry
-```
-
-The `passphrase` / `sudo` / `secret` subcommand trees mirror this shape (key noun is `host` / `host` / `name` respectively).
-
-> **Design principle — plaintext never leaves the agent's memory.** The CLI intentionally has **no `show plaintext` / `dump` verb** on any of `portal ssh` / `portal passphrase` / `portal sudo` / `portal secret`. `show` returns sha256[:16] + TTL only, `list` shows the same per cached key, `confirm` re-prompts and accepts only if the two no-echo entries match. The plaintext is fed only to same-uid consumers: asyncssh (SSH handshake / local key unlock), `sudo -S` (stdin), `$env` injection (subprocess env). Terminal scrollback, screenshots, OBS overlays, asciinema, remote view-session software and stdout pipes are all leak surfaces — printing the plaintext to a TTY would zero out everything the no-echo prompt was protecting. Same posture as ssh-agent (`-L` prints fingerprints, never private keys), gpg-agent (no passphrase export verb), vault agent (writes secrets to a template target file, not the TTY), polkit-agent (GUI-only). To export a stored value, drive a `password_command` / `passphrase_command` / `secrets.yaml` `command:` from your password manager rather than asking the credential agent to print it.
-
-## Client integration
-
-[![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlckBsYXRlc3QiXX0=)
-
-`portal-mcp-server` is a local stdio MCP server — any MCP-capable host can install it. Each section below gives the minimal config for a popular host. `uvx` pulls from PyPI and caches automatically — no clone or venv required.
-
-> If your MCP client cannot find `uvx`, run `which uvx` (`where uvx` on Windows) and use that absolute path as `command`.
-
-### Generic snippet
-
-> Most hosts accept the `{ "mcpServers": { "<name>": { "command": ..., "args": [...] } } }` top-level schema. VS Code and Codex use their own schemas — see their dedicated sections below.
+### Generic config snippet
 
 ```json
 {
@@ -506,7 +424,8 @@ The `passphrase` / `sudo` / `secret` subcommand trees mirror this shape (key nou
 }
 ```
 
-To override hosts / policies / log paths, append an `env` block:
+To pass environment variables (pointing at custom hosts/policies/log paths),
+add `env`:
 
 ```json
 "env": {
@@ -516,47 +435,50 @@ To override hosts / policies / log paths, append an `env` block:
 }
 ```
 
-> 💡 **`timeout` is now a REQUIRED argument** (no default) on `remote_exec` / `remote_shell` / `local_exec` — the agent must consciously pick a cut-off every call (pass a small one for exploratory commands to fail fast). While a command runs the server emits keepalive heartbeats that stop the MCP client from aborting a hung call on its own, so `timeout` is the only real cut-off. Foreground timeouts also have a **ceiling** `PORTAL_MAX_TIMEOUT` (seconds, default 300): a request above it is refused with a nudge to background the work with `remote_job` — don't pin a long task on one blocking call.
+> 💡 **`timeout` is now mandatory** (no default) — `remote_exec` / `remote_shell`
+> / `local_exec` each require the agent to pass a seconds value per call. A
+> keepalive heartbeat is sent during execution so the MCP client won't cut a
+> hanging call, making `timeout` the only real cutoff. Foreground timeout is also
+> capped by `PORTAL_MAX_TIMEOUT` (default 300 s); over the cap is refused with a
+> hint to use the background `remote_job`.
 
 ### Claude Code CLI
 
-Edit `<project>/.mcp.json` (same schema as above), or register via CLI / slash command:
-
 ```bash
+# Recommended: user scope, all repos
+claude mcp add --scope user portal -- uvx portal-mcp-server@latest
+# Without --scope it defaults to local (current dir only)
 claude mcp add portal -- uvx portal-mcp-server@latest
-# or run /mcp inside a Claude Code session; pass --scope user to register globally
+# or type /mcp inside a Claude Code session
 ```
 
-<details>
-<summary><b>GitHub Copilot CLI</b></summary>
+> ⚠️ Claude Code has three scopes: `local` (**default**, current dir), `user`
+> (all repos), `project` (written into the repo's `.mcp.json`). For "install once,
+> use everywhere" **use `--scope user`** — unlike Codex (`mcp add` = global) or
+> Copilot CLI (`mcp add` = User scope).
 
-Write `<project>/.mcp.json` for project scope, or register at user scope with one command (applies to every project):
+<details><summary><b>GitHub Copilot CLI</b></summary>
 
 ```bash
 copilot mcp add portal -- uvx portal-mcp-server@latest
-# or run /mcp inside a Copilot CLI session for the interactive flow
+# or /mcp inside a Copilot CLI session
 ```
 
-Verify:
-
-```bash
-copilot mcp list                # should show portal
-copilot mcp get portal          # check Source is Workspace / User
-```
+Verify: `copilot mcp list` (should show portal) / `copilot mcp get portal`.
 
 </details>
 
-<details>
-<summary><b>Cursor</b></summary>
+<details><summary><b>Cursor</b></summary>
 
-Click the **Install in Cursor** badge above for one-click setup, or write the generic snippet to `~/.cursor/mcp.json` (all projects) or `<project>/.cursor/mcp.json` (this project only). Cursor → Settings → Tools & MCP shows `portal` once added.
+Write the generic snippet into `~/.cursor/mcp.json` (global) or
+`<project>/.cursor/mcp.json` (per-project). Enable under Settings → Tools & MCP.
 
 </details>
 
-<details>
-<summary><b>VS Code (Copilot Chat / Agent mode)</b></summary>
+<details><summary><b>VS Code (Copilot Chat / Agent mode)</b></summary>
 
-Click the **Install in VS Code** badge above for one-click setup, or write to `<project>/.vscode/mcp.json` manually (VS Code uses its own schema — top-level key is `servers`, not `mcpServers`):
+VS Code uses a proprietary schema whose top-level key is `servers`, not
+`mcpServers`:
 
 ```json
 {
@@ -570,33 +492,33 @@ Click the **Install in VS Code** badge above for one-click setup, or write to `<
 }
 ```
 
-For global scope, place the same `servers` block under the `mcp` field of your VS Code user `settings.json` (path varies by OS).
-
-> Not interchangeable with `mcpServers`. Keep a separate file when you mix VS Code with Copilot CLI / Claude Code / Cursor.
-
-</details>
-
-<details>
-<summary><b>Claude Desktop</b></summary>
-
-Paste the generic snippet under `mcpServers` in `claude_desktop_config.json`, then restart Claude Desktop. Config file location:
-
-- macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
-- Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+Write it to `<project>/.vscode/mcp.json`, or the `mcp` field of user
+`settings.json` for global use.
 
 </details>
 
-<details>
-<summary><b>Windsurf</b></summary>
+<details><summary><b>Claude Desktop</b></summary>
 
-Windsurf uses the same `mcpServers` schema. In Cascade, click the plugins icon → "Manually configure MCP", then write the generic snippet to `~/.codeium/windsurf/mcp_config.json`. Reload Cascade to enable.
+Paste the generic `mcpServers` snippet into `claude_desktop_config.json` and
+restart. Location: macOS `~/Library/Application Support/Claude/…`; Windows
+`%APPDATA%\Claude\…`.
 
 </details>
 
-<details>
-<summary><b>OpenAI Codex CLI</b></summary>
+<details><summary><b>Windsurf</b></summary>
 
-Codex uses TOML. Edit `~/.codex/config.toml`:
+Same `mcpServers` schema, written to `~/.codeium/windsurf/mcp_config.json` via
+Cascade → plugins → "Manually configure MCP".
+
+</details>
+
+<details><summary><b>OpenAI Codex CLI</b></summary>
+
+```bash
+codex mcp add portal -- uvx portal-mcp-server@latest   # global
+```
+
+Or edit `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.portal]
@@ -604,289 +526,391 @@ command = "uvx"
 args = ["portal-mcp-server@latest"]
 ```
 
-After starting Codex, run `/mcp` in the TUI to confirm `portal` is loaded.
+</details>
+
+<details><summary><b>Other hosts (Cline / Continue / Roo Code / Zed …)</b></summary>
+
+Most accept the generic `{ "mcpServers": ... }` snippet in their MCP settings;
+stdio needs no extra proxy.
 
 </details>
 
-<details>
-<summary><b>Other hosts (Cline / Continue / Roo Code / Zed …)</b></summary>
+## <a id="tools"></a>Tools
 
-- **Cline / Continue / Roo Code and other VS Code extensions** — most accept the `{ "mcpServers": ... }` generic snippet; paste it into the extension's MCP settings panel or workspace config
-- **Any MCP-compatible host** — paste the generic snippet into the host's MCP config entry; stdio needs no proxy
+14 tools. Inclusion criterion: **keep only guarantees the agent can't synthesize
+itself** (concurrency, atomic/hash anti-conflict, no credential leak, security
+gate, real structured output); anything that just "packages a script/state" is
+cut or folded into a primitive.
+
+### Running commands: the exec family (by stateful / local / sync vs async)
+
+| Tool | When to use |
+|---|---|
+| `remote_exec` | **Default workhorse.** Stateless one-shot, immediate result (**separate** stdout/stderr + exit code). `host` single / list / `group_tag`; `command` or a `commands` sequence; multi-host parallel by default, `serialize=True`(+`delay_s`) for rolling; `use_sudo` / `secrets` inject credentials out-of-band. Reuses the pool; fast. |
+| `remote_shell` | Use only when **cwd/env must persist across calls** (`cd`/`export`/venv) — one sticky interactive shell (bash/zsh) per host, optional `commands=[…]` multi-step (state continues). Output is a **merged** stream (PTY). Otherwise use `remote_exec` (faster, multi-host). |
+| `remote_job` | **Background** long tasks. `submit` returns a `job_id` instantly (remote `nohup`+tmp, **survives disconnect**), `poll` fetches incremental output/status, `cancel` kills, `list` lists. Job table in-memory, capped, TTL-swept; sudo/secrets **not** supported in the background (use `remote_exec`). |
+| `local_exec` | Runs on the **MCP server's own machine** (not over SSH) — off-target for a remote-orchestration project, so **off by default**; the operator must set `PORTAL_ALLOW_LOCAL_EXEC=1`. `use_sudo=True` uses local `sudo -S -k` (reserved identity `<local>`, password from `portal sudo set-local` or a top-level `<local>:` `sudo_password_command`), can combine with `secrets`. |
+| `remote_close` | Closes a host's sticky `remote_shell` session (next `remote_shell` reopens). Rare; only to reset a dirty session. |
+
+> **★ Two layers of "reuse", don't conflate**: **connection reuse** = the asyncssh
+> TCP/channel pool, shared by **all** tools, purely for **speed**; **session reuse**
+> = only `remote_shell`'s per-host sticky interactive shell, for **state
+> continuity**. The shell session rides on a pooled channel; the two are
+> orthogonal. Because the session is implicit plumbing, its state table lives in
+> `inspect(view="sessions")`, not a `list` of its own.
+
+### File editing / search / transfer
+
+| Tool | What it gives the agent |
+|---|---|
+| `remote_read` / `remote_patch` | Read a remote file and get SHA-256; patch uses `file_hash` + per-range hash against concurrent overwrite, writes via tmp + `posix_rename` (atomic), re-hashes after. **On success sweeps orphan `*.mcp_tmp.*` >1h old in the same dir** (piggybacks the open SFTP session, fully isolated) — so there's no separate cleanup tool. |
+| `remote_grep` | Faithful port of Claude Code's Grep: `output_mode=files_with_matches` (default, paths mtime-desc) / `content` (matches + optional context, `head_limit` caps **total lines**, `offset` paginates) / `count`. Clear param names (`before_context`/`after_context`/`context`/`ignore_case`), respects `.gitignore`, each result carries `truncated`. **Don't run bare `rg` via `remote_exec`.** |
+| `remote_glob` | Faithful port of CC's Glob: `rg --files --no-ignore --sort modified -g`, **mtime-desc**, hard cap 100, `truncated`, returns `{filenames, num_files, truncated, duration_ms}`. Does not respect `.gitignore` (CC Glob default). **Don't run bare `find` via `remote_exec`.** |
+| `remote_transfer` | `direction=upload\|download\|sync\|mirror\|upload-list\|download-list`. SFTP binary-safe; `sync` pushes a dir, `mirror` pulls a dir, `*-list` transfers arbitrary local↔remote pairs from `paths_json`, size+mtime incremental short-circuit by default (`checksum=True` for sha256); per-file failure to `failed[]`; MCP progress heartbeat against idle timeout. Directory modes skip local symlinks (no escaping the tree). |
+
+### Resources (agent manages explicitly, so `list` rides with the tool)
+
+| Tool | action / params | Purpose |
+|---|---|---|
+| `hosts` | `action=list\|register\|remove` | Host registry. `register` needs `name`+`host` — or just `name` (auto-registers a same-named `~/.ssh/config` alias overlay). `tags` feed `remote_exec`'s `group_tag`. `list` also enumerates ssh-config `Host` aliases and resolves real `HostName`/`User`/`Port`, each with a `source` field and possible per-host `warnings` (relay them). **No password parameter.** |
+| `remote_tunnel` | `action=open\|close\|list`, `kind=local\|reverse\|socks` | Single-entry SSH tunnels. `open` passes the host gate; binds loopback by default (off-box exposure needs `PORTAL_ALLOW_TUNNEL_EXPOSURE=1`). `close` by `tunnel_id` (gate on the source host). |
+
+### Introspection / policy
+
+| Tool | view / params | Purpose |
+|---|---|---|
+| `policy_check` | `host`, optional `command` | Security dry-run, no execution. Returns `ALLOWED` / `BLOCKED: <reason>` (and longer strings such as "ALLOWED by policy but host … is not registered"). ⚠️ The default policy is **permissive** — `ALLOWED` only means "no rule currently blocks it". |
+| `inspect` | `view=snapshot\|server\|sessions\|history\|stats\|policy` | Read-only introspection **hub**: server metadata + pool + bash sessions + audit stats + policy. **hosts/tunnels are not here** — they're resources, listed by `hosts(action=list)` / `remote_tunnel(action=list)`. The `sessions` view is plumbing diagnostics (host→session_id sticky table). |
+
+### Picking a tool: dedicated vs `remote_exec`/`remote_shell`
+
+`remote_exec` runs anything, but **prefer the dedicated tool** — each has either a
+safety guarantee or structured output:
+
+| To do | Use this (**not** a bare command) | Why |
+|---|---|---|
+| Read / edit a remote file | `remote_read` → `remote_patch` | SHA-256 + per-range hash, atomic rename, post-write rehash |
+| Search content / find files | `remote_grep` / `remote_glob` | structured JSON + token guardrails |
+| Transfer / sync | `remote_transfer` | SFTP binary-safe + incremental + progress heartbeat |
+| Multi-host exec | `remote_exec(host=[...])` / `group_tag=` | parallel / rolling + two-phase gate |
+| Open a tunnel | `remote_tunnel` | managed lifecycle, listable |
+| Background a long task | `remote_job` | exposes state + hands back control |
+
+### <a id="agent-conventions"></a>Agent-side conventions
+
+`portal-mcp-server` only provides tools; it doesn't mandate usage. Recommended
+additions to `AGENTS.md` / the system prompt: default writes to remote `/tmp/`;
+ask before touching `$HOME` or project source; don't mix portal tool calls with
+raw `ssh`/`scp` in one task; when a task needs a token, guide the user to
+`portal secret set` rather than asking for the plaintext.
+
+<details><summary>📋 Full per-tool reference (signatures · returns · source map)</summary>
+
+### Running commands: the exec family
+
+| Tool | Signature | Returns / key behavior |
+| --- | --- | --- |
+| `remote_exec` | `(host='' \| [host…], command='', commands=None, group_tag='', *, timeout, login=None, use_sudo=False, secrets=None, serialize=False, delay_s=0.0, stop_on_error=True)` | Stateless one-shot over the pool. **single host + single command → one dict** (**separate** stdout/stderr + exit code); multi-host / `commands` sequence → **list** (a multi-command host is `{host, results:[…]}`). `timeout` **required** (no default; over `PORTAL_MAX_TIMEOUT` is refused and routed to `remote_job`); `login` defaults to a login shell (`bash -lc`). |
+| `remote_shell` | `(host, command='', commands=None, stop_on_error=True, *, timeout)` | One persistent interactive shell per host. single command → `{host, session_id, command, exit_code, output, duration_s}` (`output` is a merged PTY stream, over-limit truncation flags `truncated`); `commands=[…]` runs in the **same** session → `{host, session_id, results:[…], duration_s}`. A wedged interactive prompt is auto-Ctrl-C'd → `exit_code:-1` + `error:"interactive_prompt_blocked"` + `session_preserved:true`. A timeout Ctrl-C's the command and resyncs (session kept if a clean prompt returns, else dropped). `timeout` **required**. |
+| `remote_job` | `(action=submit\|poll\|cancel\|list, host='', command='', job_id='', since=0, tail=0, max_bytes=65536, signal=TERM\|KILL, login=None, use_sudo=False, secrets=None)` | `submit` returns a `job_id` (remote `nohup` + tmp, survives disconnect); `poll` paginates (`since=<offset>` returns new bytes, capped at `max_bytes` default 64 KiB, with `more`; or `tail=N` for the tail — `tail` is a snapshot and is not bounded by `max_bytes`), base64 chunk + boundary-safe UTF-8 decode; `cancel` signals the process group and re-probes (won't signal a terminal job); `list` lists all. Job table best-effort persisted per process, capped, TTL-swept (`PORTAL_JOB_*`). `use_sudo` / `secrets` **not supported in the background**. |
+| `local_exec` | `(command, secrets=None, use_sudo=False, *, timeout)` | Runs on the **MCP server's own machine** (**not** SSH), off by default (`PORTAL_ALLOW_LOCAL_EXEC=1`). `timeout` **required** (same `PORTAL_MAX_TIMEOUT` cap, no background to route to). `use_sudo=True` uses reserved identity **`<local>`** (≠ an SSH host `local`/`localhost`) via local `sudo -S -k`; combinable with `secrets`, flagged `high_risk`. |
+| `remote_close` | `(host)` | Closes a host's cached `remote_shell` session (auto-reopens next time). Rare; reset a dirty session. |
+
+### File editing (hash-protected)
+
+| Tool | Signature | Returns / key behavior |
+| --- | --- | --- |
+| `remote_read` | `(host, path, start=1, end=None, limit=None, encoding='utf-8', use_sudo=False)` | → `{content, file_hash, range_hash, start, end, total_lines, truncated}`. Paginated: ≤ `limit` lines (default `PORTAL_READ_MAX_LINES=2000`) + `PORTAL_READ_MAX_BYTES` (default 16384); if truncated early, `truncated=true` and `next_start` gives the resume point (always returns at least one complete line even if it exceeds the byte cap). `use_sudo=True` reads root-only files via `sudo cat` (hash still valid), flagged `high_risk`. |
+| `remote_patch` | `(host, path, file_hash, patches_json, encoding='utf-8', auto_newline=False, use_sudo=False)` | Hash-guarded range patch: rejected if the file changed since `remote_read` (returns `current_file_hash`); patches applied bottom-to-top, overlaps rejected, via `*.mcp_tmp.<12hex>` + `posix_rename`, re-hashed after. On success sweeps stale orphan tmp in the same dir. `use_sudo=True` reads/writes root-owned files (staged copy created `0600`, cleaned up even on failure), flagged `high_risk`. `patches_json` = `[{"start":int,"end":int\|null,"contents":str,"range_hash":str}, …]` (`end==start-1` is the pure-insert idiom; a negative `end` is clamped, not tail-sliced). |
+
+### Remote search (faithful Claude Code port)
+
+| Tool | Signature | Returns / key behavior |
+| --- | --- | --- |
+| `remote_grep` | `(host, pattern, path='.', glob='', file_type='', output_mode=files_with_matches\|content\|count, ignore_case=False, before_context=0, after_context=0, context=0, head_limit=250, offset=0, multiline=False)` | Regex content search (`rg`, fallback `grep`). Full CC-like guarantees (`.gitignore`, mtime-desc, structured) hold under `rg`; the `grep` fallback parses `-A/-B/-C` context rows (tagged `context:true`) but does not sort by mtime or honor `.gitignore`/`file_type`/`multiline`. |
+| `remote_glob` | `(host, pattern, path='.')` | Glob file search, `rg --files --no-ignore --sort modified -g`, **mtime-desc**, hard cap 100 + `truncated` → `{filenames, num_files, truncated, duration_ms}`. Does not respect `.gitignore` (matches CC Glob). |
+
+### File transfer (SFTP)
+
+| Tool | Signature | Returns / key behavior |
+| --- | --- | --- |
+| `remote_transfer` | `(direction=upload\|download\|sync\|mirror\|upload-list\|download-list, host, local_path, remote_path, checksum=False, paths_json='', resume=True)` | Binary-safe SFTP. Single-file (`upload`/`download`) → `{status, direction, host, bytes, duration_s, …}`; incremental (`sync`/`mirror`/`*-list`) skips size+mtime matches (`checksum=True` → sha256) → `{status, uploaded\|downloaded, skipped, failed[], bytes_total, bytes_transferred, duration_s}`, per-file failure to `failed[]`. **Upload resume** (`resume=True`): a smaller remote partial gets only its tail appended, then the whole file sha256-verified; if that can't be verified (no remote `sha256sum`) it re-uploads fresh (`restarted_unverifiable`). Directory modes skip local symlinks and refuse symlink destinations. `*-list` needs `paths_json` = `[{"local":…,"remote":…}, …]`. |
+
+### Resources (agent manages explicitly)
+
+| Tool | Signature | Returns / key behavior |
+| --- | --- | --- |
+| `remote_tunnel` | `(action=open\|close\|list, kind=local\|reverse\|socks, host='', tunnel_id='', local_port=0, local_bind='127.0.0.1', remote_host='', remote_port=0)` | `open` passes the `host` gate: `local` forwards `localhost:local_port → remote_host:remote_port`, `reverse` exposes `local_bind:local_port` as `host:remote_port`, `socks` is a SOCKS5 proxy. Binds loopback by default; a non-loopback `local_bind`, or exposing a reverse tunnel on all remote interfaces, requires `PORTAL_ALLOW_TUNNEL_EXPOSURE=1`. `close` by `tunnel_id` (gate on the source host); `list` lists all. |
+| `hosts` | `(action=list\|register\|remove, name='', host='', user='root', port=22, key_path='', tags='')` | Runtime host registry. `register` needs `name`+`host` — or just `name` (auto-overlays a same-named `~/.ssh/config` alias). `tags` (comma-separated) feed `group_tag`. `list` also enumerates ssh-config aliases (resolving real `HostName`/`User`/`Port`), each with a `source` field + possible per-host `warnings` — relay them. **No password parameter.** |
+
+### Introspection / policy
+
+| Tool | Signature | Returns / key behavior |
+| --- | --- | --- |
+| `policy_check` | `(host, command='')` | Security dry-run → `"ALLOWED"` / `"BLOCKED: <reason>"` (and longer diagnostics). Default policy is **permissive**. |
+| `inspect` | `(view=snapshot\|server\|sessions\|history\|stats\|policy, limit=50, host_filter='')` | Read-only introspection of server **plumbing** + history. **hosts / tunnels are not here** — resources, listed by `hosts` / `remote_tunnel`. |
+
+> **Credential CLI (out-of-band, not an MCP tool)**: the agent never sees
+> credential values. Passwords / passphrases / secrets are pre-staged by a human
+> in another terminal via `portal {ssh,sudo,passphrase,secret} set`, held by a
+> per-user agent; `show` / `list` return only a sha256[:16] fingerprint + TTL,
+> `confirm` re-types and compares. See [Authentication](#authentication).
+
+### Source map
+
+| Module | Tools / responsibility |
+| --- | --- |
+| `cli.py` | all `@mcp.tool()` definitions, `_gate()`/`_gate_exec()`, `inspect` assembly, credential CLI |
+| `connection_manager.py` | asyncssh pool + host registry (**SSH tools only**; `local_exec` / control-plane tools don't use SSH) |
+| `shell_engine.py` | `remote_exec`'s one-shot `ssh_exec` path (dispatch also spans `cli.py` / `remote_bash.py`) |
+| `remote_bash.py` | `remote_shell` / `remote_close` + `remote_exec`'s sudo / secrets one-shot path |
+| `session_manager.py` | persistent interactive shell sessions (OSC 133, soft-cancel, timeout interrupt) |
+| `job_manager.py` | `remote_job` |
+| `local_exec.py` | `local_exec` |
+| `remote_text_editor.py` | `remote_read`, `remote_patch` (+ orphan tmp sweep) |
+| `remote_search.py` | `remote_grep`, `remote_glob` |
+| `file_ops.py` | `remote_transfer` |
+| `network_tools.py` | `remote_tunnel` |
+| `credential_agent.py` | per-user socket / named-pipe activated TTL cache for `portal {ssh,passphrase,sudo,secret} set` |
+| `ssh_creds.py` / `passphrase_creds.py` / `sudo_creds.py` / `secrets_store.py` | credential resolution + output redaction |
+| `_peer_creds.py` | same-user peer check (Linux `SO_PEERCRED` / Windows named-pipe SID) |
+| `security.py` | policy engine: host allowlist, command blocklist/allowlist, per-host rate limit, cc-safety-net |
+| `audit.py` | `audit_log()` write + history ring buffer (`inspect` assembly in `cli.py`) |
 
 </details>
 
-## Environment variables
+<details><summary>🔀 Migrating from old tool names</summary>
 
-All configurable knobs in portal-mcp-server are passed as environment variables, unified under the `PORTAL_*` prefix to avoid clashes with OpenSSH's own `SSH_*` namespace or other MCP servers. Set them in the `env` field of your MCP client config — they only affect the MCP server subprocess.
+> **From v4: all tools drop the `portal_` prefix** — remote-acting tools take a
+> `remote_` prefix (`remote_exec` / `remote_shell` / `remote_read` / `remote_patch`
+> / `remote_grep` / `remote_glob` / `remote_transfer` / `remote_tunnel` /
+> `remote_job` / `remote_close`), local execution is `local_exec`, control-plane
+> tools are `portal_host→hosts` / `portal_check→policy_check` / `portal_audit→inspect`.
+> Clients already namespace by config key (`portal-remote_exec`), so a `portal_`
+> prefix is redundant stutter. The table also covers the older `portal_bash`-era
+> migration:
 
-> **v1.1.0 rename notice**: the three legacy prefixes from 1.0.x (`SSH_*`, `SSH_MCP_*`, `MCP_*`) have all been consolidated under `PORTAL_*`. **No backward compatibility.** When upgrading from 1.0.x, rename in one pass per the table below. Full migration table in [CHANGELOG](./CHANGELOG.md).
+| Old | New |
+|---|---|
+| `portal_bash(host, cmd)` | `remote_shell(host, cmd)` (persistent) or `remote_exec(host, cmd)` (one-shot, faster) |
+| `portal_bash(..., use_sudo=True / secrets=[…])` | `remote_exec(..., use_sudo=True / secrets=[…])` |
+| `portal_bash_close` | `remote_close` |
+| `portal_multi_exec(mode=parallel, hosts_json=…)` | `remote_exec(host=[…])` |
+| `portal_multi_exec(mode=rolling, …)` | `remote_exec(host=[…], serialize=True, delay_s=N)` |
+| `portal_multi_exec(mode=broadcast, commands_json=…)` | `remote_exec(host=[…], commands=[…])` |
+| `portal_playbook(host=…/group_tag=…)` | `remote_exec(host=…/group_tag=…, commands=[…])` |
+| `portal_ping(hosts_json=…)` | `remote_exec(host=[…], command="echo pong")` |
+| `portal_tunnel_open/_close/_list` | `remote_tunnel(action=open\|close\|list, kind=…)` |
+| `portal_cleanup_tmps` | removed — `remote_patch` sweeps same-directory orphan tmps on success |
+| `portal_bash_status` | `inspect(view="sessions")` |
+| — | **new** `remote_job(action=submit\|poll\|cancel\|list)` |
+
+</details>
+
+## <a id="env-vars"></a>Environment variables
+
+All configuration is via environment variables, uniformly prefixed `PORTAL_*`.
+Set them in the MCP client's `env` field — they affect only the server
+subprocess.
 
 ### Overview
 
-| Category | Variable | One-line purpose |
+| Category | Variable | One-liner |
 |---|---|---|
-| File paths | `PORTAL_HOSTS_YAML` | Host registry YAML |
-| File paths | `PORTAL_POLICIES_YAML` | Security policy YAML |
-| File paths | `PORTAL_SECRETS_YAML` | Named secrets YAML (source for `secrets=` in `remote_exec` / `local_exec`) |
-| File paths | `PORTAL_SSH_CONFIG` | OpenSSH client config path (the `ssh -F` analogue — see "File paths" below) |
-| File paths | `PORTAL_LOG_DIR` | Audit + server log directory |
-| Security & auth | `PORTAL_AUDIT_FAIL_OPEN` | Whether audit-write failure is fail-open |
-| Security & auth | `PORTAL_AUDIT_MAX_BYTES` | `audit.jsonl` rotation threshold in bytes (default 10 MiB) |
-| Security & auth | `PORTAL_AUDIT_BACKUPS` | How many rotated files `audit.jsonl.1..N` to keep (default 5) |
-| Security & auth | `PORTAL_AUTH_TOKEN` | Bearer token for HTTP transport |
-| Connection pool | `PORTAL_SSH_POOL_SIZE` | Max TCP connections per host |
-| Connection pool | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels per TCP connection |
-| Connection pool | `PORTAL_SSH_MAX_IDLE_TIME` | Idle-close timeout in seconds |
-| Connection pool | `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds |
-| Reliability | `PORTAL_BASH_HEARTBEAT_INTERVAL` | Keepalive heartbeat interval (s) while `remote_shell` runs |
-| Reliability | `PORTAL_MAX_TIMEOUT` | Foreground per-command timeout **ceiling** (s, default 300) for `remote_exec` / `remote_shell` / `local_exec`; `timeout` is required and a value above the ceiling is refused with a nudge to `remote_job` |
-| Exec env | `PORTAL_LOGIN_SHELL` | Whether `remote_exec` / `remote_job` default to a login shell (`bash -lc`, loading `~/.profile`/`~/.bashrc` PATH+env). On by default; set `0`/`false`/`no`/`off` to disable. Overridable per-call via `login` and per-host via `login_shell:` |
-| Remote read | `PORTAL_READ_MAX_LINES` | Max lines `remote_read` returns per page when `limit` is omitted (default 2000) |
-| Remote read | `PORTAL_READ_MAX_BYTES` | Max bytes of content `remote_read` returns per page, so a large file doesn't blow past the MCP client's inline-output threshold (default 16384) |
-| Background jobs | `PORTAL_JOB_PERSIST` | Whether the `remote_job` table persists across restarts (default on; `0`/`false` to disable) |
-| Background jobs | `PORTAL_JOB_STATE_FILE` | Path of the persisted job table (default `<state>/jobs.json`) |
-| Background jobs | `PORTAL_JOB_MAX_LIVE` | Cap on concurrently live background jobs (default 50) |
-| Background jobs | `PORTAL_JOB_TTL` | How many seconds a finished job stays in the table before it's swept + its remote tmp deleted (default 3600) |
-| Testing (dev only) | `PORTAL_TEST_LIVE` | Gate for live SSH integration tests |
-| Testing (dev only) | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | Live test target |
+| File paths | `PORTAL_HOSTS_YAML` | host registry YAML |
+| File paths | `PORTAL_POLICIES_YAML` | security policy YAML |
+| File paths | `PORTAL_SECRETS_YAML` | named-secret YAML (source for `secrets=` in `remote_exec` / `local_exec`) |
+| File paths | `PORTAL_SSH_CONFIG` | OpenSSH client config path (the `ssh -F` equivalent) |
+| File paths | `PORTAL_LOG_DIR` | audit + server log dir |
+| File paths | `PORTAL_CREDENTIAL_AGENT_SOCKET` | credential-agent socket / named-pipe address override (defaults to the installed `agent.json`) |
+| Security & auth | `PORTAL_AUDIT_FAIL_OPEN` | whether a failed audit write is fail-open |
+| Security & auth | `PORTAL_AUDIT_MAX_BYTES` | `audit.jsonl` rotation threshold (bytes, default 10 MiB) |
+| Security & auth | `PORTAL_AUDIT_BACKUPS` | rotated files kept `audit.jsonl.1..N` (default 5) |
+| Security & auth | `PORTAL_AUTH_TOKEN` | HTTP transport (`--transport streamable_http`) auth token; **required** for a non-loopback bind, not needed for stdio / loopback |
+| Security & auth | `PORTAL_ALLOW_TUNNEL_EXPOSURE` | allow `remote_tunnel` to bind non-loopback / expose a reverse tunnel on all remote interfaces (default off, loopback only) |
+| Local exec | `PORTAL_ALLOW_LOCAL_EXEC` | whether `local_exec` is enabled (default off; set `1`) |
+| Connection pool | `PORTAL_SSH_POOL_SIZE` | max TCP connections per host |
+| Connection pool | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | max concurrent channels per TCP |
+| Connection pool | `PORTAL_SSH_MAX_IDLE_TIME` | idle-close timeout (s) |
+| Connection pool | `PORTAL_SSH_MAX_CONN_AGE` | max connection lifetime (s) |
+| Background jobs | `PORTAL_JOB_PERSIST` | persist the `remote_job` table across restarts (default on; `0`/`false` off) |
+| Background jobs | `PORTAL_JOB_STATE_FILE` | job-table path (default **per-process** `<state>/jobs/<pid>.json`, so multiple server processes don't clobber each other; set = one fixed file) |
+| Background jobs | `PORTAL_JOB_MAX_LIVE` | concurrent live-job cap (default 50) |
+| Background jobs | `PORTAL_JOB_TTL` | seconds a finished job stays before sweep + remote-tmp removal (default 3600) |
+| Reliability | `PORTAL_BASH_HEARTBEAT_INTERVAL` | keepalive heartbeat interval during foreground execution (s) |
+| Reliability | `PORTAL_MAX_TIMEOUT` | **cap** on the per-command foreground `timeout` of `remote_exec` / `remote_shell` / `local_exec` (s, default 300); `timeout` is required, over the cap is refused and routed to `remote_job` |
+| Exec env | `PORTAL_LOGIN_SHELL` | whether `remote_exec` / `remote_job` default to a login shell (`bash -lc`, loading `~/.profile`/`.bash_profile` PATH/env). Default on; `0`/`false`/`no`/`off` off. Per-call `login` / hosts.yaml `login_shell:` override |
+| Remote read | `PORTAL_READ_MAX_LINES` | max lines per `remote_read` page when `limit` is omitted (default 2000) |
+| Remote read | `PORTAL_READ_MAX_BYTES` | max bytes per page (default 16384) |
+| Shell session | `PORTAL_SHELL_MAX_OUTPUT` | `remote_shell` per-command in-memory output cap (bytes, default 8 MiB, over-limit truncation flags `truncated`) |
+| Shell session | `PORTAL_SHELL_BOOT_TIMEOUT` / `PORTAL_SHELL_BOOT_QUIET` | persistent-session bootstrap timeout / quiet window (s, default 10 / 0.6) |
+| Shell session | `PORTAL_SHELL_INTERACTIVE_GRACE` / `PORTAL_SHELL_SOFT_CANCEL_TIMEOUT` | interactive-prompt grace / soft-cancel wait for the OSC133 D (s, default 1 / 3) |
+| Testing (dev only) | `PORTAL_TEST_LIVE` | run the real-SSH integration tests |
+| Testing (dev only) | `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | live-test target |
 
-Detailed breakdown below.
-
-### File paths
-
-| Env var | Meaning | Default |
-|---|---|---|
-| `PORTAL_HOSTS_YAML` | Host registry YAML | `~/.config/portal-mcp-server/hosts.yaml` |
-| `PORTAL_POLICIES_YAML` | Security policy YAML | `~/.config/portal-mcp-server/policies.yaml` |
-| `PORTAL_SECRETS_YAML` | Named secrets YAML | `~/.config/portal-mcp-server/secrets.yaml` |
-| `PORTAL_SSH_CONFIG` | OpenSSH client config path | `~/.ssh/config` |
-| `PORTAL_LOG_DIR` | Audit + server log directory | `~/.local/state/portal-mcp-server/log/` |
-
-> `PORTAL_SSH_CONFIG` is portal's `ssh -F`: OpenSSH has **no env var** for the config path (only `-F`), and portal is a daemon with no per-connection flag, so this variable **fully mirrors `-F`**: an **absolute path** reads **only that file** (suppressing the system-wide `/etc/ssh/ssh_config`, like `-F <file>`); the literal **`none`** (any case) reads **no config file at all** (`ssh -F none` — host resolution comes solely from hosts.yaml); **unset** reads user `~/.ssh/config` + system `/etc/ssh/ssh_config` (`%PROGRAMDATA%\ssh\ssh_config` on Windows) as a fallback, user wins. Relative values (other than `none`) are warned and ignored. Parsing is delegated wholesale to asyncssh (Include-aware, multi-platform `~` expansion); asyncssh's own discovery is a single `~/.ssh/config` line with no system-config support, so the system fallback and `-F`/`-F none` layer are portal's.
-
-Resolution order: **env var > XDG directory** (`$XDG_CONFIG_HOME` / `$XDG_STATE_HOME` honored per the spec). The current working directory is **not** consulted — `portal-mcp-server` is a long-lived user-level daemon, not a project tool, and a cwd-relative auto-load would let any directory the server happens to be launched from silently override your real config (no mainstream user-level CLI — `ssh`, `gh`, `docker`, `kubectl`, `rclone`, … — does this).
-
-The repo's [`examples/`](./examples/) directory holds schema templates — every `*.yaml` in there is **read-only sample**, never auto-loaded. Bootstrap your real config by copying the templates into the XDG directory:
-
-```bash
-mkdir -p ~/.config/portal-mcp-server
-cp examples/hosts.yaml    ~/.config/portal-mcp-server/hosts.yaml
-cp examples/policies.yaml ~/.config/portal-mcp-server/policies.yaml
-cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
-# then edit ~/.config/portal-mcp-server/*.yaml with your real values
-```
-
-**`~/.config/portal-mcp-server/hosts.yaml` contains real credentials — never commit it.**
-
-> **v2.0.0 breaking changes**:
-> - Removed the `./config/hosts.yaml` / `./config/policies.yaml` / `./logs/` cwd-relative fallbacks — resolution is now env > XDG only.
-> - Renamed the repo's `config/` directory to `examples/`; files dropped the `.example.` infix (the directory name now carries the "template" semantics).
-
-### Security & auth
-
-| Env var | Meaning | Default |
-|---|---|---|
-| `PORTAL_AUDIT_FAIL_OPEN` | Set to `1` → audit-write failures are warnings only; unset → **fail-closed**, audit-write failure aborts the operation | _(unset)_ |
-| `PORTAL_AUDIT_MAX_BYTES` | Rotate `audit.jsonl` once it reaches this many bytes (a stdlib `RotatingFileHandler`, subclassed to stay fail-closed) | `10485760` (10 MiB) |
-| `PORTAL_AUDIT_BACKUPS` | How many rotated `audit.jsonl.1..N` files to keep | `5` |
-| `PORTAL_AUTH_TOKEN` | Bearer token for HTTP transport (`--transport streamable_http`); not needed for stdio | _(none)_ |
-
-### Connection pool
-
-Controls the in-process asyncssh connection pool. Defaults work well for most setups; tune only under high concurrency or unusual network conditions. Pool behaviour is documented in [§ In-process connection pool](#in-process-connection-pool).
-
-| Env var | Meaning | Default |
-|---|---|---|
-| `PORTAL_SSH_POOL_SIZE` | Max TCP connections per host. When the pool is full and every connection is at the channel ceiling, the least-loaded connection is reused (with a warning) | `5` |
-| `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | Max concurrent channels (SFTP, exec, tunnel, …) multiplexed over one TCP connection. New connections are opened when exceeded, up to `PORTAL_SSH_POOL_SIZE` | `5` |
-| `PORTAL_SSH_MAX_IDLE_TIME` | Close idle connections (no active channels) after this many seconds. Set `0` to disable | `600` (10 min) |
-| `PORTAL_SSH_MAX_CONN_AGE` | Max connection lifetime in seconds; aged connections with no active channels are closed. Guards against silent firewall / NAT drops | `3600` (1 hour) |
-
-### Reliability
+### <a id="file-paths"></a>File paths
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `PORTAL_BASH_HEARTBEAT_INTERVAL` | How often (seconds) `remote_shell` / `remote_exec` / `local_exec` emits an MCP progress notification as a keepalive while the command runs, so an output-silent command doesn't trip the client's idle timeout (JSON-RPC `-32001`). Independent of the server-side `timeout` parameter. Non-positive or invalid values fall back to the default | `5` (seconds) |
-| `PORTAL_MAX_TIMEOUT` | Foreground per-command timeout **ceiling (seconds)** for `remote_exec` / `remote_shell` / `local_exec`. `timeout` is now a **required** argument (the default was removed from all three), so the agent must pick one every call; a value **above** this ceiling is **refused** with a nudge to background the work with `remote_job` (which has no ceiling). This is a safety ceiling, not a default. Read on each call. Non-positive / invalid values fall back to the built-in default | built-in `300` (5 min) |
-| `PORTAL_LOGIN_SHELL` | Whether `remote_exec`'s plain path and `remote_job` run the command in a **login shell** (`bash -lc`) so the user's `~/.profile` / `~/.bashrc` PATH+env (conda / nvm / pyenv / `~/.local/bin`) is loaded. **On** by default; only an explicit `0`/`false`/`no`/`off` disables it. Precedence: per-call `login` arg > a host's `login_shell:` in hosts.yaml > this env var. Hosts without bash degrade to a plain exec; `remote_shell` is unaffected (its persistent session is deliberately `--norc`) | `on` |
+| `PORTAL_HOSTS_YAML` | host registry YAML | `~/.config/portal-mcp-server/hosts.yaml` |
+| `PORTAL_POLICIES_YAML` | security policy YAML | `~/.config/portal-mcp-server/policies.yaml` |
+| `PORTAL_SECRETS_YAML` | named-secret YAML | `~/.config/portal-mcp-server/secrets.yaml` |
+| `PORTAL_SSH_CONFIG` | OpenSSH client config path | `~/.ssh/config` |
+| `PORTAL_LOG_DIR` | audit + server log dir | platform state dir (Linux `~/.local/state/portal-mcp-server/log/`; macOS/Windows use the native state dir) |
 
-### Background jobs
+> `PORTAL_SSH_CONFIG` is portal's `ssh -F`: OpenSSH reads **no** env var for the
+> config path, only `-F`; portal is a long-lived daemon with no per-connection
+> flag, so it uses this variable and **mirrors `-F` exactly**: an **absolute path**
+> reads only that one file (also suppressing system `/etc/ssh/ssh_config`); the
+> literal **`none`** (any case) reads no config file at all (`ssh -F none`); unset
+> reads user `~/.ssh/config` + system `/etc/ssh/ssh_config` (Windows
+> `%PROGRAMDATA%\ssh\ssh_config`) as fallback, user-level first. Parsing reuses
+> asyncssh's config parser (`Include`, `~` expansion).
 
-Tune `remote_job` (background submit/poll/cancel/list). The job table is best-effort persisted across restarts; see [§ Tools](#tools).
+Path resolution priority: **env var > XDG dir** (`$XDG_CONFIG_HOME` /
+`$XDG_STATE_HOME`). The cwd is **not** consulted — portal is a user-level daemon,
+not a project tool, so cwd-relative autoloading would let any working directory
+silently hijack your real config.
 
-| Env var | Meaning | Default |
+The repo's [`examples/`](./examples/) dir is the schema template — all `*.yaml`
+there are **read-only samples**, never autoloaded. On first use, copy them to the
+XDG dir and edit in your real values. **`~/.config/portal-mcp-server/hosts.yaml`
+holds real credentials — never commit it.**
+
+### Security & auth
+
+| Variable | Meaning | Default |
 |---|---|---|
-| `PORTAL_JOB_PERSIST` | Whether the job table persists across a server restart (reloaded on startup, a poll re-probes the remote PID). `0`/`false`/`no`/`off` disables it | _(on)_ |
-| `PORTAL_JOB_STATE_FILE` | Override the persisted job-table path | `<state>/jobs.json` |
-| `PORTAL_JOB_MAX_LIVE` | Cap on concurrently live jobs; `submit` is refused beyond it | `50` |
-| `PORTAL_JOB_TTL` | Seconds a finished job stays in the table before it's swept and its remote tmp files removed | `3600` (1 hour) |
+| `PORTAL_AUDIT_FAIL_OPEN` | `1` → a failed audit write only warns and continues; default → **fail-closed**, the op raises and aborts | _(unset)_ |
+| `PORTAL_ALLOW_LOCAL_EXEC` | set `1` to enable `local_exec` (off-target local execution, default off) | _(unset)_ |
+| `PORTAL_ALLOW_TUNNEL_EXPOSURE` | set `1` to let `remote_tunnel` bind non-loopback (`local_bind`) or expose a reverse tunnel on all remote interfaces; default loopback only | _(unset)_ |
+| `PORTAL_AUTH_TOKEN` | HTTP transport auth token (client sends `Authorization: Bearer <token>`). Transport **defaults to `--host 127.0.0.1`**; binding a non-loopback address without this value **refuses to start**. Not needed for stdio | _(none)_ |
+
+### Connection pool
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `PORTAL_SSH_POOL_SIZE` | max TCP connections per host; when the pool is full and all are at the channel limit, the least-busy is reused (with a warning) | `5` |
+| `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | max concurrent channels per TCP (SFTP/exec/tunnel share); over that opens a new TCP up to `PORTAL_SSH_POOL_SIZE` | `5` |
+| `PORTAL_SSH_MAX_IDLE_TIME` | close a channel-less connection after this idle time (s). **Note `0` is not "disable"** — it makes any idle connection immediately reclaimable | `600` (10 min) |
+| `PORTAL_SSH_MAX_CONN_AGE` | max connection lifetime (s); closed when aged and channel-less. Guards against firewall/NAT silent drops | `3600` (1 h) |
+
+### Reliability & execution
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `PORTAL_BASH_HEARTBEAT_INTERVAL` | how often (s) a MCP progress notification is sent as keepalive during execution; independent of the server-side `timeout` | `5` |
+| `PORTAL_MAX_TIMEOUT` | **cap (s)** on the per-command foreground `timeout`. `timeout` is **required** (no default); over the cap is **refused** with a hint to use `remote_job`. A guardrail, not a default | built-in `300` |
+| `PORTAL_LOGIN_SHELL` | whether `remote_exec`'s normal path and `remote_job` default to a **login shell** (`bash -lc`), loading the user's profile PATH/env. Default **on**; only `0`/`false`/`no`/`off` disables. Priority: per-call `login` > hosts.yaml `login_shell:` > this var. sh-only hosts auto-fallback; `remote_shell` is unaffected (persistent session uses `--norc`) | `on` |
+
+### Shell session
+
+Timing knobs for `remote_shell` persistent sessions; normal deployments needn't touch them.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `PORTAL_SHELL_MAX_OUTPUT` | per-command in-memory output cap (bytes); over-limit drops the head and flags `truncated` | `8388608` (8 MiB) |
+| `PORTAL_SHELL_BOOT_TIMEOUT` | timeout to bring up a persistent session (inject the integration script + readiness marker) (s) | `10.0` |
+| `PORTAL_SHELL_BOOT_QUIET` | quiet confirmation window before bootstrap completes (s) | `0.6` |
+| `PORTAL_SHELL_INTERACTIVE_GRACE` | grace after spotting an interactive prompt before deciding it's wedged and soft-cancelling (s) | `1.0` |
+| `PORTAL_SHELL_SOFT_CANCEL_TIMEOUT` | timeout after soft-cancel (incl. foreground-timeout interrupt) waiting for the OSC133 `D` back to a clean prompt (s); on timeout the session is destroyed | `3.0` |
 
 ### Testing (dev only)
 
-Only relevant when running `tests/`; regular MCP deployments do not need these. See [§ Testing](#testing) for full usage.
+Used only when running `tests/`.
 
-| Env var | Meaning | Default |
+| Variable | Meaning | Default |
 |---|---|---|
-| `PORTAL_TEST_LIVE` | Set to `1` / `true` / `yes` to actually run the real-SSH tests in `tests/test_live_ssh.py`; otherwise they are all skipped | _(unset)_ |
-| `PORTAL_TEST_HOST` | Live-test target host | `127.0.0.1` |
-| `PORTAL_TEST_PORT` | Live-test target port | `22` |
-| `PORTAL_TEST_USER` | Live-test SSH user | `$USER` or `root` |
-| `PORTAL_TEST_KEY_PATH` | Private key for live tests | `~/.ssh/id_ed25519` |
+| `PORTAL_TEST_LIVE` | set `1`/`true`/`yes` to run the real-SSH tests in `tests/test_live_ssh.py`; else all skip | _(unset)_ |
+| `PORTAL_TEST_HOST` / `PORTAL_TEST_PORT` / `PORTAL_TEST_USER` / `PORTAL_TEST_KEY_PATH` | live-test target | `127.0.0.1` / `22` / `$USER` or `root` / `~/.ssh/id_ed25519` |
 
-### Full example
+## <a id="authentication"></a>Authentication
 
-```json
-{
-  "mcpServers": {
-    "portal": {
-      "command": "uvx",
-      "args": ["portal-mcp-server@latest"],
-      "env": {
-        "PORTAL_HOSTS_YAML": "/home/me/.config/portal-mcp-server/hosts.yaml",
-        "PORTAL_POLICIES_YAML": "/home/me/.config/portal-mcp-server/policies.yaml",
-        "PORTAL_SSH_POOL_SIZE": "10",
-        "PORTAL_SSH_MAX_CHANNELS_PER_CONN": "8"
-      }
-    }
-  }
-}
-```
-
-## Authentication
-
-Pick the path for your setup — SSH keys preferred, encrypted keys via ssh-agent; password auth is supported via `password_command` or `portal ssh set`, so plaintext credentials never reach the LLM.
+Jump by method — prefer SSH keys; passphrases prefer ssh-agent; password login
+supports `password_command` or `portal ssh set`; plaintext passwords never reach
+the LLM.
 
 ### Credential-flow overview
 
-There are five credential flows, each with a "password-manager style" (command source) and/or a "no-echo interactive style" (getpass + systemd --user credential agent). **As currently implemented:**
+Five credential flows, each with a "password-manager (command source)" and a
+"no-echo interactive (getpass + credential agent) source":
 
-| Credential flow | Command source (password-manager style) | No-echo interactive entry (getpass style) | Cache key | Cache semantics | Trigger |
+| Flow | Command source | No-echo interactive | Cache key | Cache semantics | Trigger |
 |---|---|---|---|---|---|
-| **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `portal ssh set <host>` | host | agent in-memory TTL (default 900s, interactive entry only; command source fetched per connection) | on connect for `auth: password` / auto fallback when key auth refused |
-| **B. SSH key passphrase** | `passphrase_command` (hosts.yaml) | ✅ `portal passphrase set <host>` | host | agent in-memory TTL (default 900s) | local encrypted-key unlock |
-| **C. Remote sudo execution** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent in-memory TTL (default 900s) | `remote_exec(use_sudo=True)` |
-| **C2. Local sudo execution** | `sudo_password_command` in a top-level `<local>:` section (hosts.yaml) | ✅ `portal sudo set-local` | `<local>` (reserved) | agent in-memory TTL (default 900s) | `local_exec(use_sudo=True)` |
-| **D. Secret injection · remote** | `command` in `secrets.yaml` (fetched each time) | ✅ `portal secret set <name>` | name | agent in-memory TTL (default 900s, `--ttl` configurable) | `remote_exec(secrets=[…])` |
-| **E. Secret injection · local** | same as D (shares `secrets.yaml`) | same as D (shares `portal secret set`) | same as D | same as D | `local_exec(secrets=[…])` |
+| **A. Remote SSH login password** | `password_command` (hosts.yaml) | ✅ `portal ssh set <host>` | host | agent memory TTL (default 900 s, interactive only; command source fetches fresh) | `auth: password` connect / auto-fallback on key failure |
+| **B. SSH key passphrase** | `passphrase_command` (hosts.yaml) | ✅ `portal passphrase set <host>` | host | agent memory TTL (900 s) | local decrypt of an encrypted key |
+| **C. Remote sudo** | `sudo_password_command` (hosts.yaml) | ✅ `portal sudo set <host>` | host | agent memory TTL (900 s) | `remote_exec(use_sudo=True)` |
+| **C2. Local sudo** | top-level `<local>:` `sudo_password_command` | ✅ `portal sudo set-local` | `<local>` | agent memory TTL (900 s) | `local_exec(use_sudo=True)` |
+| **D/E. Secret injection (remote/local)** | `secrets.yaml` `command` | ✅ `portal secret set <name>` | name | agent memory TTL (900 s, `--ttl`) | `remote_exec` / `local_exec` `secrets=[…]` |
 
-Things to know:
+- **A/B/C/D share one per-user agent socket**, but the agent keeps separate
+  `ssh`/`passphrase`/`sudo`/`secret` key spaces.
+- **A's fallback order**: `auth: password` login is `cache (portal ssh set) →
+  password_command → error`; a pure-key host auto-retries the password path once
+  on `PermissionDenied`, but only if a source exists, else the original error
+  propagates (so a missing config can't mask a real key failure).
+- **Interactive sources = per-user agent memory TTL** (default 900 s, never on
+  disk). **Command sources = fetched fresh, no TTL.**
+- **Plaintext never leaves the agent**: there is no `show plaintext`; `portal
+  {ssh,passphrase,sudo,secret} show <key>` returns only a sha256[:16] fingerprint
+  + remaining TTL, `list` summarizes, `confirm` re-types and compares. See the
+  [Security](#security) section and [`SECURITY.en.md`](./SECURITY.en.md).
 
-- **D and E are one and the same credential pipeline** — they share `secrets.yaml` + `portal secret set` + the same per-user credential agent + the same name-keyed TTL cache; only the consuming tool differs (remote injects via SSH stdin, local via subprocess env).
-- **A, B, C, and D share one per-user agent socket**, but the agent keeps separate `ssh` / `passphrase` / `sudo` / `secret` key spaces. A's password goes into `asyncssh.connect()` during the SSH handshake; B's passphrase unlocks a local private key; C's password is fed to `sudo -S` after the handshake; D/E are injected as environment variables.
-- **A's resolution chain**: explicit `auth: password` login goes `cache (portal ssh set) → password_command → error`. Pure key hosts retry that same chain *once* when asyncssh raises `PermissionDenied`, but **only when a source is available**; with no cache and no `password_command` the original `PermissionDenied` propagates — so a stale config never masks the real "your key is rejected" failure.
-- **Interactive entries (getpass style) = per-user agent in-memory TTL cache**: default 900s, reusable within the TTL, auto-cleared on expiry, gone on agent restart, never written to disk. **Command sources (password-manager style) = fetched each time**, no TTL.
-- **Plaintext never leaves the credential agent's memory**: there is intentionally no `show plaintext` verb. `portal {ssh,passphrase,sudo,secret} show <key>` returns a sha256[:16] fingerprint + remaining TTL, `list` summarises every cached entry, and `confirm` re-prompts and compares two no-echo entries. The plaintext is fed only to same-uid consumers (asyncssh, local key unlock, `sudo -S`, `$env` injection). Full rationale in the [Credential agent (Linux systemd / macOS launchd / Windows scheduled task)](#credential-agent-linux-systemd--macos-launchd--windows-scheduled-task) section above.
+<details><summary>The four credential mechanisms — implementation & why</summary>
 
-#### The four credential mechanisms: implementation & why
-
-The four credentials use four **different** mechanisms — not arbitrary; each credential's consumer dictates how it's injected:
-
-| Credential | Implementation | Why this way |
+| Type | Implementation | Why |
 |---|---|---|
-| **SSH login password** | asyncssh `password=` (SSH-protocol level), source: `password_command` / `portal ssh set` cache | SSH natively supports password auth; the protocol frame is the cleanest path |
-| **SSH key passphrase** | asyncssh `passphrase=`, source: ssh-agent → `portal passphrase set` cache → `passphrase_command`; or `use_ssh_agent` for pure agent | Decrypts the key locally; the passphrase never leaves the process. It is cached separately from the SSH login password, so a local key unlock phrase cannot be mistaken for a remote login or sudo password |
-| **sudo password** | `sudo -S` fed via stdin (`conn.run(input=pw)`), source: `sudo_password_command` / `portal sudo set` cache | sudo only honours `-S`/`-A`/tty, not env. `-S` has the narrowest exposure: shortest password lifetime (read once, discarded), no remote on-disk artifact, no env exposure (vs `-A` askpass which drops a temp helper file + a helper process whose env holds the password). Cost: the sudo command's own stdin is consumed by the password and hits EOF early (curl/CLI flag-readers are unaffected) |
-| **secrets** (API tokens) | `bash -s` + stdin feeding `export VAR=…\n<cmd>\n`, source: `secrets.yaml` `command` / `portal secret set` cache | tools generally read env (`GH_TOKEN`/`AWS_*`); the purer SSH-protocol env frame is blocked by sshd's `AcceptEnv` allowlist (default just `LANG`/`LC_*`), so it can't reach the remote — hence this workaround. The value sits briefly in the script string parsed on bash's stdin, but bash is use-and-discard, the value never hits argv (not in `ps`), never hits a log — far narrower than `--token=xxx` on argv |
+| **SSH login password** | asyncssh `password=` (SSH protocol level), source: `password_command` / `portal ssh set` cache | SSH natively supports password auth; the protocol frame is cleanest |
+| **SSH key passphrase** | asyncssh `passphrase=`, source: ssh-agent → `portal passphrase set` cache → `passphrase_command`; or `use_ssh_agent` | local key decrypt; cached separately so a key-unlock passphrase isn't confused with a login/sudo password |
+| **sudo password** | `sudo -S` fed on stdin (`conn.run(input=pw)`), source: `sudo_password_command` / `portal sudo set` cache | sudo only reads `-S`/`-A`/tty, not env; `-S` has the narrowest exposure (password lives briefly on stdin, nothing on disk, not in env) |
+| **secrets** (API tokens) | `bash -s` + stdin `export VAR=…\n<cmd>\n`, source: `secrets.yaml` `command` / `portal secret set` cache | tools read env (`GH_TOKEN`/`AWS_*`); the value stays briefly in the bash stdin script, not on argv (`ps`) or in logs |
 
-#### ⚠️ Risks of configuring these passwords (please read)
+</details>
 
-Key-only login is the safest baseline. **The moment you configure an SSH login password / sudo password / secret for a host, you authorize "any agent that can call this MCP server" to act with that credential for as long as it's valid** — the agent no longer has to ask you, and is no longer stopped by a system password prompt. The two config paths trade off differently:
+<details><summary>⚠️ Risk of configuring these passwords (read this)</summary>
 
-| Config method | Lifetime / exposure | Risk profile |
-|---|---|---|
-| **Permanent (password-manager command)** `sudo_password_command` / `password_command` / `secrets.yaml` `command:` | **fetched on each connect**, no TTL; usable as long as your store (`pass`/`op`/`bw`) is unlocked | exposure window = how long your store stays unlocked. The command lives in hosts.yaml/secrets.yaml (**config files — keep them out of git**); the value never hits disk but the agent can fetch it anytime |
-| **Temporary (no-echo set)** `portal {ssh,passphrase,sudo,secret} set <key>` | held in the per-user credential agent's **memory**, default 900s TTL, auto-cleared, gone on agent restart, **never on disk** | exposure window = the TTL. Smallest blast radius — **prefer this**; reach for a password-manager command only when you genuinely need unattended automation |
+Key-only login is the safest baseline. **Once you configure an SSH login
+password / sudo password / secret for a host, you authorize "any agent that can
+call this MCP server" to act with those credentials for their lifetime** — the
+agent won't ask again. A **permanent** command source (`sudo_password_command`
+etc.) is fetched fresh with no TTL and is usable as long as your password store
+is unlocked; a **temporary** `portal … set` value lives in the per-user agent's
+memory with a TTL and is dropped automatically, never on disk.
 
-Key points:
+</details>
 
-- **High-risk operations are flagged in the result**: `remote_exec(use_sudo=True)` / `secrets=[...]` and `local_exec(secrets=[...])` results carry `"high_risk": true` + a `"high_risk_note"`, and the calling agent is asked to **briefly tell you it ran a privileged command with your password/secret**, or only do so with your explicit permission. Treat it as a receipt that "the agent just sudo'd on your behalf".
-- **Shrink the blast radius**: use key-only where you can; prefer the temporary `set` (TTL) over a password-manager command; scope sudoers per-command instead of full NOPASSWD; review `audit.jsonl` periodically (every `sudo` / secret injection is recorded).
-- **Credentials never enter the LLM context** — under every path the password/secret is never a tool parameter, never on `ps` argv, never in audit/log — but "whoever can drive this agent" effectively **holds** those privileges while the credential is valid. That is the inherent cost of configuring a password.
-- **The first `portal {kind} set` auto-installs the agent**: if the credential agent isn't up yet, `set` automatically runs the equivalent of `portal agent install --now`, prints the install output for you, then takes the no-echo input — no need to `agent install` by hand first.
+### SSH key (preferred)
 
-### SSH keys (preferred)
+Use ed25519 and distribute with `ssh-copy-id`; asyncssh discovers ssh-agent via
+`$SSH_AUTH_SOCK`. For headless/CI, write `passphrase_command:` in `hosts.yaml`.
 
-Use ed25519:
+### Password login: `password_command` or `portal ssh set`
 
-```bash
-ssh-keygen -t ed25519 -C "you@example.com"
-ssh-copy-id -i ~/.ssh/id_ed25519.pub user@your-host
+Two rules: **never** put a plaintext `password:` in `hosts.yaml` (rejected at
+startup, field dropped); **never** pass it through an MCP tool (`hosts` has no
+password parameter). Two sources (order: agent cache → `password_command` → error):
+
+```yaml
+hosts:
+  legacy-host:
+    host: 10.0.0.40
+    user: admin
+    auth: password
+    password_command: pass show ssh/legacy-host   # or: bw get password … / op read op://… / printf '%s' "$ENV"
 ```
 
-The same key works with GitHub — see the official guides: [Generating a new SSH key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent) and [Adding a new SSH key to your GitHub account](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/adding-a-new-ssh-key-to-your-github-account).
+Or push interactively in **another terminal**: `portal ssh set legacy-host`
+(no-echo getpass, TTL cache), `portal ssh confirm/show/list/clear`. Key-mode hosts
+auto-fallback to the password path once on `PermissionDenied` when a source
+exists. Design details (why `shell=True`, forced `client_keys=[]`, stderr never
+logged) are in [`SECURITY.en.md` § Authentication](./SECURITY.en.md).
 
-### Encrypted private keys: ssh-agent
+### Encrypted-key passphrase: `portal passphrase set` / `passphrase_command` / `use_ssh_agent`
 
-Unlock once, reuse for the session — asyncssh picks the unlocked key up via `$SSH_AUTH_SOCK` automatically:
-
-```bash
-eval "$(ssh-agent -s)"
-ssh-add ~/.ssh/id_ed25519        # passphrase prompted once
-```
-
-For headless / CI environments where ssh-agent is impractical, configure `passphrase_command:` in `hosts.yaml` (see below).
-
-### Password auth: `password_command` or `portal ssh set`
-
-Provided for legacy hosts that cannot be re-keyed. Two non-negotiable rules:
-
-1. **Never** write `password: <plaintext>` in `hosts.yaml` — startup logs an ERROR and drops the field.
-2. **Never** flow a password through an MCP tool — `hosts` has no password parameter, so credentials cannot land in LLM tool-call traces.
-
-Two sources (order: agent cache → `password_command` → error), same shape as sudo / secret:
-
-1. **Password manager (1a, fully automatic)** — in `hosts.yaml` set `auth: password` plus a shell command that prints the password to stdout, same pattern as Borg's `BORG_PASSCOMMAND`, restic's `RESTIC_PASSWORD_COMMAND`, and msmtp's `passwordeval`:
-
-   ```yaml
-   hosts:
-     legacy-host:
-       host: 10.0.0.40
-       user: admin
-       auth: password
-       # CI / env-var pattern (GitHub Secrets, Vault inject into env, then read):
-       password_command: printf '%s' "$LEGACY_HOST_PASSWORD"
-       # Or pull from a password manager:
-       # password_command: pass show ssh/legacy-host
-       # password_command: bw get password legacy-host
-       # password_command: op read "op://Private/legacy-host/password"
-   ```
-
-2. **Seed it once (1b, `portal ssh set`, interactive)** — in a **separate terminal** (not the agent chat):
-
-   ```bash
-   portal ssh set legacy-host                  # getpass, no echo
-   portal ssh set legacy-host --ttl 1800       # custom TTL (seconds); default 900 (15 min)
-   portal ssh confirm legacy-host              # prompt twice, cache only on match
-   portal ssh show legacy-host                 # sha256 fingerprint + remaining TTL (no plaintext)
-   portal ssh list                             # every cached host: fingerprint + TTL
-   portal ssh clear legacy-host                # drop a single entry
-   ```
-
-   The password travels over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is `0700`, the socket is `0600`, and the agent performs an `SO_PEERCRED` same-uid check. It is **never written to disk, never sent to the LLM**, and is dropped automatically when the TTL expires. Works even when the host has no `password_command` in `hosts.yaml`, or is a key-mode host (the default — no `auth:` field in hosts.yaml).
-
-#### Auto-fallback: key failure → password
-
-When asyncssh raises `PermissionDenied` for a key-mode host (the default — no `auth:` field in hosts.yaml), the server retries *once* via the password chain (agent cache → `password_command`), but **only when a source is available**. With no cache and no `password_command` the original `PermissionDenied` propagates — so a missing config never masks the real "your key is rejected" failure. Keys remain the preferred path; password is an opt-in safety net.
-
-Runtime behaviour: `password_command` runs with a 10-second timeout, exactly one trailing newline stripped, stderr never logged (leak defence), and non-zero exit / empty output / non-UTF-8 output all hard-failing. Design rationale (why `shell=True`, why `client_keys=[]` is forced, why stderr never reaches the logs, …) lives in **[`SECURITY.md` § Authentication](./SECURITY.md#authentication)**.
-
-### Encrypted-key passphrases: `portal passphrase set` / `passphrase_command` / `use_ssh_agent`
-
-The passphrase is a **local private-key unlock phrase**, not the remote SSH login password and not the sudo password. It has a dedicated interactive entry and credential-agent kind.
-
-Resolution order:
-
-1. **ssh-agent** (`$SSH_AUTH_SOCK`, already unlocked via `ssh-add`) — preferred
-2. **agent cache** (`portal passphrase set <host>`, no echo, TTL cache)
-3. **`passphrase_command`** (password manager) — headless / CI
-4. asyncssh's default key loading
-
-```bash
-portal passphrase set encrypted-key-host
-portal passphrase confirm encrypted-key-host
-portal passphrase show encrypted-key-host
-```
+A passphrase is a **local key-unlock secret**, separate from a remote login /
+sudo password (separate agent kind). Full order: **ssh-agent → agent cache
+(`portal passphrase set`) → `passphrase_command` → asyncssh default**. Prefer
+ssh-agent when available; `passphrase_command` is for headless/CI.
 
 ```yaml
 hosts:
@@ -895,193 +919,166 @@ hosts:
     user: deploy
     key: ~/.ssh/encrypted_key
     passphrase_command: pass show ssh/encrypted_key
+    use_ssh_agent: true   # true=agent only; false=disable agent; omit=auto
 ```
-
-Prefer ssh-agent when you have a usable terminal — UX is better. Use `passphrase_command:` only in headless / CI environments.
 
 ### Non-interactive sudo: `use_sudo` + `portal sudo set`
 
-`remote_exec(host, cmd, use_sudo=True)` lets the agent run root commands, but **the sudo password never reaches the LLM** — `remote_shell` has no password parameter; the password is resolved server-side. Two sources (same philosophy as the SSH password):
+`remote_exec(host, cmd, use_sudo=True)` runs a root command, but **the sudo
+password never enters the LLM** (no password parameter; resolved server-side).
+Sources: `sudo_password_command` in `hosts.yaml`, or `portal sudo set <host>`
+(no-echo, TTL cache). `sudo_password_same_as_ssh: true` makes `portal ssh set`
+also cache the same value for `sudo` (config-only, default false; does not reuse
+the private-key passphrase). Order: agent cache → `sudo_password_command` → error.
 
-1. **Password manager (automatic)** — set `sudo_password_command` on the host in `hosts.yaml`, fully symmetric with `password_command`:
-
-   ```yaml
-   hosts:
-     prod-box:
-       host: 10.0.0.50
-       user: deploy
-       sudo_password_command: pass show sudo/prod-box   # or op read / bw get / printf "$ENV"
-   ```
-
-   If this host's sudo password is **explicitly the same as the same user's SSH login password**, you can opt in on the host instead of configuring a separate sudo command source:
-
-   ```yaml
-   hosts:
-     legacy-host:
-       host: 10.0.0.40
-       user: admin
-       auth: password
-       sudo_password_same_as_ssh: true
-   ```
-
-   After that, `portal ssh set legacy-host` writes the same no-echo input into both the `ssh` and `sudo` credential kinds. The default is `false`: without this field, you must still run `portal sudo set legacy-host` separately or configure `sudo_password_command`. This only reuses the **SSH login password**; it never reuses the private-key passphrase from `portal passphrase set`.
-
-2. **Seed it once (interactive)** — in a **separate terminal** (not the agent chat):
-
-   ```bash
-   portal sudo set prod-box                  # getpass, no echo
-   portal sudo set prod-box --ttl 1800       # custom TTL (seconds); default 900 (15 min)
-   portal sudo confirm prod-box              # prompt twice, cache only on match
-   portal sudo show prod-box                 # sha256 fingerprint + TTL (no plaintext)
-   portal sudo list                          # every cached host
-   ```
-
-   The password travels over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is `0700`, and the socket is `0600` / same-user only. It is **never written to disk, never sent to the LLM**, and is dropped automatically when the TTL expires.
-
-Resolution order: **agent memory cache (2) → `sudo_password_command` (1) → error** (telling you to run `portal sudo set` or configure `sudo_password_command`).
-
-Implementation notes: `use_sudo` runs a one-shot `conn.run(input=pw, ...)` executing `sudo -S -k -p '' -- bash -c <cmd>`; it does **not** reuse the persistent `remote_shell` session (`sudo -S` reads the password from stdin, which the persistent PTY has no channel to feed — a bare sudo there is auto-Ctrl-C'd and the session is preserved). Consequently a sudo command does **not** inherit `cd` / `export` state from prior `remote_shell` calls — bake any `cd … && …` into the same command. `-k` forces fresh auth each time; `-p ''` suppresses the prompt. Genuinely interactive sudo (needs a TTY, or a password change) still can't go through `remote_shell` — have the user run `ssh -t host sudo …`.
+Implementation: `use_sudo` runs a one-shot `conn.run(input=pw, …)` of
+`sudo -S -k -p '' -- bash -c <cmd>` — **not** the persistent `remote_shell`
+session (a PTY can't feed the `-S` password). So a sudo command **doesn't inherit**
+prior `remote_shell` cwd/env; include `cd … && …` in the command if needed.
 
 #### Local sudo: `local_exec(use_sudo=True)`
 
-The above is **remote** sudo. The MCP server itself often needs sudo too (it can't run "as the right user"), so `local_exec(use_sudo=True)` runs a privileged command on the **MCP server's own machine** via local `sudo -S -k`, with the password likewise **never reaching the LLM / argv / disk**. It reuses the same credential resolution as the remote path; only the identity is the reserved **`<local>`**:
-
-- Temporary: `portal sudo set-local` (no echo, into the credential agent, `--ttl` configurable);
-- Permanent: a **top-level `<local>:` section** in `hosts.yaml` (a sibling of `hosts:`, a reserved key, **not** a host) carrying `sudo_password_command`:
-
-  ```yaml
-  hosts:
-    # ... your remote hosts ...
-  "<local>":                                # top-level reserved key; THIS machine's local_exec
-    sudo_password_command: pass show sudo/this-box
-  ```
-
-Resolution order mirrors the remote path: **agent cache → the top-level `<local>:` `sudo_password_command` → error**. `use_sudo` may be combined with `secrets`; the result is flagged `high_risk` and audited as `local_exec_sudo`.
-
-> **Don't conflate `<local>` / `local` / `localhost`**: `<local>` is the **reserved identity** for the MCP server's own machine (`local_exec`, no SSH); the angle brackets are illegal in a hostname, so it **can never** collide with a real host. `localhost` is an **ordinary SSH host** (connects to `127.0.0.1:22`, needs sshd + key/password), used by every remote tool. If you name some remote `local` in `hosts.yaml` / ssh config, it is likewise just an **ordinary remote host**, unrelated to the local `<local>`.
-
-### Named-secret injection: `secrets=[…]` + `portal secret set`
-
-Use this to hand a command an API token (a GitHub token, a deploy key, …) **without it entering the session history or being sent to the third-party LLM backend**. Same threat model as the sudo password: the agent passes only the secret's **name**, the server resolves the value and injects it as an **environment variable** into a one-shot command. The value travels via the process environment / SSH stdin (never on argv, so `ps` and the audit log can't see it), and any echo of it in the command output is redacted to `***` before the result reaches the agent.
-
-> **Why not just `export`?** The pain point: a throwaway `export TOKEN=…` never reaches the agent's execution context — it only affects the new terminal *you* opened, while the agent runs commands in the MCP server process's environment, which can't see it. The only way to make the agent use it was to `vim` a `.env` / secrets file for it to source — which puts the secret back on disk and is easy to forget to delete. This design turns "hand over a key once" into a **native no-echo CLI prompt** (`portal secret set` uses `getpass`, just like typing a password), with the value living only in per-user credential agent memory and auto-expiring on a TTL — never on disk, never to the LLM.
-
-- Remote: `remote_exec(host, cmd, secrets=["github_token"])`, referencing `$GITHUB_TOKEN` (the uppercased name) in `cmd`.
-- Local: `local_exec(cmd, secrets=["github_token"])` runs on the **MCP server host** (not over SSH). Local execution is an off-target derivative of the project's remote-driving goal, so it is **off by default** unless the server process has `PORTAL_ALLOW_LOCAL_EXEC=1`.
-
-Two sources (order: agent memory cache → `secrets.yaml`):
-
-1. **Secret manager (secrets.yaml)** — symmetric to `password_command`; a command that prints the secret to stdout:
-
-   ```yaml
-   secrets:
-     github_token:
-       command: pass show api/github      # or op read / printf "$ENV"
-   ```
-
-2. **Live input (`portal secret set`, interactive once)** — in a *separate* terminal:
-
-   ```bash
-   portal secret set github_token              # getpass, no echo
-   portal secret set github_token --ttl 1800   # custom TTL (s), default 900
-   portal secret confirm github_token          # prompt twice, cache only on match
-   portal secret show github_token             # sha256 fingerprint + TTL
-   portal secret list                          # every cached secret name
-   ```
-
-   The value is pushed over the systemd --user managed local unix socket into the per-user credential agent's memory cache: the `.socket` unit listens on `%t/portal-mcp-server/credentials.sock`, the installer records the resolved absolute path in `agent.json`, the directory is 0700, and the socket is 0600 / same-user only. It is never written to disk, never seen by the LLM, and is cleared on TTL expiry.
-
-See [`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` may be combined with `use_sudo` in a single `remote_exec` call.
-
-#### Implementation detail: how sudo + secrets coexist
-
-`use_sudo` and `secrets` share **one stdin channel**: the sudo password goes first, followed by each value in the order given in `secrets`. The actual command is wrapped with a small preamble that runs *after* sudo's `env_reset` (which by default wipes the inherited environment) has already fired, reading each value back line-by-line inside the now-elevated shell and re-exporting it:
-
-```
-IFS= read -r GITHUB_TOKEN
-export GITHUB_TOKEN
-<original command>
-```
-
-Because the `export` happens *after* `env_reset`, the value survives; because it travels on stdin rather than argv, it never shows up in `ps`, shell history, or the audit log, and no sudoers `env_keep` entry is required. The local (`local_exec`) and remote (`remote_exec`) paths behave identically; see `sudo_stdin_secret_script()` in `secrets_store.py`.
-
-#### Wait semantics: fail-fast → `ask_user` → retry
-
-No-echo input inherently means "wait for the human to type it," but **that wait is never put on the agent's critical path** — the MCP server is usually headless with no access to the user's tty, so it can neither pop a `getpass` prompt nor block the tool call until it times out. The contract is therefore:
-
-1. **Fail-fast**: when the secret (or sudo password) isn't ready, the tool **returns an error immediately and does not run the command**; the error never contains the value.
-2. **Bounce it back to the user**: the error explicitly nudges the agent to use an interactive input/choice tool (e.g. `ask_user`) to ask the user to run `portal secret set <name>` / `portal sudo set <host>` in a *separate* terminal and reply "ok" when done; the agent then retries the call.
-3. **No such tool → end the turn**: if the agent has no `ask_user`-style tool, it should **tell the user what to run and end its turn**, waiting for the user's next prompt to retry — rather than busy-waiting or polling.
-
-So "waiting" surfaces only as a normal conversational turn handoff: the `getpass` block lives in the user's own terminal, while the agent side is always "check cache → run on hit / fail-fast with instructions on miss." **Never ask the user to paste the value into the conversation** — that would feed it straight to the third-party LLM and defeat the entire design.
-
-> **How does this guidance reach the agent?** Entirely through **each portal tool's own description** — an MCP client always feeds tool descriptions to the model, so "when a task needs a token, steer the user to `portal secret set` instead of asking for plaintext" is written at the top of the `remote_exec` / `local_exec` descriptions.
-> MCP also defines a **server-level `instructions` field** (returned in the `initialize` response — a natural home for a global credential discipline), but the spec frames it as *“a ‘hint’ to the model … this information **MAY** be added to the system prompt”* ([InitializeResult.instructions](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle), an optional field) — **optional, entirely at the client's discretion**. Empirically (2026-06) **Copilot CLI / Codex CLI / Claude Code all ignore it** (none inject it into the model context), so portal does **not** rely on server-level instructions; the credential guidance lives in the per-tool descriptions instead.
-
-### Host resolution: hosts.yaml, then ssh config
-
-**Default lookup order** — resolving a host name is a two-step walk; the first hit wins:
-
-1. **hosts.yaml** (first) — read from the XDG config dir (`~/.config/portal-mcp-server/hosts.yaml`, override with `PORTAL_HOSTS_YAML`; see [Environment variables → File paths](#file-paths)).
-2. **OpenSSH client ssh config** (next) — when the name isn't in hosts.yaml, found via **OpenSSH's own logic**: user `~/.ssh/config` + system `/etc/ssh/ssh_config` fallback, **byte-for-byte aligned with `ssh -F`**. This step's parsing is delegated wholesale to **asyncssh's `SSHClientConfig` parser** (Include-aware, `%`-token and cross-platform `~` expansion) — portal doesn't hand-roll a scanner.
-
-Step 2 is controlled by `PORTAL_SSH_CONFIG` (see [File paths](#file-paths)): an absolute path reads only that file, unset reads user + system, and **`none` disables step 2 entirely** — host resolution then comes solely from hosts.yaml. `hosts(action="list")` lists hosts from both steps, each tagged with a `source` field.
-
-**Precedence** — by default, once a host name appears in `hosts.yaml` it **fully overrides** ssh config; ssh config isn't consulted for it. Opt in **per host with `use_ssh_config: true`** to instead **MERGE**: the ssh config alias is the base (HostName / User / Port / IdentityFile / IdentityAgent / ProxyJump / …) and the hosts.yaml fields you explicitly set layer on top (hosts.yaml wins where set, ssh config fills the rest). Footguns are surfaced as warnings (never blocking), delivered via `hosts(action="list")`'s `warnings` array (a stdio server's stderr is invisible to the user):
-
-- a name defined on **both** sides *without* `use_ssh_config` → hosts.yaml silently wins and ssh config's `IdentityFile`/`ProxyJump`/`User` are ignored; set `use_ssh_config: true` to merge them in instead;
-- `use_ssh_config: true` but no matching ssh-config alias → asyncssh falls back to a default DNS+user+key connection, probably not what you wanted;
-- `use_ssh_config: true` with a `host:` that disagrees with the alias's HostName → **refused** at connect time (reconcile: put the address in the ssh config `HostName`, or drop `host:` so it's inherited).
-
-**Merge recipe** (ssh config as the base, hosts.yaml overrides on top):
+The **local** counterpart on the MCP server's own machine, via local
+`sudo -S -k`, password also never in the LLM / argv / disk. Reserved identity
+**`<local>`** (≠ an SSH host `local`/`localhost`). Source: `portal sudo set-local`
+or a top-level `<local>:` section's `sudo_password_command` in hosts.yaml.
+Combinable with `secrets`; flagged `high_risk`, audited as `local_exec_sudo`.
 
 ```yaml
 hosts:
-  web01:                          # key MUST == the Host alias in ssh config
-    use_ssh_config: true          # MERGE: ssh config is the base (HostName/User/Port/IdentityFile/IdentityAgent/ProxyJump…); fields set below override it
-    tags: [web, prod]             # portal-only: remote_exec's group_tag
-    sudo_password_command: pass show sudo/web01   # portal-only
-    # user: deploy                # optional override of ssh config's User
-    # host: omit to inherit HostName; if set it MUST match the alias's HostName
+  # ... your remote hosts ...
+"<local>":                                # top-level reserved key, for local_exec only
+  sudo_password_command: pass show sudo/this-box
 ```
 
-`hosts(action="register", name="web01")` with only `name` auto-checks ssh config — a matching alias is registered as exactly this overlay.
+### Named secret injection: `secrets=[…]` + `portal secret set`
 
-**`list` lists both steps**: `hosts(action="list")` returns hosts.yaml / runtime entries **and** enumerates every `Host` alias in the ssh config (parsed by asyncssh, `Include`-aware, excluding `*`/`?`/`!` patterns), resolving real `HostName`/`User`/`Port`. Each entry carries a `source` field:
+For giving a command an API token without it entering session history or the
+third-party LLM: the agent passes only the **name**, the server resolves the
+value and injects it as an **environment variable** into a one-shot command; any
+echo of the value in output is redacted to `***` before returning.
 
-- `hosts.yaml` / `runtime` — from the hosts.yaml file / a runtime `register`; connection params are the fields themselves;
-- `ssh-config` — an alias found only in ssh config (user-level or the system fallback);
-- `hosts.yaml+ssh-config` / `runtime+ssh-config` — a `use_ssh_config: true` MERGE: connection params come from the ssh config alias as the base, with any fields set in the declared origin (tags/sudo… and any explicit `host`/`user`/`port`) overriding on top.
+- Remote: `remote_exec(host, cmd, secrets=["github_token"])`, write `$GITHUB_TOKEN`.
+- Local: `local_exec(cmd, secrets=["github_token"])` on the MCP server's own
+  machine (off-target derivative, **off by default**, needs `PORTAL_ALLOW_LOCAL_EXEC=1`).
 
-**Field mapping + incremental coverage**: the basics are all there (`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`); the common advanced fields `proxy_jump` (→ asyncssh `tunnel`), `keepalive_interval` (→ ServerAliveInterval), `forward_agent` (→ agent forwarding) are now **natively supported**; any remaining ssh config field is inherited by turning on the `use_ssh_config: true` merge.
+Two sources (order: agent cache → `secrets.yaml`):
 
-## Security
+```yaml
+secrets:
+  github_token:
+    command: pass show api/github      # or op read / printf "$ENV"
+```
 
-- **Default sandbox**: writes default to remote `/tmp/`; the agent must ask before touching `$HOME` or project source (a prompt-layer convention — see [Agent-side conventions](#agent-side-conventions)).
-- **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate limit; every state-changing tool runs through `_gate` with no side doors (`hosts(register)` gates against the target IP, not the alias; `remote_tunnel(action=close)` is gated; multi-host gates are two-phase). An optional [cc-safety-net](https://github.com/kenryu42/cc-safety-net) semantic gate (`policies.safety_net.enabled`) layers in at the same chokepoint: each command is handed to `cc-safety-net explain --json` for bypass-resistant analysis and refused if it resolves to a destructive git/rm/interpreter pattern — the same rules the Copilot-CLI PreToolUse hook applies, except that hook only inspects the agent's own `bash` tool and never sees portal MCP commands. Fail-closed by default (a checker that can't produce a verdict refuses the command).
-- **Authentication**: SSH keys are the default and recommended path; password auth is supported but only via `password_command` in `hosts.yaml`, never exposed through any MCP tool — config in [Authentication](#authentication), security design in [`SECURITY.md` § Authentication](./SECURITY.md#authentication).
-- **Audit**: every state-changing operation is appended to `$PORTAL_LOG_DIR/audit.jsonl` (default `~/.local/state/portal-mcp-server/log/audit.jsonl`); fail-closed by default (`PORTAL_AUDIT_FAIL_OPEN=1` switches to fail-open).
-- **Hash-protected edits**: `remote_read` + `remote_patch` use SHA-256 + per-range hashes + atomic `posix_rename` + post-write rehash to refuse concurrent overwrites.
+or `portal secret set github_token` (no-echo, TTL). Full config in
+[`examples/secrets.yaml`](./examples/secrets.yaml). `secrets` can combine with
+`use_sudo`.
 
-The full threat model, layer-by-layer defences, operator hygiene, known limitations, and algorithmic provenance live in **[`SECURITY.md`](./SECURITY.md)**.
+<details><summary>Implementation: sudo + secrets coexistence, and the wait semantics</summary>
 
-Vulnerability disclosure: do **not** open a public issue. Use [GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new) instead. Targets: acknowledgement within 48 hours, initial assessment within 7 days, resolution within 30 days for critical issues.
+`use_sudo` and `secrets` share **one stdin**: the sudo password first, then each
+secret value base64-encoded (one line each). The real command is prefixed with a
+small preamble that, after sudo's `env_reset`, reads each base64 line and decodes
+it inside the elevated shell — so a multi-line secret (PEM key, JSON blob)
+survives intact, the value never lands on argv (`ps`), and no sudoers `env_keep`
+is needed. Both `remote_exec` and `local_exec` implement this identically
+(`secrets_store.sudo_stdin_secret_script/_values`).
 
+**Wait semantics — fail-fast → ask_user → retry**: no-echo input inherently waits
+for a human, but that wait never blocks the agent's critical path. If a secret /
+sudo password isn't ready, the tool **returns an error immediately** (value-free)
+suggesting the agent use an interactive/choice tool (e.g. `ask_user`) to have the
+user run `portal secret set <name>` / `portal sudo set <host>` in another terminal
+and confirm, then retry. **Never ask the user to paste the value into the
+conversation.** This guidance reaches the agent via each tool's own description
+(MCP's server-level `instructions` field is optional and not injected by Copilot
+CLI / Codex / Claude Code, so portal doesn't rely on it).
 
-## Testing
+</details>
 
-### Unit + security (no real SSH required)
+### Host lookup: hosts.yaml + OpenSSH ssh config
+
+**Default order** (first hit wins): (1) `hosts.yaml` (from the XDG config dir);
+(2) OpenSSH ssh config (user `~/.ssh/config` + system fallback, mirroring `ssh -F`,
+parsed by asyncssh). `PORTAL_SSH_CONFIG=none` disables step 2. `hosts(action="list")`
+lists both with a `source` field.
+
+**Priority**: by default a same-named `hosts.yaml` host **fully overrides** ssh
+config. **Per-host `use_ssh_config: true`** switches to **merge**: the ssh-config
+alias is the base (HostName / User / Port / IdentityFile / IdentityAgent /
+ProxyJump …), with explicitly-set `hosts.yaml` fields overlaid. Footguns (all
+surfaced as warnings via `hosts(action=list)`): a same-named host on both sides
+without `use_ssh_config` (hosts.yaml silently wins); `use_ssh_config: true` with
+no matching alias; `use_ssh_config: true` with a `host:` that disagrees with the
+alias's HostName (**hard error on connect**). Base fields
+(`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`) plus
+`proxy_jump` / `keepalive_interval` / `forward_agent` are natively supported; other
+ssh-config fields need the merge.
+
+## <a id="security"></a>Security
+
+- **Default sandbox**: writes default to remote `/tmp/`; the agent must ask
+  before touching `$HOME` or project source (enforced at the prompt layer — see
+  [Agent-side conventions](#agent-conventions)).
+- **Policy gate**: host allowlist + command blocklist/allowlist + per-host rate
+  limit; every state-changing tool passes `_gate` with no side doors
+  (`hosts(register)` gates the target IP not the alias; `remote_tunnel(close)`
+  gates too; multi-host is two-phase). The optional
+  [cc-safety-net](https://github.com/kenryu42/cc-safety-net) semantic gate
+  (`policies.safety_net.enabled`) stacks in the same place — bypass-resistant
+  analysis that catches destructive git/rm/interpreter one-liners, the same rules
+  the Copilot-CLI PreToolUse hook uses (which never sees portal MCP commands).
+  Fail-closed by default.
+- **Authentication**: SSH key by default and recommended; password login via
+  `password_command` or `portal ssh set`, never exposed to MCP tools — see
+  [Authentication](#authentication) and [`SECURITY.en.md` § Authentication](./SECURITY.en.md).
+- **HTTP transport (optional)**: binds `127.0.0.1` by default; a non-loopback
+  bind without `PORTAL_AUTH_TOKEN` **refuses to start**, and portal serves
+  plaintext HTTP so terminate TLS in front.
+- **Tunnel / transfer boundaries**: `remote_tunnel` binds loopback by default
+  (off-box / reverse exposure needs `PORTAL_ALLOW_TUNNEL_EXPOSURE=1`);
+  `remote_transfer` directory modes don't follow local symlinks (no escaping the
+  tree), but still have the server user's local filesystem reach (like `scp`).
+- **Audit**: state changes write `$PORTAL_LOG_DIR/audit.jsonl` (dir `0700` /
+  file `0600`). The audit write happens **after** the operation, so fail-closed is
+  **response-level** — a failed write makes the tool error to the agent, but the
+  remote change already happened (see [`SECURITY.en.md`](./SECURITY.en.md));
+  `PORTAL_AUDIT_FAIL_OPEN=1` switches to fail-open.
+- **Hash-protected edits**: `remote_read` + `remote_patch` use SHA-256 + per-range
+  hash + atomic `posix_rename` + post-write rehash to **detect** concurrent
+  overwrite / mid-write disconnect / line drift (optimistic, not a filesystem CAS;
+  plain writes don't preserve mode/owner).
+- **Remote bash-history risk (unusual remote config)**: `remote_exec(secrets=…)`
+  injection relies on remote bash **disabling history in non-interactive mode**
+  (bash upstream design, same premise as `ssh`/`ansible`/CI shell steps). If a
+  remote admin **forces** `BASH_ENV` + `set -o history`, any SSH-based secret
+  injection tool (this one, `ssh`, `ansible`, CI runners) could leak the value
+  into `~/.bash_history`. This is a Unix/SSH-ecosystem premise, not a
+  project-specific weakness. Verify with `bash -s <<< 'echo test'`.
+
+Full threat model, per-layer detail, operator hygiene, known limitations and
+algorithm provenance are in **[`SECURITY.en.md`](./SECURITY.en.md)**.
+
+Vulnerability disclosure: **don't** open a public issue — use
+[GitHub Security Advisories](https://github.com/TMYTiMidlY/portal-mcp-server/security/advisories/new).
+Response window: 48 h ack / 7 day assessment / 30 day critical fix.
+
+## <a id="testing"></a>Testing
+
+### Unit + security (no real SSH)
 
 ```bash
 pytest tests/ -v
 # live SSH tests skip by default (gated by PORTAL_TEST_LIVE)
 ```
 
-Coverage: command-injection regression, safety validators, hash-protected editor, concurrency, resource lifecycle, multi-host policy enforcement, password_command / passphrase_command safety invariants, audit fail mode.
+Covers: command-injection regression, safety validators, hash-protected editor,
+concurrency, resource lifecycle, multi-host policy enforcement,
+`password_command`/`passphrase_command` security invariants, audit fail mode.
 
 ### End-to-end live smoke
 
-`tests/live_smoke.py` imports the local working tree and drives a series of real SSH actions: stale `password:` field handling in `hosts.yaml`, basic `ssh_exec`, `remote_exec(host=[...]/group_tag=...)` against real hosts (verifying both blocked-command and not-in-allowlist hosts get rejected), per-command gating in `remote_shell`, a `remote_shell` + `remote_patch` round-trip in remote `/tmp/` (including the stale-hash rejection path), and audit.jsonl ingestion of the new operation tags.
+`tests/live_smoke.py` drives real SSH behavior directly from the local tree.
 
 ```bash
 PORTAL_AUDIT_FAIL_OPEN=1 \
@@ -1091,81 +1088,86 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
     python tests/live_smoke.py
 ```
 
-⚠️ It writes one file under remote `/tmp/portal-mcp-server-smoke-<pid>.txt` and removes it at the end. Stays inside `/tmp`.
+⚠️ It writes once under remote `/tmp/portal-mcp-server-smoke-<pid>.txt` then
+removes it — `/tmp` only.
 
-## CI / Release
+## <a id="ci-release"></a>CI / Release
 
-GitHub Actions handles both testing and publishing — you never need a local `python -m build`:
+- **CI** ([`ci.yml`](.github/workflows/ci.yml)): every PR / push to `main` runs
+  `ruff check portal_mcp_server/ tests/` + `pytest tests/` on Python
+  **3.10 / 3.11 / 3.12 / 3.13** (ubuntu), plus a macOS full-suite job and a
+  Windows named-pipe / scheduled-task job; all green to merge.
+- **Release** ([`release.yml`](.github/workflows/release.yml)): pushing a `v*` tag
+  (incl. PEP 440 pre/dev/post, e.g. `v4.0.0a0`) triggers `python -m build` (wheel +
+  sdist) → GitHub Release body from the matching `CHANGELOG.md` section → publish
+  to [PyPI](https://pypi.org/project/portal-mcp-server/) via
+  [trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC, no static
+  token).
 
-- **CI** ([`ci.yml`](.github/workflows/ci.yml)): every PR / push to `main` runs `ruff check portal_mcp_server/` + `pytest tests/` on Python **3.10 / 3.11 / 3.12 / 3.13**; all four must be green to merge.
-- **Release** ([`release.yml`](.github/workflows/release.yml)): pushing a `v*.*.*` tag triggers a three-stage pipeline — `python -m build` produces wheel + sdist → the matching `CHANGELOG.md` section is awk-extracted into the [GitHub Release](https://github.com/TMYTiMidlY/portal-mcp-server/releases) body → the artifacts are published to [PyPI](https://pypi.org/project/portal-mcp-server/) via [trusted publishing](https://docs.pypi.org/trusted-publishers/) (OIDC short-lived tokens, no static `PYPI_API_TOKEN`).
+Full release flow, CHANGELOG format constraints and failure triage are in
+[`CONTRIBUTING.en.md` § CI & Release automation](./CONTRIBUTING.en.md).
 
-The full release procedure, CHANGELOG format constraint, and recovery
-playbook live in [`CONTRIBUTING.en.md` § CI & Release automation](./CONTRIBUTING.en.md#ci--release-automation).
+## <a id="faq"></a>FAQ
 
-## FAQ
+### Local changes don't show up in the agent
 
-### Local edits don't show up in the agent
-
-`uvx portal-mcp-server` launches from PyPI cache. If you modified local code, the agent won't see it — it uses the published PyPI version.
-
-| Where you edited | Will the agent see it? |
-|---|---|
-| Local working tree | ❌ No. uvx pulls from PyPI, not a local path |
-| New version published to PyPI | ✅ Use `uvx portal-mcp-server@latest` or `--refresh` to update the cache |
-
-For local debugging without publishing, point your `.mcp.json`'s `args` at your working tree:
-
-```json
-"args": ["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]
-```
-
-(Path must be absolute.) **Don't commit this local path into a shared project-level `.mcp.json`.**
+`uvx portal-mcp-server` launches from the PyPI cache. If you edited local code,
+the agent uses the published version. For local debugging, temporarily set
+`.mcp.json` `args` to `["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]`
+(absolute path). **Don't commit that local path into a project `.mcp.json`.**
 
 ### Connection timeout / Permission denied (publickey)
 
-1. Confirm that `ssh user@host` works from a terminal first
-2. Check key permissions: `chmod 600 ~/.ssh/id_ed25519`
-3. If using `~/.ssh/config`, verify the `Host` alias, `HostName`, `User`, and `IdentityFile` are correct
-4. Jump hosts (ProxyJump): asyncssh natively supports `ProxyJump` from `~/.ssh/config` — make sure the jump host itself is reachable via `ssh`
+1. Confirm `ssh user@host` connects directly in a terminal.
+2. Check key perms: `chmod 600 ~/.ssh/id_ed25519`.
+3. If using `~/.ssh/config`, confirm the `Host` alias / `HostName` / `User` /
+   `IdentityFile`.
+4. For ProxyJump, asyncssh honors `~/.ssh/config`'s `ProxyJump`; confirm the
+   bastion connects manually too.
 
-### Connections drop after MCP client restart
+### Connection drops after the MCP client restarts
 
-This is expected. The connection pool lives inside the MCP server process. When the MCP client restarts, it stops the server process and the pool is released. The next portal tool call will automatically reconnect.
+Expected — the pool follows the MCP server process lifecycle. A client restart
+closes the server; the next tool call rebuilds connections automatically.
 
-### How to update to the latest version
+### Update to the latest version
 
 ```bash
-# Temporary uvx run: refresh the cache and re-fetch the latest PyPI build
-uvx portal-mcp-server@latest --help
-
-# Persistent PATH install: upgrade the installed uv tool
-uv tool upgrade portal-mcp-server
+uvx portal-mcp-server@latest --help    # refresh the uvx cache
+uv tool upgrade portal-mcp-server      # if installed as a persistent uv tool
 ```
 
 Then restart the MCP client.
 
-## Contributing
+## <a id="contributing"></a>Contributing
 
-Issues and PRs welcome. Quick rules:
+Issues and PRs welcome. Short version:
 
-- Python 3.10+, all I/O `async/await`, no blocking calls
-- No hardcoded hostnames / usernames / IPs / paths
-- Every new tool needs a docstring (FastMCP uses it as the MCP description) and an entry in the README "Tools" section (including the collapsible full-signature + source-map tables)
-- State-changing tools must call `_gate` and emit `audit_log`
-- `pytest tests/ -v` must be green
-- Never commit secrets; `examples/hosts.yaml` is the only schema template
-- Use [Conventional Commits](https://www.conventionalcommits.org/) for commit messages
+- Python 3.10+, all I/O `async/await`, no blocking calls.
+- No hard-coded hostname / username / IP / path.
+- New tools need a good docstring (FastMCP uses it as the MCP description) + a
+  README "Tools" update (incl. the folded full signature + source-map table).
+- State-changing tools must pass `_gate` + write `audit_log`.
+- Tests cover key paths; `pytest tests/ -v` must be all green.
+- Don't commit secrets; `examples/hosts.yaml` is the one schema template.
+- Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/).
 
-The full development setup, new-tool checklist, PR template, and security & privacy rules are in **[`CONTRIBUTING.en.md`](./CONTRIBUTING.en.md)** ([中文](./CONTRIBUTING.md)).
+Full dev flow, new-tool checklist, PR template, and security / privacy rules are
+in **[`CONTRIBUTING.en.md`](./CONTRIBUTING.en.md)** ([简体中文](./CONTRIBUTING.md)).
 
-## License & attribution
+## <a id="license-credits"></a>License & credits
 
 Apache License 2.0 (see [`LICENSE`](LICENSE)).
 
-Lineage and third-party algorithmic references are tracked in [`NOTICE`](NOTICE):
+Derivation and third-party algorithm provenance are in [`NOTICE`](NOTICE):
 
-- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp) (Apache 2.0)** — git ancestor; the lower-level modules (asyncssh engine, connection pool, tunnel manager, orchestrator, security policy) are inherited. The 14-tool portal upper layer is new.
-- **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT)** — algorithmic reference for the SHA-256 hash-protected edit semantics in `remote_text_editor.py`, reimplemented for AsyncSSH SFTP.
+- **[`jaguar999paw-droid/ssh-shell-mcp`](https://github.com/jaguar999paw-droid/ssh-shell-mcp)
+  (Apache 2.0)** — git ancestry; the underlying modules (asyncssh engine, pool,
+  tunnel management, orchestrator, security policy) are carried over; the 14
+  portal tools on top are a new design.
+- **[`tumf/mcp-text-editor`](https://github.com/tumf/mcp-text-editor) (MIT)** —
+  the SHA-256 hash-protected edit algorithm behind `remote_text_editor.py`,
+  rewritten for AsyncSSH SFTP.
 
-> ⚠️ This tool gives an agent SSH access to remote systems. Use it only on systems you own or are authorised to access.
+> ⚠️ This tool gives an agent SSH access to remote systems. Use it only on
+> systems you own or are authorized to access.

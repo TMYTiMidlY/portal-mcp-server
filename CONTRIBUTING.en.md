@@ -19,7 +19,7 @@ pytest                         # should be all green (live SSH tests skip by def
 To point an MCP client at this local checkout, install it as a fixed executable:
 
 ```bash
-uv tool install --force .      # --force overwrites the old tool with this checkout
+uv tool install --force --editable .   # --force overwrites the old tool; --editable makes source edits apply immediately
 ```
 
 If you'd rather not use uv, plain pip works:
@@ -170,7 +170,7 @@ A PR can only land when all four Python versions are green.
 ### Release — `.github/workflows/release.yml`
 
 Triggers:
-- pushing a tag matching `v*.*.*` (**production path**)
+- pushing a tag matching `v*` (including PEP 440 pre/dev/post, e.g. `v4.0.0a0`) (**production path**)
 - `workflow_dispatch` (manual fallback)
 
 Three jobs run in order:
@@ -255,7 +255,7 @@ manually.**
 
 > `cz bump` does not push on its own (so you can still back out).
 > `--follow-tags` pushes the annotated tag together with `main`;
-> release.yml is triggered by `push: tags: ['v*.*.*']`.
+> release.yml is triggered by `push: tags: ['v*']` (`v*`, not `v*.*.*`, so a PEP 440 prerelease tag like `v4.0.0a0` also triggers it).
 
 ### When a release fails
 
