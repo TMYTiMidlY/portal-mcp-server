@@ -896,6 +896,12 @@ ssh-add ~/.ssh/id_ed25519        # 输一次 passphrase
 
 headless / CI 跑不动 ssh-agent 时，可在 `hosts.yaml` 写 `passphrase_command:`（见下）。
 
+**agent 对所有 key 认证并行生效，不只加密私钥**：默认（`use_ssh_agent` 省略 = auto）下，asyncssh 会把本地 key 文件和 `$SSH_AUTH_SOCK` **并行**试一遍——任何 `ssh-add` 进 agent 的 key，对任意 key-auth host 都能直接认过去，哪怕 `hosts.yaml` 里没写 `key:`。想收紧就在该 host 上设 `use_ssh_agent`：
+
+- 省略 = **auto**：key 文件 + ssh-agent 并行（默认，最省心）；
+- `true` = **纯 agent**：只认 agent 持有的 key、不传 key 文件，私钥永不出 agent；
+- `false` = **硬禁用**：只用 key 文件，完全不碰 agent。
+
 ### 密码登录：`password_command` 或 `portal ssh set`
 
 兼容历史不让换 key 的远端机器。两条铁律：
@@ -1126,7 +1132,7 @@ hosts:
 - `ssh-config` —— 只在 ssh config 里（用户级或系统级 fallback）的别名；
 - `hosts.yaml+ssh-config` / `runtime+ssh-config` —— `use_ssh_config: true` 合并：连接参数以 ssh config 别名为基底，声明处显式设的字段（tags/sudo… 以及显式的 `host`/`user`/`port`）叠在上面覆盖。
 
-**字段对照 + 渐进补全**：基础字段全有（`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`），常用高级字段 `proxy_jump`（→ asyncssh `tunnel`）、`keepalive_interval`（→ ServerAliveInterval）、`forward_agent`（→ agent 转发）现已**原生支持**；其余 ssh config 字段靠开 `use_ssh_config: true` 合并继承。`proxy_jump` 用**值语义**：不写 = 沿用 ssh config 的 `ProxyJump`（合并模式）；写 `proxy_jump: none` = **强制直连**（覆盖 ssh config 的 `ProxyJump`）；空串 / `null` 是歧义值（想直连还是继承？），连接时**直接报错**——改用 `none` 或删掉该键。
+**字段对照 + 渐进补全**：基础字段全有（`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`），常用高级字段 `proxy_jump`（→ asyncssh `tunnel`）、`keepalive_interval`（→ ServerAliveInterval）、`forward_agent`（→ agent 转发）、`use_ssh_agent`（→ ssh-agent 使用策略：省略=auto / `true`=纯 agent / `false`=禁用）现已**原生支持**；其余 ssh config 字段靠开 `use_ssh_config: true` 合并继承。`proxy_jump` 用**值语义**：不写 = 沿用 ssh config 的 `ProxyJump`（合并模式）；写 `proxy_jump: none` = **强制直连**（覆盖 ssh config 的 `ProxyJump`）；空串 / `null` 是歧义值（想直连还是继承？），连接时**直接报错**——改用 `none` 或删掉该键。
 
 ## <a id="security"></a>安全
 

@@ -884,6 +884,14 @@ memory with a TTL and is dropped automatically, never on disk.
 Use ed25519 and distribute with `ssh-copy-id`; asyncssh discovers ssh-agent via
 `$SSH_AUTH_SOCK`. For headless/CI, write `passphrase_command:` in `hosts.yaml`.
 
+**The agent applies to all key auth in parallel, not just encrypted keys**: by
+default (`use_ssh_agent` omitted = auto) asyncssh tries local key files **and**
+`$SSH_AUTH_SOCK` together — any key you `ssh-add`ed authenticates to any key-auth
+host, even with no `key:` in `hosts.yaml`. Tighten it per host with
+`use_ssh_agent`: omit = **auto** (files + agent in parallel); `true` =
+**agent-only** (no key files passed, the key never leaves the agent); `false` =
+**hard-disable** (key files only).
+
 ### Password login: `password_command` or `portal ssh set`
 
 Two rules: **never** put a plaintext `password:` in `hosts.yaml` (rejected at
@@ -1012,7 +1020,8 @@ without `use_ssh_config` (hosts.yaml silently wins); `use_ssh_config: true` with
 no matching alias; `use_ssh_config: true` with a `host:` that disagrees with the
 alias's HostName (**hard error on connect**). Base fields
 (`host`/`port`/`user`/`key`/`known_hosts`/`strict_host_key_checking`/`auth`) plus
-`proxy_jump` / `keepalive_interval` / `forward_agent` are natively supported; other
+`proxy_jump` / `keepalive_interval` / `forward_agent` / `use_ssh_agent` (omit=auto /
+`true`=agent-only / `false`=disable) are natively supported; other
 ssh-config fields need the merge. `proxy_jump` uses **value semantics**: omitting it
 inherits the ssh-config `ProxyJump` (merge mode); `proxy_jump: none` **forces a direct
 connection** (overriding it); an empty/`null` value is ambiguous (direct vs. inherit?)
