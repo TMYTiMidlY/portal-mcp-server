@@ -26,6 +26,8 @@ uv tool install --force --refresh 'portal-mcp-server==<ver>'
 which -a portal && portal --version           # 确认 PATH 命中的就是这一版
 ```
 
+> ⚠️ `uv tool install 'portal-mcp-server==<ver>'` 把常驻安装钉在 `==<ver>`（receipt 里的 `==` 会让之后 `uv tool upgrade` 推不动）——这是**临时验收态**，测完必须还原到不 pin 的发布态（见下方「清理」段）。
+
 credential agent 是 systemd `--user` socket-activated 服务，`ExecStart` 从 uv tool 的 venv 跑；上面 `--force` 换代码后要 `systemctl --user restart <agent-service>` 让常驻进程加载新版本。**重启会清空所有 TTL 缓存**——先向用户说明再做。`portal agent status` 应报四种 kind（ssh / passphrase / sudo / secret）计数。
 
 MCP 侧：把 client 配置里 portal server 也 pin 到 `@<ver>`，人工重启 client 后 agent 调 `inspect(view="server")`，确认版本一致且工具名是当前一代（`remote_exec` / `inspect` / `hosts` …）。此关通过前不输入任何凭据。
@@ -96,5 +98,5 @@ sudo 相关调用结果会标 `high_risk`；跑完向用户说明用缓存的 su
 
 - 按 alias `portal <kind> clear`，不做全局 `portal agent clear`（免误清其它临时凭据）。
 - 临时 key：按唯一 comment 从远端 `authorized_keys` 撤公钥；本地私钥 / 公钥用 `trash-put`（不用 `rm`）；移除临时 alias。远端若因测试新建了 `~/.ssh` 或 `authorized_keys`，按测前记录的原状还原（原本不存在就整个删掉）。
-- 为复现或诊断而临时改动的环境（临时装的依赖、pin 的版本等）测完还原到发布态。
+- **常驻安装还原**：预检把 `uv tool install` 钉到了 `==<ver>`（receipt 里的 `==` 会让之后 `uv tool upgrade` 推不动），测完还原成不 pin 的发布态——`uv tool install --force portal-mcp-server`（回最新 stable、去掉 `==`），再 `systemctl --user restart <agent-service>` 让 credential agent 换回还原后的版本；MCP client 配置里 pin 的 `@<ver>` 也改回 `portal-mcp-server`（或 `uvx portal-mcp-server@latest`）后重启 client。其它为复现临时装的依赖一并还原。
 - 测试改动的备份（`hosts.yaml` / MCP 配置 / `known_hosts`）保留为回滚点，去留交用户定。
