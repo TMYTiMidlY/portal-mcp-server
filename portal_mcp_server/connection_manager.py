@@ -220,6 +220,9 @@ class PooledConnection:
     created_at: float
     last_used: float
     in_use: int = 0
+    # Set when the host is reconfigured/removed while this connection is still
+    # in use: it is never handed out again and is closed on release.
+    stale: bool = False
 
     @property
     def is_alive(self) -> bool:
@@ -269,6 +272,10 @@ class ConnectionManager:
         self._local_sudo_password_command: Optional[str] = None
         self._pool: dict[str, list[PooledConnection]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        # Bumped whenever a host is (re)registered or removed. get_connection
+        # captures it before its connect await and discards a connection built
+        # against a since-superseded config (see _invalidate_pool).
+        self._generation: dict[str, int] = {}
         # Clamp to >=1: pool_size 0 would make the overload branch call
         # min() on an empty list and crash get_connection with an opaque
         # ValueError (PORTAL_SSH_POOL_SIZE="0" is otherwise accepted).
@@ -642,6 +649,11 @@ class ConnectionManager:
         elif name in self._config_warnings:
             # Re-registering cleanly clears a stale overlay warning.
             self._config_warnings.pop(name, None)
+        # Re-registration may change the dial address / user / auth, so any
+        # pooled connection is now to a superseded target: bump the generation
+        # and invalidate the pool so later ops don't reuse the old connection.
+        self._generation[name] = self._generation.get(name, 0) + 1
+        self._invalidate_pool(name)
         if use_ssh_config:
             label = self._ssh_config_label()
             logger.info(f"Registered host: {name} (via {label})")
@@ -717,24 +729,45 @@ class ConnectionManager:
         return {k: list(v) for k, v in self._config_warnings.items()}
 
     def remove_host(self, name: str) -> str:
+        name = normalize_host_name(name)
         if name not in self._registry:
             return f"Host '{name}' not found"
         del self._registry[name]
-        # Drop the lazy lock (otherwise ``_locks`` grows indefinitely if hosts
-        # churn) and close any pooled connections so we do not leak SSH
-        # channels for an alias the caller has explicitly forgotten. Also
-        # drop any cached config warnings — re-registering the same alias
-        # cleanly later must not resurrect stale "BOTH hosts.yaml and ssh
-        # config" diagnostics from the previous instance.
-        self._locks.pop(name, None)
+        # Drop the config warnings (re-registering the same alias cleanly later
+        # must not resurrect stale diagnostics), bump the generation, and
+        # invalidate pooled connections so we don't leak SSH channels for an
+        # alias the caller has explicitly forgotten. Idle connections close now;
+        # in-use ones are marked stale and close on release (so we never yank a
+        # connection out from under an in-flight command).
         self._config_warnings.pop(name, None)
-        pool = self._pool.pop(name, [])
-        for pc in pool:
-            try:
-                pc.conn.close()
-            except Exception:  # pragma: no cover
-                pass
+        self._generation[name] = self._generation.get(name, 0) + 1
+        self._invalidate_pool(name)
+        # Drop the lazy lock last (otherwise ``_locks`` grows indefinitely if
+        # hosts churn); a concurrent waiter already holds the same lock object.
+        self._locks.pop(name, None)
         return f"Host '{name}' removed from registry"
+
+    def _invalidate_pool(self, name: str) -> None:
+        """Retire pooled connections for a host whose config changed/was removed.
+
+        Idle connections are closed immediately; connections still in use are
+        marked ``stale`` (kept so :meth:`release_connection` can close them when
+        the in-flight op finishes) and are never handed out again."""
+        pool = self._pool.get(name)
+        if not pool:
+            self._pool.pop(name, None)
+            return
+        keep: list[PooledConnection] = []
+        for pc in pool:
+            if pc.in_use == 0:
+                self._close_pc(pc, reason="host reconfigured/removed")
+            else:
+                pc.stale = True
+                keep.append(pc)
+        if keep:
+            self._pool[name] = keep
+        else:
+            self._pool.pop(name, None)
 
     async def _get_lock(self, name: str) -> asyncio.Lock:
         # ``setdefault`` is atomic under the GIL, so two concurrent tasks for
@@ -1045,8 +1078,10 @@ class ConnectionManager:
                     f"or add a Host alias to {self._ssh_config_label()}."
                 )
         cfg = self._registry[host_name]
+        gen = self._generation.get(host_name, 0)
         lock = await self._get_lock(host_name)
 
+        superseded_conn = None
         async with lock:
             pool = self._pool.get(host_name, [])
             now = time.time()
@@ -1063,17 +1098,20 @@ class ConnectionManager:
                 else:
                     alive.append(pc)
             self._pool[host_name] = alive
+            # Stale connections (host reconfigured mid-use) are kept for release
+            # bookkeeping but never handed out again or counted toward capacity.
+            usable = [pc for pc in alive if not pc.stale]
 
             # ── Reuse an alive connection with channel capacity ──
-            for pc in alive:
+            for pc in usable:
                 if pc.in_use < self._max_channels_per_conn:
                     pc.last_used = now
                     pc.in_use += 1
                     return pc.conn
 
             # ── Pool at capacity: overload the least-busy connection ──
-            if len(alive) >= self._pool_size:
-                least = min(alive, key=lambda p: p.in_use)
+            if usable and len(usable) >= self._pool_size:
+                least = min(usable, key=lambda p: p.in_use)
                 logger.warning(
                     "Pool for '%s' at capacity (%d conns, all ≥%d channels); "
                     "overloading connection (in_use=%d→%d)",
@@ -1112,12 +1150,29 @@ class ConnectionManager:
                 pw_kwargs["client_keys"] = []
                 pw_kwargs.pop("passphrase", None)
                 conn = await asyncssh.connect(**pw_kwargs)
-            pc = PooledConnection(
-                host_name=host_name, conn=conn,
-                created_at=now, last_used=now, in_use=1,
-            )
-            self._pool[host_name].append(pc)
-            return conn
+            # The host may have been reconfigured/removed during the connect
+            # await (register_host / remove_host bump the generation). If so this
+            # connection is to a now-superseded target — discard and retry
+            # against the current config instead of pooling a stale connection.
+            if self._generation.get(host_name, 0) == gen:
+                pc = PooledConnection(
+                    host_name=host_name, conn=conn,
+                    created_at=now, last_used=now, in_use=1,
+                )
+                self._pool.setdefault(host_name, []).append(pc)
+                return conn
+            superseded_conn = conn
+
+        # (lock released) generation changed mid-connect → drop this connection
+        # and rebuild against the current config.
+        if superseded_conn is not None:
+            try:
+                superseded_conn.close()
+            except Exception:  # pragma: no cover
+                pass
+        logger.info("Config for '%s' changed during connect; reconnecting",
+                    host_name)
+        return await self.get_connection(host_name)
 
     @asynccontextmanager
     async def connection(self, host_name: str) -> AsyncIterator[asyncssh.SSHClientConnection]:
@@ -1141,6 +1196,11 @@ class ConnectionManager:
             if pc.conn is conn:
                 pc.in_use = max(0, pc.in_use - 1)
                 pc.last_used = time.time()
+                # A connection retired while in use (host reconfigured/removed)
+                # is closed once its last channel is released; the next prune
+                # drops it from the pool.
+                if pc.stale and pc.in_use == 0:
+                    self._close_pc(pc, reason="stale released")
                 return
 
     def _close_pc(self, pc: PooledConnection, *, reason: str = "") -> None:

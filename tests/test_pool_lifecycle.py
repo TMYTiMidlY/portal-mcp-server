@@ -334,3 +334,59 @@ class TestReuseLeastLoaded:
 
         conn = await mgr.get_connection("h")
         assert conn is fc3
+
+
+# ── register/remove invalidate pooled connections (config-generation guard) ──
+class TestRegisterInvalidatesPool:
+    def test_reregister_closes_idle_pooled_conn(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        mgr.register_host("h", "1.2.3.4")
+        fc = _inject_conn(mgr, "h", in_use=0)      # idle conn to the OLD address
+        assert not fc._closed
+        mgr.register_host("h", "5.6.7.8")           # re-register with a new addr
+        assert fc._closed                            # stale idle conn invalidated
+        assert mgr._pool.get("h", []) == []
+
+    def test_reregister_marks_inuse_stale_then_closes_on_release(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        mgr.register_host("h", "1.2.3.4")
+        fc = _inject_conn(mgr, "h", in_use=1)       # a channel is in flight
+        mgr.register_host("h", "5.6.7.8")
+        pcs = mgr._pool.get("h", [])
+        assert len(pcs) == 1 and pcs[0].stale and not fc._closed  # kept, not yanked
+        mgr.release_connection("h", fc)             # last channel released
+        assert fc._closed
+
+    def test_remove_host_invalidates_idle_conn(self, tmp_path):
+        mgr = _make_manager(tmp_path)
+        mgr.register_host("h", "1.2.3.4")
+        fc = _inject_conn(mgr, "h", in_use=0)
+        mgr.remove_host("h")
+        assert fc._closed
+        assert "h" not in mgr._pool
+
+    @pytest.mark.asyncio
+    async def test_reregister_during_connect_discards_and_retries(self, tmp_path, monkeypatch):
+        """If the host is reconfigured while a connect is in flight, the
+        connection built against the old config is discarded and get_connection
+        retries against the new one (no stale conn pooled, no KeyError)."""
+        import asyncssh
+        mgr = _make_manager(tmp_path, pool_size=2, max_channels_per_conn=2)
+        mgr.register_host("h", "1.2.3.4")
+        conns: list = []
+        first = {"done": False}
+
+        async def fake_connect(**kw):
+            fc = FakeConn()
+            conns.append((kw.get("host"), fc))
+            if not first["done"]:
+                first["done"] = True
+                mgr.register_host("h", "9.9.9.9")   # re-register mid-connect
+            return fc
+
+        monkeypatch.setattr(asyncssh, "connect", fake_connect)
+        conn = await mgr.get_connection("h")
+        assert len(conns) == 2                       # first attempt + retry
+        assert conns[0][1]._closed                    # superseded conn closed
+        assert conn is conns[1][1]                    # returned the retry conn
+        assert conn in [pc.conn for pc in mgr._pool.get("h", [])]
