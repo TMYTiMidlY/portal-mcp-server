@@ -525,7 +525,8 @@ claude mcp add portal -- portal-mcp-server
 <details><summary><b>GitHub Copilot CLI</b></summary>
 
 ```bash
-copilot mcp add portal -- uvx portal-mcp-server@latest
+copilot mcp add portal -- portal-mcp-server
+# Zero-install: replace portal-mcp-server with  uvx portal-mcp-server@latest
 # or /mcp inside a Copilot CLI session
 ```
 
@@ -550,15 +551,18 @@ VS Code uses a proprietary schema whose top-level key is `servers`, not
   "servers": {
     "portal": {
       "type": "stdio",
-      "command": "uvx",
-      "args": ["portal-mcp-server@latest"]
+      "command": "portal-mcp-server",
+      "args": []
     }
   }
 }
 ```
 
-Write it to `<project>/.vscode/mcp.json`, or the `mcp` field of user
-`settings.json` for global use.
+Zero-install: use `"command": "uvx"` + `"args": ["portal-mcp-server@latest"]`.
+VS Code is a GUI app that may not inherit your shell PATH — if `portal-mcp-server`
+isn't found, use the absolute path from `which portal-mcp-server` (same as the
+PATH note under the generic snippet above). Write it to
+`<project>/.vscode/mcp.json`, or the `mcp` field of user `settings.json` for global use.
 
 </details>
 
@@ -580,15 +584,17 @@ Cascade → plugins → "Manually configure MCP".
 <details><summary><b>OpenAI Codex CLI</b></summary>
 
 ```bash
-codex mcp add portal -- uvx portal-mcp-server@latest   # global
+codex mcp add portal -- portal-mcp-server   # global
+# Zero-install: replace portal-mcp-server with  uvx portal-mcp-server@latest
 ```
 
 Or edit `~/.codex/config.toml`:
 
 ```toml
 [mcp_servers.portal]
-command = "uvx"
-args = ["portal-mcp-server@latest"]
+command = "portal-mcp-server"
+args = []
+# Zero-install: command = "uvx", args = ["portal-mcp-server@latest"]
 ```
 
 </details>
@@ -1188,10 +1194,18 @@ Full release flow, CHANGELOG format constraints and failure triage are in
 
 ### Local changes don't show up in the agent
 
-`uvx portal-mcp-server` launches from the PyPI cache. If you edited local code,
-the agent uses the published version. For local debugging, temporarily set
-`.mcp.json` `args` to `["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]`
-(absolute path). **Don't commit that local path into a project `.mcp.json`.**
+Whether run via the `uv tool install`'d `portal-mcp-server` or `uvx`, both use the
+**PyPI-published build**, not your working tree — local edits aren't seen. For
+local debugging, either do an editable install (recommended; `command` stays
+`portal-mcp-server`):
+
+```bash
+uv tool install --force --editable .
+```
+
+or, with uvx, temporarily set `.mcp.json` `args` to
+`["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]` (absolute
+path). **Don't commit that local path into a project `.mcp.json`.**
 
 ### Connection timeout / Permission denied (publickey)
 
@@ -1219,8 +1233,8 @@ closes the server; the next tool call rebuilds connections automatically.
 ### Update to the latest version
 
 ```bash
-uvx portal-mcp-server@latest --help    # refresh the uvx cache
-uv tool upgrade portal-mcp-server      # if installed as a persistent uv tool
+uv tool upgrade portal-mcp-server      # installed (recommended); or uv tool upgrade --all
+uvx portal-mcp-server@latest --help    # zero-install: refresh the uvx cache
 ```
 
 Then restart the MCP client.

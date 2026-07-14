@@ -397,7 +397,7 @@ portal ssh    clear web01            # 清掉单条
 
 [![Install in VS Code](https://img.shields.io/badge/VS_Code-Install_Server-0098FF?style=flat-square&logo=visualstudiocode&logoColor=white)](https://vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D) [![Install in VS Code Insiders](https://img.shields.io/badge/VS_Code_Insiders-Install_Server-24bfa5?style=flat-square&logo=visualstudiocode&logoColor=white)](https://insiders.vscode.dev/redirect/mcp/install?name=portal&config=%7B%22type%22%3A%22stdio%22%2C%22command%22%3A%22uvx%22%2C%22args%22%3A%5B%22portal-mcp-server%40latest%22%5D%7D&quality=insiders) [![Install in Cursor](https://img.shields.io/badge/Cursor-Install_Server-000000?style=flat-square&logo=cursor&logoColor=white)](https://cursor.com/en/install-mcp?name=portal&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyJwb3J0YWwtbWNwLXNlcnZlckBsYXRlc3QiXX0=)
 
-`portal-mcp-server` 是一个本地 stdio MCP server，所有支持 MCP 的 host 都能接入。下面给常见 host 的最小配置。**推荐先 `uv tool install portal-mcp-server`，再把 `command` 填 `portal-mcp-server`**；下面每个 client 的一键 badge / `mcp add` 命令用的是零安装的 `uvx portal-mcp-server@latest` 形式，装过的把 `uvx` + `portal-mcp-server@latest` 换成 `portal-mcp-server` 即可。
+`portal-mcp-server` 是一个本地 stdio MCP server，所有支持 MCP 的 host 都能接入。下面给常见 host 的最小配置，命令示例**默认用装好的 `portal-mcp-server`**（先 `uv tool install portal-mcp-server`）；零安装就把 `command` 换成 `uvx` + `portal-mcp-server@latest`（上方一键 badge 走的正是这个零安装形式）。
 
 > 如果 MCP client 找不到 `portal-mcp-server`（或 `uvx`）——常见于 GUI app（Claude Desktop / VS Code）不继承你 shell 的 PATH——用 `which portal-mcp-server`（Windows 用 `where portal-mcp-server`）查绝对路径填进 `command`。`uv tool` 装的这个路径（`~/.local/bin/portal-mcp-server`）跨 `uv tool upgrade` 不变，写死也稳。
 
@@ -465,7 +465,8 @@ claude mcp add portal -- portal-mcp-server
 写 `<project>/.mcp.json` 即在该项目内生效；或一行命令登记到 user 级（对所有项目生效）：
 
 ```bash
-copilot mcp add portal -- uvx portal-mcp-server@latest
+copilot mcp add portal -- portal-mcp-server
+# 零安装：把 portal-mcp-server 换成 uvx portal-mcp-server@latest
 # 或在 Copilot CLI 会话内输入 /mcp 走交互登记
 ```
 
@@ -495,14 +496,14 @@ copilot mcp get portal          # 检查 Source 是 Workspace / User
   "servers": {
     "portal": {
       "type": "stdio",
-      "command": "uvx",
-      "args": ["portal-mcp-server@latest"]
+      "command": "portal-mcp-server",
+      "args": []
     }
   }
 }
 ```
 
-要全局生效，可以把同样的 `servers` 段写进 VS Code 用户 `settings.json` 的 `mcp` 字段（路径随 OS 不同）。
+零安装改成 `"command": "uvx"` + `"args": ["portal-mcp-server@latest"]`。VS Code 作为 GUI app 不一定继承 shell PATH，`portal-mcp-server` 找不到时填 `which portal-mcp-server` 的绝对路径（同上方通用配置片段的 PATH 注记）。要全局生效，可以把同样的 `servers` 段写进 VS Code 用户 `settings.json` 的 `mcp` 字段（路径随 OS 不同）。
 
 > 与 `mcpServers` 不兼容；同时用 Copilot CLI / Claude Code / Cursor 和 VS Code 时需各维护一份。
 
@@ -531,7 +532,8 @@ Windsurf 用同一份 `mcpServers` schema。在 Cascade 面板点插件按钮 �
 新版 Codex 直接一行命令登记（global，对所有目录生效）：
 
 ```bash
-codex mcp add portal -- uvx portal-mcp-server@latest
+codex mcp add portal -- portal-mcp-server
+# 零安装：把 portal-mcp-server 换成 uvx portal-mcp-server@latest
 codex mcp list          # 应看到 portal
 ```
 
@@ -539,8 +541,9 @@ codex mcp list          # 应看到 portal
 
 ```toml
 [mcp_servers.portal]
-command = "uvx"
-args = ["portal-mcp-server@latest"]
+command = "portal-mcp-server"
+args = []
+# 零安装：command = "uvx"，args = ["portal-mcp-server@latest"]
 ```
 
 启动 Codex 后在 TUI 输入 `/mcp` 确认 `portal` 已加载。
@@ -1228,20 +1231,27 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
 
 ### 本地改动未在 agent 上生效
 
-`uvx portal-mcp-server` 从 PyPI 缓存启动。如果你改了本地代码，agent 不会看到——它用的是 PyPI 发布的版本。
+不管是 `uv tool install` 装的 `portal-mcp-server` 还是 `uvx portal-mcp-server`，跑的都是 **PyPI 发布版**，不是你的工作树——改了本地代码 agent 看不到。
 
 | 你在哪改 | agent 的 MCP server 看得见吗 |
 |---|---|
-| 本地工作树 | ❌ 看不见。uvx 走的是 PyPI，不是本地路径 |
-| 已发布到 PyPI 的新版本 | ✅ 用 `uvx portal-mcp-server@latest` 或 `--refresh` 更新缓存 |
+| 本地工作树 | ❌ 看不见（除非 editable 安装，见下）|
+| 已发布到 PyPI 的新版本 | ✅ `uv tool upgrade portal-mcp-server`（装了的）；或 `uvx portal-mcp-server@latest` / `--refresh` 刷缓存 |
 
-本地调试想让 agent 用上改动，把 `.mcp.json` 里的 `args` 临时改成：
+本地调试想让 agent 用上工作树的改动，两选一：
+
+```bash
+# 推荐：editable 安装，command 保持 portal-mcp-server 不变，源码改动即时生效
+uv tool install --force --editable .
+```
+
+或走 uvx，把 `.mcp.json` 里的 `args` 临时改成（路径必须绝对）：
 
 ```json
 "args": ["--from", "/absolute/path/to/portal-mcp-server", "portal-mcp-server"]
 ```
 
-（路径必须绝对）。**别把这条本地路径 commit 进项目级的 `.mcp.json`**。
+**别把这条本地路径 commit 进项目级的 `.mcp.json`**。
 
 ### 连接超时 / Permission denied (publickey)
 
@@ -1257,11 +1267,11 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
 ### 更新到最新版
 
 ```bash
-# 临时 uvx 运行：刷新缓存并重新拉取 PyPI 最新版
-uvx portal-mcp-server@latest --help
+# 装了的（推荐）：升级到 PyPI 最新版
+uv tool upgrade portal-mcp-server         # 或 uv tool upgrade --all
 
-# 持久安装到 PATH 的 uv tool：升级已安装 tool
-uv tool upgrade portal-mcp-server
+# 零安装 uvx：刷新缓存重新拉取最新版
+uvx portal-mcp-server@latest --help
 ```
 
 然后重启 MCP client。
