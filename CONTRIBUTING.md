@@ -38,7 +38,7 @@ pip install -e ".[dev]"       # -e/--editable 指向当前源码
 
 新加一个 `@mcp.tool()` 时按下面步骤来：
 
-1. **想清楚是否真的需要新工具**——优先扩展现有 `portal_*` 的 `mode` / `action` 字段，避免工具数量膨胀（README 的"设计理念 · 工具精简"解释了"少而正交"这条核心取舍：一个工具只在能提供 bash 难以廉价合成的保证时才保留）
+1. **想清楚是否真的需要新工具**——优先扩展现有工具的 `mode` / `action` 字段，避免工具数量膨胀（README 的"架构与设计 · 少而正交的工具面"解释了"少而正交"这条核心取舍：一个工具只在能提供 bash 难以廉价合成的保证时才保留）
 2. **写完整 docstring**——FastMCP 直接把 docstring 当 MCP description 暴露给 agent，写得好坏决定 agent 用得对不对
 3. **接入安全闸门**——任何状态变更都必须 `_gate(host, command)`；多机操作走 `_gate_many` / `_gate_exec`
 4. **写 audit**——状态变更的 happy path 末尾写 `audit_log(host, op_str, result, operation="...")`；只读工具显式不写

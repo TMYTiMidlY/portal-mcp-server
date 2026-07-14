@@ -50,8 +50,8 @@ pip install -e ".[dev]"       # -e/--editable points at this source tree
 When adding a new `@mcp.tool()`:
 
 1. **Reconsider whether you need a new tool.** Prefer extending an
-   existing `portal_*` tool's `mode` / `action` parameter. The README's
-   "Design notes · Tool consolidation" section explains the deliberate
+   existing tool's `mode` / `action` parameter. The README's
+   "Architecture & design · Few, orthogonal tools" section explains the deliberate
    "few and orthogonal" constraint — a tool earns its place only by
    offering a guarantee bash can't cheaply synthesize; don't add one
    without that justification.
