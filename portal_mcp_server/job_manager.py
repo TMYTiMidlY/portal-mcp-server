@@ -137,9 +137,17 @@ class JobManager:
             return
         try:
             f.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(f.parent, 0o700)  # state dir holds persisted job command lines
+            except OSError:
+                pass
             payload = {"jobs": [asdict(r) for r in self._jobs.values()]}
             tmp = f.with_name(f.name + ".tmp")
-            tmp.write_text(json.dumps(payload))
+            # Create the temp 0600 so the persisted job table (command lines,
+            # hosts) is owner-only regardless of umask; replace() keeps the mode.
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(payload))
             tmp.replace(f)
         except Exception:  # pragma: no cover - best effort
             logger.debug("job state persist failed", exc_info=True)

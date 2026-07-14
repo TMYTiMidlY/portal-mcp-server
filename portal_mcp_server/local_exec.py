@@ -16,6 +16,32 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
+
+
+def _kill_process_group(proc) -> None:
+    """Kill the child's whole process group (POSIX) so grandchildren spawned by
+    the shell / sudo don't survive a timeout. Falls back to killing just the
+    child where process groups aren't available (Windows) or the group is
+    already gone."""
+    try:
+        if hasattr(os, "killpg"):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            return
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        pass
+
+
+async def _reap(proc) -> None:
+    """Await the killed process so it doesn't linger as a zombie."""
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except (asyncio.TimeoutError, ProcessLookupError):
+        pass
 
 
 async def local_exec_with_env(command: str, env: dict,
@@ -32,6 +58,7 @@ async def local_exec_with_env(command: str, env: dict,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=full_env,
+            start_new_session=True,
         )
     except OSError as e:
         return {"output": f"[error] failed to start command: {e}", "exit_code": -1}
@@ -39,12 +66,14 @@ async def local_exec_with_env(command: str, env: dict,
     try:
         out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        _kill_process_group(proc)
+        await _reap(proc)
         return {"output": f"[error] command timed out after {timeout}s",
                 "exit_code": -1}
+    except asyncio.CancelledError:
+        _kill_process_group(proc)
+        await _reap(proc)
+        raise
 
     stdout = out_b.decode("utf-8", errors="backslashreplace")
     stderr = err_b.decode("utf-8", errors="backslashreplace").strip()
@@ -87,6 +116,7 @@ async def local_sudo_exec_with_env(command: str, password: str, env: dict,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
     except OSError as e:
         return {"output": f"[error] failed to start command: {e}", "exit_code": -1}
@@ -95,12 +125,14 @@ async def local_sudo_exec_with_env(command: str, password: str, env: dict,
         out_b, err_b = await asyncio.wait_for(
             proc.communicate(input=stdin_data.encode()), timeout=timeout)
     except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except ProcessLookupError:
-            pass
+        _kill_process_group(proc)
+        await _reap(proc)
         return {"output": f"[error] command timed out after {timeout}s",
                 "exit_code": -1}
+    except asyncio.CancelledError:
+        _kill_process_group(proc)
+        await _reap(proc)
+        raise
 
     stdout = out_b.decode("utf-8", errors="backslashreplace")
     stderr = err_b.decode("utf-8", errors="backslashreplace").strip()

@@ -32,6 +32,12 @@ from .paths import default_log_dir
 
 _log_dir = default_log_dir()
 _log_dir.mkdir(parents=True, exist_ok=True)
+# The log dir holds audit.jsonl (+ rotations) with commands / hosts / paths;
+# keep it owner-only. best-effort (no-op / different semantics on Windows).
+try:
+    os.chmod(_log_dir, 0o700)
+except OSError:  # pragma: no cover - platform/permission dependent
+    pass
 _audit_file = _log_dir / "audit.jsonl"
 
 logger = logging.getLogger("portal_mcp.audit")
@@ -65,10 +71,18 @@ class _FailClosedRotatingHandler(logging.handlers.RotatingFileHandler):
     which prints to stderr and returns; re-raising there is what lets
     ``audit_log`` keep its fail-closed guarantee — a failed audit write must
     surface and abort the operation, not vanish.
+
+    Also creates the log file 0600 (it records commands, hosts and paths):
+    the base file and every rotated ``.1..N`` are opened owner-only so a
+    permissive umask cannot leave them world-readable.
     """
 
     def handleError(self, record):  # noqa: D102 - see class docstring
         raise
+
+    def _open(self):
+        return open(self.baseFilename, self.mode, encoding=self.encoding,
+                    opener=lambda p, flags: os.open(p, flags, 0o600))
 
 
 # Mature size-based rotation via stdlib logging (audit.jsonl -> .1 .. .N) on a

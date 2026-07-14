@@ -47,7 +47,17 @@ _log_handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
 try:
     _log_dir = default_log_dir()
     _log_dir.mkdir(parents=True, exist_ok=True)
-    _log_handlers.append(logging.FileHandler(_log_dir / "server.log", encoding="utf-8"))
+    try:
+        os.chmod(_log_dir, 0o700)  # owner-only: server.log records host/cmd context
+    except OSError:
+        pass
+    _server_log = _log_dir / "server.log"
+    _fh = logging.FileHandler(_server_log, encoding="utf-8")
+    try:
+        os.chmod(_server_log, 0o600)
+    except OSError:
+        pass
+    _log_handlers.append(_fh)
 except Exception as _log_err:
     print(f"[portal-mcp-server] WARNING: could not open log file: {_log_err}", file=sys.stderr)
 
