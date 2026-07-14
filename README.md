@@ -56,8 +56,8 @@ portal-mcp-server 的设计围绕三条理念：**工具少而正交**（只保�
 - **跨工具连接复用**：所有 portal 工具共享同一进程内的 asyncssh 连接池；一次握手长期复用，单次调用摊销到 channel 创建（~10–30 ms）。
 - **Windows 上同样快**：不依赖 OpenSSH `ControlMaster`，连接池是纯 Python 对象，三大平台获得一致的复用性能。
 - **持久 shell 会话**：`remote_shell` 为每台 host 维护一个交互式 shell（bash/zsh），cwd / env 跨调用保留，还能用 `commands=[…]` 在同一会话里顺序跑多步；agent 不需要每条命令重建上下文。
-- **hash 保护的远端编辑**：`remote_read` + `remote_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，杜绝并发覆盖。
-- **agent-first 的精简工具面**：`action` / `mode` 字段合并语义重复的入口，每个工具只提供一条 bash 难以廉价合成的保证，减少 agent 选工具的歧义。工具 schema（name + description + inputSchema）合计约占 **~8k tokens**（≈ 200k 上下文窗口的 **~4%**；`tiktoken o200k_base` 估算）。
+- **hash 保护的远端编辑**：`remote_read` + `remote_patch` 用整文件 SHA-256 + 行范围 hash 双层校验，写入走 tmp + `posix_rename` 原子替换，写后再 hash 校验，**检测**并发改写 / 中途断连 / 行号漂移（乐观校验，显著收窄冲突窗口而非文件系统级 CAS）。
+- **agent-first 的精简工具面**：`action` / `mode` 字段合并语义重复的入口，每个工具只提供一条 bash 难以廉价合成的保证，减少 agent 选工具的歧义。工具 schema（name + description + inputSchema）合计约占 **~9k tokens**（≈ 200k 上下文窗口的 **~4–5%**；`tiktoken o200k_base` 实测约 8.8k）。
 - **内建安全策略**：host allowlist、command blocklist/allowlist（fnmatch）、per-host rate limit、所有改状态操作落 audit log，默认 fail-closed；可选接入 [cc-safety-net](https://github.com/kenryu42/cc-safety-net) 语义级 command gate（opt-in，能脱 `bash -c` 壳 / 拦解释器单行 / 破坏性 git/rm，覆盖 `remote_exec`/`local_exec`/`shell`/`job` 这些绕过 agent `bash` PreToolUse hook 的执行路径，默认 fail-closed）。
 - **OpenSSH 配置兼容**：`~/.ssh/config` 别名、`known_hosts`、ssh-agent 自动识别，无需重复登记主机。
 - **零额外部署**：MCP client 通过 `uvx` 直接从 GitHub 拉运行，无需 clone、无需 venv。
@@ -95,7 +95,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 # 3. 在 agent 对话中使用
 #    "帮我看看 myhost 上 /var/log/syslog 最后 50 行"
-#    agent 会调用 remote_exec("myhost", "tail -50 /var/log/syslog")
+#    agent 会调用 remote_exec("myhost", "tail -50 /var/log/syslog", timeout=30)
 ```
 
 不需要 clone 仓库、不需要 venv——`uvx` 会自动拉取并运行。开发者安装见 [安装](#安装)。
@@ -103,7 +103,7 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 ## 架构
 
 ```
-┌──────────────┐    stdio / SSE     ┌─────────────────────────────────────┐
+┌──────────────┐    stdio / http    ┌─────────────────────────────────────┐
 │  MCP Client  │ ◄────────────────► │       portal-mcp-server             │
 │ (Claude Code │                    │                                     │
 │  Copilot CLI │                    │  ┌──────────┐   ┌────────────────┐  │
@@ -245,20 +245,22 @@ claude mcp add --scope user portal -- uvx portal-mcp-server@latest
 
 | 模块 | 负责的工具 / 职责 |
 | --- | --- |
-| `connection_manager.py` | 所有工具共用的连接池 + host 注册表 |
-| `shell_engine.py` | `remote_exec`（一次性 `ssh_exec`） |
-| `remote_bash.py` | `remote_shell` / `remote_close` + sudo/secrets 一次性路径 |
-| `session_manager.py` | 持久交互式 shell 会话（bash/zsh；cwd/env、exit code，OSC 133 边界协议、soft-cancel） |
+| `cli.py` | 全部 `@mcp.tool()` 定义、`_gate()` / `_gate_exec()` 闸门封装、`inspect` 组装、凭据 CLI |
+| `connection_manager.py` | asyncssh 连接池 + host 注册表（**SSH 工具共用**；`local_exec` / 控制面工具不走 SSH） |
+| `shell_engine.py` | `remote_exec` 的一次性 `ssh_exec` 路径（普通执行；dispatch 还跨 `cli.py` / `remote_bash.py`） |
+| `remote_bash.py` | `remote_shell` / `remote_close` + `remote_exec` 的 sudo / secrets 一次性路径 |
+| `session_manager.py` | 持久交互式 shell 会话（bash/zsh；cwd/env、exit code，OSC 133 边界协议、soft-cancel、超时中断） |
 | `job_manager.py` | `remote_job`（后台 submit/poll/cancel/list） |
 | `local_exec.py` | `local_exec` |
 | `remote_text_editor.py` | `remote_read`、`remote_patch`（+ 孤儿 tmp 清扫） |
 | `remote_search.py` | `remote_grep`、`remote_glob` |
 | `file_ops.py` | `remote_transfer` |
 | `network_tools.py` | `remote_tunnel` |
-| `credential_agent.py` | `portal {ssh,sudo,secret} set` 的 per-user socket 激活 TTL 缓存 |
-| `ssh_creds.py` / `sudo_creds.py` / `secrets_store.py` | 凭据解析 + 输出脱敏 |
-| `security.py` | `_gate()` / `_gate_exec()` 策略闸门 |
-| `audit.py` | `audit_log()` 写入 + `inspect` introspection |
+| `credential_agent.py` | `portal {ssh,passphrase,sudo,secret} set` 的 per-user socket / 命名管道激活 TTL 缓存 |
+| `ssh_creds.py` / `passphrase_creds.py` / `sudo_creds.py` / `secrets_store.py` | 各类凭据解析 + 输出脱敏 |
+| `_peer_creds.py` | 凭据 agent 的同用户对端校验（Linux `SO_PEERCRED` / Windows 命名管道 SID） |
+| `security.py` | 策略引擎：host allowlist、command blocklist/allowlist、per-host rate limit、cc-safety-net 接入 |
+| `audit.py` | `audit_log()` 写入 + 历史 ring buffer（`inspect` 工具的组装在 `cli.py`） |
 
 </details>
 
@@ -303,7 +305,7 @@ portal-mcp-server 据此把工具面收敛到一组**少而正交**的原语。�
 | `remote_job` | 后台 submit/poll/cancel/list，给 agent"丢后台、中途思考、随时打断"的能力 |
 | `remote_tunnel` / `hosts` / `inspect` | 用 `action` / `view` 字段把同一资源的多个动作合并进一个工具，而非每个动作各立一个 tool |
 
-所有派发参数（`action` / `view` / `output_mode` / ...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验——agent 不必在多个语义重复的工具里反复选择。**工具 schema 上下文占用**：所有工具的 name + description + inputSchema 合计约 **~8k tokens**（`tiktoken o200k_base` 估算，约为 200k 上下文窗口的 **~4%**；descriptions 含 sudo / secrets / 安全约定等护栏文案，故偏厚）。
+所有派发参数（`action` / `view` / `output_mode` / ...）用 `typing.Literal` 标注，schema 层直接带 `enum`，client 可校验——agent 不必在多个语义重复的工具里反复选择。**工具 schema 上下文占用**：所有工具的 name + description + inputSchema 合计约 **~9k tokens**（`tiktoken o200k_base` 实测约 8.8k，约为 200k 上下文窗口的 **~4–5%**；descriptions 含 sudo / secrets / 安全约定等护栏文案，故偏厚）。
 
 ### <a id="step-wise-exec"></a>逐步执行：一步一调用，读真实输出再决策
 
@@ -668,13 +670,19 @@ portal-mcp-server 的全部可配置项都通过环境变量传入；统一 `POR
 | 安全与认证 | `PORTAL_AUDIT_FAIL_OPEN` | audit 写盘失败时是否 fail-open |
 | 安全与认证 | `PORTAL_AUDIT_MAX_BYTES` | `audit.jsonl` 轮转阈值（字节，默认 10 MiB） |
 | 安全与认证 | `PORTAL_AUDIT_BACKUPS` | 保留的轮转文件数 `audit.jsonl.1..N`（默认 5） |
-| 安全与认证 | `PORTAL_AUTH_TOKEN` | HTTP transport 的 Bearer token |
+| 安全与认证 | `PORTAL_ALLOW_TUNNEL_EXPOSURE` | 允许 `remote_tunnel` 绑非 loopback / 反向暴露到远端所有接口（默认关，只绑 loopback） |
+| 本地执行 | `PORTAL_ALLOW_LOCAL_EXEC` | 是否允许 `local_exec`（默认关，须显式设 `1`） |
+| 文件路径 | `PORTAL_CREDENTIAL_AGENT_SOCKET` | 凭据 agent socket / 命名管道地址覆盖（默认读安装写入的 `agent.json`） |
+| Shell 会话 | `PORTAL_SHELL_MAX_OUTPUT` | `remote_shell` 单命令输出内存上限（字节，默认 8 MiB，超限截断标 `truncated`） |
+| Shell 会话 | `PORTAL_SHELL_BOOT_TIMEOUT` / `PORTAL_SHELL_BOOT_QUIET` | 持久会话 bootstrap 超时 / 静默窗口（秒，默认 10 / 0.6） |
+| Shell 会话 | `PORTAL_SHELL_INTERACTIVE_GRACE` / `PORTAL_SHELL_SOFT_CANCEL_TIMEOUT` | 交互提示宽限 / soft-cancel 等 OSC133 D 的超时（秒，默认 1 / 3） |
+| 安全与认证 | `PORTAL_AUTH_TOKEN` | HTTP transport（`--transport streamable_http`）的鉴权令牌；绑定非 loopback 地址时**必须**设，stdio / loopback 不需要 |
 | 连接池 | `PORTAL_SSH_POOL_SIZE` | 每 host 最大 TCP 连接数 |
 | 连接池 | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 最大并发 channel 数 |
 | 连接池 | `PORTAL_SSH_MAX_IDLE_TIME` | 空闲连接自动关闭超时（秒） |
 | 连接池 | `PORTAL_SSH_MAX_CONN_AGE` | 连接最大存活时间（秒） |
 | 后台任务 | `PORTAL_JOB_PERSIST` | `remote_job` 任务表是否跨重启持久化（默认开；`0`/`false` 关） |
-| 后台任务 | `PORTAL_JOB_STATE_FILE` | 任务表持久化文件路径（默认 `<state>/jobs.json`） |
+| 后台任务 | `PORTAL_JOB_STATE_FILE` | 任务表持久化文件路径（默认**按进程** `<state>/jobs/<pid>.json`，多个 server 进程互不覆盖；显式设则固定为单一文件） |
 | 后台任务 | `PORTAL_JOB_MAX_LIVE` | 并发存活后台任务上限（默认 50） |
 | 后台任务 | `PORTAL_JOB_TTL` | 完成任务在表中保留多少秒后清理 + 删远端 tmp（默认 3600） |
 | 可靠性 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | `remote_shell` 执行期间 keepalive 心跳间隔（秒） |
@@ -722,7 +730,9 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 | 环境变量 | 含义 | 默认 |
 |---|---|---|
 | `PORTAL_AUDIT_FAIL_OPEN` | 设 `1` → audit 写盘失败时仅 warning 并继续；默认 → **fail-closed**，audit 写不进则操作 raise 中止 | _(unset)_ |
-| `PORTAL_AUTH_TOKEN` | HTTP transport（`--transport streamable_http`）的 Bearer token；stdio 模式不需要 | _(none)_ |
+| `PORTAL_ALLOW_LOCAL_EXEC` | 设 `1` 才启用 `local_exec`（本机执行，偏离远端编排目标，默认关） | _(unset)_ |
+| `PORTAL_ALLOW_TUNNEL_EXPOSURE` | 设 `1` 才允许 `remote_tunnel` 绑非 loopback（local/socks 的 `local_bind`）或把反向隧道暴露到远端所有接口；默认只绑 loopback | _(unset)_ |
+| `PORTAL_AUTH_TOKEN` | HTTP transport（`--transport streamable_http`）的鉴权令牌（客户端发 `Authorization: Bearer <token>`）。传输**默认 `--host 127.0.0.1`（仅本机）**；绑定非 loopback 地址而未设此值会**拒绝启动**。stdio 传输不需要 | _(none)_ |
 
 ### 连接池
 
@@ -732,7 +742,7 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 |---|---|---|
 | `PORTAL_SSH_POOL_SIZE` | 每 host 最大 TCP 连接数。连接池满且所有连接都达到 channel 上限时，会复用最空闲的连接（带 warning） | `5` |
 | `PORTAL_SSH_MAX_CHANNELS_PER_CONN` | 每条 TCP 上最大并发 channel 数（SFTP 会话、exec、tunnel 等共享）。超出后新建 TCP，直到 `PORTAL_SSH_POOL_SIZE` 上限 | `5` |
-| `PORTAL_SSH_MAX_IDLE_TIME` | 无活跃 channel 的连接空闲多久后自动关闭（秒）。设 `0` 禁用 | `600`（10 分钟） |
+| `PORTAL_SSH_MAX_IDLE_TIME` | 无活跃 channel 的连接空闲多久后自动关闭（秒）。**注意 `0` 不是"禁用"**——它让任何空闲连接立即可被回收 | `600`（10 分钟） |
 | `PORTAL_SSH_MAX_CONN_AGE` | 连接最大存活时间（秒），超龄且无活跃 channel 时关闭。防止防火墙 / NAT 静默断连 | `3600`（1 小时） |
 
 ### 可靠性
@@ -742,6 +752,18 @@ cp examples/secrets.yaml  ~/.config/portal-mcp-server/secrets.yaml
 | `PORTAL_BASH_HEARTBEAT_INTERVAL` | `remote_shell` / `remote_exec` / `local_exec` 在命令执行期间每隔多少秒发一条 MCP progress 通知作 keepalive。命令无输出也不会让 client 撞 idle 超时（JSON-RPC `-32001`）；与服务端 `timeout` 参数相互独立。非正数或非法值回退到默认 | `5`（秒） |
 | `PORTAL_MAX_TIMEOUT` | `remote_exec` / `remote_shell` / `local_exec` 前台每命令超时的**上限（秒）**。`timeout` 现在是**必填**参数（三个工具都去掉了默认值），agent 每次必须显式选一个；传入超过此上限的值会被**拒绝**，并提示把长任务改用后台 `remote_job`（无上限）。这是安全护栏、不是默认值。每次调用时读取（可随时改）。非正 / 非法值回退到内置默认 | 内置 `300`（5 分钟） |
 | `PORTAL_LOGIN_SHELL` | `remote_exec` 普通路径与 `remote_job` 是否默认在**登录 shell**（`bash -lc`）里跑命令，从而加载用户 `~/.profile` / `~/.bashrc` 的 PATH 与环境（conda / nvm / pyenv / `~/.local/bin`）。默认**开**；只有显式 `0`/`false`/`no`/`off` 才关。优先级：per-call `login` 参数 > hosts.yaml 主机的 `login_shell:` > 此环境变量。没有 bash 的 sh-only 主机自动回退普通执行；`remote_shell` 不受影响（持久会话故意 `--norc`） | `on`（开） |
+
+### Shell 会话
+
+`remote_shell` 持久会话的时序旋钮，正常部署无需改。
+
+| 环境变量 | 含义 | 默认 |
+|---|---|---|
+| `PORTAL_SHELL_MAX_OUTPUT` | 单命令输出内存上限（字节）；超限丢弃头部并标 `truncated` | `8388608`（8 MiB） |
+| `PORTAL_SHELL_BOOT_TIMEOUT` | 首次拉起持久会话（注入集成脚本 + 就绪标记）的超时（秒） | `10.0` |
+| `PORTAL_SHELL_BOOT_QUIET` | bootstrap 完成前的静默确认窗口（秒） | `0.6` |
+| `PORTAL_SHELL_INTERACTIVE_GRACE` | 侦测到交互提示后、判定卡死并 soft-cancel 前的宽限（秒） | `1.0` |
+| `PORTAL_SHELL_SOFT_CANCEL_TIMEOUT` | soft-cancel（含前台超时中断）后等 OSC133 `D` 回到干净提示的超时（秒），超时则销毁会话 | `3.0` |
 
 ### 测试（仅 dev）
 
@@ -1086,8 +1108,10 @@ hosts:
 - **默认沙箱**：写操作默认只到远端 `/tmp/`；改 `$HOME` 或项目代码前 agent 必须先问（约定靠 prompt 层强制，参考 [给 agent 的使用约定](#给-agent-的使用约定)）
 - **策略闸门**：host allowlist + command blocklist/allowlist + per-host rate limit；每个状态变更工具都过 `_gate`，无侧门（`hosts(register)` 按目标 IP 而非别名 gate；`remote_tunnel(action=close)` 也走 gate；多机 gate 两阶段）。可选的 [cc-safety-net](https://github.com/kenryu42/cc-safety-net) 语义闸（`policies.safety_net.enabled`）在同一处叠加：把命令交给 `cc-safety-net explain --json` 做抗绕过分析，命中破坏性 git/rm/解释器单行即拦——这正是 Copilot-CLI PreToolUse hook 用的那套规则，而该 hook 只看 agent 自己的 `bash` 工具、看不到 portal MCP 命令。默认 fail-closed（检查器跑不起来就拒绝执行）。
 - **认证**：默认且推荐 SSH key；密码登录支持 `hosts.yaml` 的 `password_command` 或 `portal ssh set`，永远不暴露给 MCP 工具——配置见 [认证](#认证)，安全设计见 [`SECURITY.md` § Authentication](./SECURITY.md#authentication)
-- **审计**：所有状态变更写 `$PORTAL_LOG_DIR/audit.jsonl`（默认 `~/.local/state/portal-mcp-server/log/audit.jsonl`）；默认 fail-closed（`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open）
-- **hash 保护编辑**：`remote_read` + `remote_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash 保证并发安全
+- **HTTP transport（可选）**：默认只绑 `127.0.0.1`；绑非 loopback 地址而未设 `PORTAL_AUTH_TOKEN` 会**拒绝启动**，且 portal 只发明文 HTTP，需自行前置 TLS 反代
+- **隧道 / 传输边界**：`remote_tunnel` 默认只绑 loopback，非 loopback / 反向暴露到远端所有接口需 `PORTAL_ALLOW_TUNNEL_EXPOSURE=1`；`remote_transfer` 目录模式不跟随本地符号链接（防越界），但仍有 server 用户级的本地文件系统读写能力（同 `scp`）
+- **审计**：状态变更写 `$PORTAL_LOG_DIR/audit.jsonl`（默认 `~/.local/state/portal-mcp-server/log/audit.jsonl`，目录 `0700` / 文件 `0600`）。审计写在**操作完成之后**，故 fail-closed 是**响应级**——写不进则工具向 agent 报错，但已在远端发生的改动不会回滚（见 [`SECURITY.md`](./SECURITY.md)）；`PORTAL_AUDIT_FAIL_OPEN=1` 切 fail-open
+- **hash 保护编辑**：`remote_read` + `remote_patch` 用 SHA-256 + per-range hash + atomic `posix_rename` + 写后 rehash **检测**并发改写 / 中途断连 / 行号漂移（乐观校验，显著收窄冲突窗口而非文件系统级 CAS；普通写入不保留 mode / 属主）
 - **远端 bash history 风险（异常远端配置）**：`remote_exec(secrets=…)` 的注入依赖远端 bash **非交互模式默认关 history**（bash 上游设计，与 `ssh`/`ansible`/CI shell step 等所有 SSH 命令执行工具相同前提）。若远端管理员**强制**了 `BASH_ENV` + `set -o history`，或在 `/etc/bash.bashrc` 删了 `[[ $- != *i* ]] && return` 守卫，则**任何**走 SSH 的 secret 注入工具（含本工具、`ssh`、`ansible`、CI runner）都可能让 secret 值进 `~/.bash_history`。这不是本项目独有弱点，是 Unix/SSH 生态的普遍前提。部署前在你的远端验证 `bash -s <<< 'echo test'` 不写 history。
 
 
@@ -1125,8 +1149,8 @@ PORTAL_AUDIT_FAIL_OPEN=1 \
 
 仓库用 GitHub Actions 自动化跑测试和发布，本地不需要手动 build：
 
-- **CI**（[`ci.yml`](.github/workflows/ci.yml)）：每个 PR / push to `main` 在 Python **3.10 / 3.11 / 3.12 / 3.13** 上跑 `ruff check portal_mcp_server/` + `pytest tests/`，四个版本都绿才能 merge。
-- **Release**（[`release.yml`](.github/workflows/release.yml)）：push 一个 `v*.*.*` tag 自动触发——`python -m build` 产出 wheel + sdist → 从 `CHANGELOG.md` awk 抽出对应版本段做 [GitHub Release](https://github.com/TMYTiMidlY/portal-mcp-server/releases) body → 通过 [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)（OIDC 短令牌，无静态 token）发布到 [PyPI](https://pypi.org/project/portal-mcp-server/)。
+- **CI**（[`ci.yml`](.github/workflows/ci.yml)）：每个 PR / push to `main` 在 Python **3.10 / 3.11 / 3.12 / 3.13**（ubuntu）上 `ruff check portal_mcp_server/ tests/` + `pytest tests/`（产品代码和测试一起 lint），另有 macOS 全量 job 与 Windows 命名管道 / 计划任务 job；全绿才能 merge。
+- **Release**（[`release.yml`](.github/workflows/release.yml)）：push 一个 `v*` tag 自动触发（含 PEP 440 预发布 / dev / post，如 `v4.0.0a0`）——`python -m build` 产出 wheel + sdist → 从 `CHANGELOG.md` awk 抽出对应版本段做 [GitHub Release](https://github.com/TMYTiMidlY/portal-mcp-server/releases) body → 通过 [PyPI trusted publishing](https://docs.pypi.org/trusted-publishers/)（OIDC 短令牌，无静态 token）发布到 [PyPI](https://pypi.org/project/portal-mcp-server/)。
 
 完整发布流程、CHANGELOG 格式约束与 release 失败排障见 [`CONTRIBUTING.md` § CI & Release 自动化](./CONTRIBUTING.md#ci--release-自动化)。
 
