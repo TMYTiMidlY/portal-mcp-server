@@ -598,3 +598,53 @@ async def test_multiline_does_not_desync_next_call(monkeypatch):
     out2, _, _ = await sm.execute_in_session(sid, "echo NEXT", timeout=5)
     assert out2 == "out", "follow-up reads its own output (no leftover D)"
     assert proc.queue == [], "no stray D markers left queued — no desync"
+
+
+# ── timeout interrupts the remote command and resyncs (or drops) the session ──
+@pytest.mark.asyncio
+async def test_timeout_ctrl_c_recovers_and_preserves_session(monkeypatch):
+    """On timeout the command is Ctrl-C'd; if a clean prompt comes back the
+    session (and cwd/env) is preserved and reusable."""
+    monkeypatch.setattr(smod, "SOFT_CANCEL_TIMEOUT", 1.0)
+    state = {"cmd": 0}
+
+    def on_command(proc, data):
+        if data == b"\x03":                 # Ctrl-C after the timeout -> clean D
+            proc.queue.append(_d(130))
+            return
+        state["cmd"] += 1
+        if state["cmd"] == 1:
+            proc.queue.append(b"working...\r\n")   # output but never a D -> times out
+        else:
+            proc.queue.append(b"after\r\n" + _d(0))
+
+    proc = _Proc(on_command, with_drain=True)
+    sm, sid = await _make_ready_session(monkeypatch, proc)
+
+    out, code, _ = await sm.execute_in_session(sid, "slow", timeout=0.3)
+    assert code is None and "[timeout]" in out
+    assert b"\x03" in proc.stdin.writes            # the remote command was interrupted
+    sm._get(sid)                                    # session PRESERVED (no KeyError)
+    out2, code2, _ = await sm.execute_in_session(sid, "echo after", timeout=5)
+    assert code2 == 0 and "after" in out2
+
+
+@pytest.mark.asyncio
+async def test_timeout_no_recovery_invalidates_session(monkeypatch):
+    """If Ctrl-C doesn't bring back a clean prompt, the session is desynced and
+    must be dropped so it can't corrupt the next command."""
+    monkeypatch.setattr(smod, "SOFT_CANCEL_TIMEOUT", 0.3)
+
+    def on_command(proc, data):
+        if data == b"\x03":
+            return                          # no recovery D
+        proc.queue.append(b"stuck...\r\n")  # never a D
+
+    proc = _Proc(on_command, with_drain=True)
+    sm, sid = await _make_ready_session(monkeypatch, proc)
+
+    out, code, _ = await sm.execute_in_session(sid, "hang", timeout=0.3)
+    assert code is None and "[timeout]" in out
+    assert b"\x03" in proc.stdin.writes
+    with pytest.raises(KeyError):
+        sm._get(sid)                        # session invalidated (desynced)

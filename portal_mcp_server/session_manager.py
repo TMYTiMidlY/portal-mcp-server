@@ -541,8 +541,23 @@ class SessionManager:
                     and time.monotonic() >= prompt_deadline):
                 await self._soft_cancel(session, buf)
 
+        # Timed out. The remote command is still running on this session's
+        # shared PTY channel; if we just returned, its late output and OSC-133
+        # D would bleed into the NEXT command and desync the session. Send
+        # Ctrl-C (SIGINT to the PTY foreground process) and wait briefly for a
+        # clean prompt: if it returns, the shell — and cwd/env — survive and the
+        # session is safe to reuse; if not, the session is desynced, so drop it
+        # and let the next call rebuild a fresh one.
         output = self._decode_output(buf)
         tail = "\n[timeout]" if output else "[timeout]"
+        try:
+            session.process.stdin.write(b"\x03")
+        except (BrokenPipeError, ConnectionResetError, OSError,
+                asyncssh.ChannelOpenError, asyncssh.ConnectionLost):
+            await self._invalidate(session_id)
+            return output + tail, None, truncated
+        if await self._await_next_done(session, SOFT_CANCEL_TIMEOUT) is None:
+            await self._invalidate(session_id)
         return output + tail, None, truncated
 
     async def _soft_cancel(self, session: ShellSession,
