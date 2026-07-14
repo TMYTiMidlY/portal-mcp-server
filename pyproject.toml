@@ -105,7 +105,7 @@ text = """<div align="center">
 #    所有相对链接由下方 substitutions 改成 GitHub 绝对 URL。
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
 path = "README.md"
-start-at = "## 简介"
+start-at = '## <a id="overview"></a>简介'
 
 # 3) 末尾追加：链接区，方便 PyPI 访客跳回 GitHub。
 [[tool.hatch.metadata.hooks.fancy-pypi-readme.fragments]]
