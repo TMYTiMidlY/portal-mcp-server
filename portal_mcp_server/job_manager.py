@@ -49,7 +49,7 @@ from .safety import quote_shell
 
 logger = logging.getLogger("portal_mcp.jobs")
 
-_TERMINAL = ("done", "failed", "cancelled")
+_TERMINAL = ("done", "failed", "cancelled", "unknown")
 _DONE_MARKER = "__JOB_DONE__:"
 _CHUNK_SEP = "\n__CHUNK__\n"
 # Default per-poll output cap (bytes). Keeps a single poll from dumping a huge
@@ -58,11 +58,30 @@ _CHUNK_SEP = "\n__CHUNK__\n"
 DEFAULT_POLL_MAX_BYTES = 64 * 1024
 
 
-def _state_file() -> Optional[Path]:
-    """Resolve the job-table persistence file (best-effort across restarts).
+def _pid_alive(pid: int) -> bool:
+    """Best-effort: is a local process with this pid running? Conservative — on
+    any uncertainty (Windows, permission error) assume alive, so we never adopt
+    or delete a state file that a live sibling server still owns."""
+    if os.name != "posix":
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
-    ``PORTAL_JOB_PERSIST=0`` disables persistence; ``PORTAL_JOB_STATE_FILE``
-    overrides the path (used by tests). Default: ``<state>/jobs.json``.
+
+def _state_file() -> Optional[Path]:
+    """Resolve THIS server process's job-table persistence file.
+
+    ``PORTAL_JOB_PERSIST=0`` disables persistence. ``PORTAL_JOB_STATE_FILE``
+    pins one explicit file (tests, or an operator deliberately sharing one).
+    Otherwise the default is **per-process** — ``<state>/jobs/<pid>.json`` — so
+    two concurrent per-user server processes (e.g. one MCP client each) never
+    overwrite each other's table. A dead predecessor's file is adopted on
+    startup (see :meth:`JobManager._load`), preserving cross-restart recovery.
     """
     if os.environ.get("PORTAL_JOB_PERSIST", "").lower() in (
             "0", "false", "no", "off"):
@@ -71,7 +90,7 @@ def _state_file() -> Optional[Path]:
     if raw:
         return Path(raw)
     try:
-        return xdg_state_home() / "jobs.json"
+        return xdg_state_home() / "jobs" / f"{os.getpid()}.json"
     except Exception:  # pragma: no cover - exotic platform
         return None
 
@@ -101,33 +120,68 @@ class JobManager:
         # against the cap so concurrent submits can't overshoot it.
         self._pending = 0
         self._state_file = _state_file()
+        # Namespaced = the per-process default path (no explicit override): only
+        # then do we scan+adopt sibling files. An explicit PORTAL_JOB_STATE_FILE
+        # keeps the old single-file behavior (tests / opt-in shared file).
+        self._namespaced = (self._state_file is not None
+                            and not os.environ.get("PORTAL_JOB_STATE_FILE"))
         self._load()
 
     def _load(self) -> None:
         """Best-effort reload of the job table from disk (survives a restart).
 
-        Records are reloaded verbatim; liveness is NOT probed here (no I/O in
-        __init__) — a subsequent poll re-probes the remote PID, so a reloaded
-        job is immediately pollable/cancellable. Terminal jobs past their TTL
-        are removed on the next sweep.
+        In per-process (namespaced) mode we also adopt the tables of dead
+        predecessor processes so a restart still recovers their jobs, while
+        never touching a file a concurrent live server still owns. Records are
+        reloaded verbatim; liveness is NOT probed here (no remote I/O in
+        __init__) — a subsequent poll re-probes the remote PID.
         """
         f = self._state_file
-        if not f or not f.exists():
+        if not f:
             return
+        if self._namespaced:
+            self._adopt_dead_siblings(f.parent)
+        if f.exists():
+            self._load_file(f)
+
+    def _load_file(self, f: Path) -> None:
         try:
             data = json.loads(f.read_text())
         except Exception:  # pragma: no cover - corrupt/partial state file
-            logger.debug("job state reload failed", exc_info=True)
+            logger.debug("job state reload failed for %s", f, exc_info=True)
             return
+        n = 0
         for d in data.get("jobs", []):
             try:
                 rec = JobRecord(**d)
             except (TypeError, ValueError):
                 continue  # schema drift / bad entry — skip it
             self._jobs[rec.job_id] = rec
-        if self._jobs:
-            logger.info("reloaded %d background job(s) from %s",
-                        len(self._jobs), f)
+            n += 1
+        if n:
+            logger.info("reloaded %d background job(s) from %s", n, f)
+
+    def _adopt_dead_siblings(self, d: Path) -> None:
+        """Adopt job tables left by dead predecessor processes (files named
+        ``<pid>.json``), then remove them. A file whose pid is still alive
+        belongs to a concurrent server and is left untouched."""
+        try:
+            siblings = list(d.glob("*.json"))
+        except OSError:  # pragma: no cover - dir missing
+            return
+        my_pid = os.getpid()
+        for sib in siblings:
+            try:
+                pid = int(sib.stem)
+            except ValueError:
+                continue  # not a <pid>.json file
+            if pid == my_pid or _pid_alive(pid):
+                continue
+            self._load_file(sib)
+            try:
+                sib.unlink()
+            except OSError:  # pragma: no cover
+                pass
 
     def _persist(self) -> None:
         """Best-effort atomic write of the job table. Never raises into a job

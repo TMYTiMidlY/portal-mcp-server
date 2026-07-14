@@ -484,3 +484,50 @@ async def test_job_corrupt_state_file_is_ignored(monkeypatch):
         fh.write("{ this is not valid json")
     jm = job_manager.JobManager()  # must not raise
     assert jm._jobs == {}
+
+
+# ── multi-process safety: per-process state file + dead-sibling adoption ──────
+import os as _os  # noqa: E402
+
+
+def _job_json(job_id):
+    return json.dumps({"jobs": [{
+        "job_id": job_id, "host": "h", "remote_pid": 5,
+        "out_path": "/tmp/o", "meta_path": "/tmp/m",
+        "command": "x", "started_at": 1.0}]})
+
+
+@pytest.mark.skipif(_os.name != "posix", reason="pid liveness check is POSIX")
+def test_namespaced_state_file_is_per_pid(monkeypatch, tmp_path):
+    monkeypatch.delenv("PORTAL_JOB_STATE_FILE", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    jm = job_manager.JobManager()
+    assert jm._namespaced is True
+    assert jm._state_file.name == f"{_os.getpid()}.json"
+    assert jm._state_file.parent.name == "jobs"
+
+
+@pytest.mark.skipif(_os.name != "posix", reason="pid liveness check is POSIX")
+def test_namespaced_adopts_dead_sibling(monkeypatch, tmp_path):
+    monkeypatch.delenv("PORTAL_JOB_STATE_FILE", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    jobs_dir = job_manager._state_file().parent   # <xdg>/portal-mcp-server/jobs
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    dead = jobs_dir / "999999.json"          # a pid that isn't alive
+    dead.write_text(_job_json("job-dead"))
+    jm = job_manager.JobManager()
+    assert "job-dead" in jm._jobs            # adopted from the dead predecessor
+    assert not dead.exists()                 # and its file removed
+
+
+@pytest.mark.skipif(_os.name != "posix", reason="pid liveness check is POSIX")
+def test_namespaced_leaves_live_siblings_alone(monkeypatch, tmp_path):
+    monkeypatch.delenv("PORTAL_JOB_STATE_FILE", raising=False)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    jobs_dir = job_manager._state_file().parent
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    live = jobs_dir / "1.json"               # pid 1 (init) — treated as alive
+    live.write_text(_job_json("job-live"))
+    jm = job_manager.JobManager()
+    assert "job-live" not in jm._jobs        # a concurrent server owns it
+    assert live.exists()                     # left untouched (not clobbered)
