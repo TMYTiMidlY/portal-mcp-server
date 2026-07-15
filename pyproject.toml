@@ -58,6 +58,10 @@ dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
     "ruff>=0.4.0",
+    # Release tooling: `uv run cz bump` (see CONTRIBUTING.md) needs cz on the
+    # dev extra. Floor pinned to the version the [tool.commitizen.customize]
+    # commit_parser workaround below was verified against.
+    "commitizen>=4.16.4",
 ]
 
 [project.scripts]
