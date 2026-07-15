@@ -1,3 +1,9 @@
+## v4.0.1 (2026-07-15)
+
+### Fix
+
+- **cli**: reject caching a credential for an unknown host
+
 ## v4.0.0 (2026-07-15)
 
 ### Security
