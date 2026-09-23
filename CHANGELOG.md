@@ -1,3 +1,9 @@
+## v4.0.3 (2026-09-24)
+
+### Fix
+
+- **ci**: pin Ruff to tested version for CI and release hooks
+
 ## v4.0.2 (2026-09-24)
 
 ### Fix
