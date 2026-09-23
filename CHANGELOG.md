@@ -1,3 +1,9 @@
+## v4.0.2 (2026-09-24)
+
+### Fix
+
+- rebuild MCP settings and defer encrypted keys to SSH agent
+
 ## v4.0.1 (2026-07-15)
 
 ### Fix
