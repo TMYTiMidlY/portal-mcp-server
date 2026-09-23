@@ -57,7 +57,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.21",
-    "ruff>=0.4.0",
+    "ruff==0.15.12", # Keep CI and release hooks on the tested ruleset.
     # Release tooling: `uv run cz bump` (see CONTRIBUTING.md) needs cz on the
     # dev extra. Floor pinned to the version the [tool.commitizen.customize]
     # commit_parser workaround below was verified against.
