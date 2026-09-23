@@ -3,6 +3,10 @@ shutdown (wiring the previously-dead close_all paths). Best-effort: a failure
 in one closer must not stop the other or raise out of shutdown."""
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+
 import pytest
 
 from portal_mcp_server import cli
@@ -57,6 +61,24 @@ async def test_lifespan_swallows_closer_errors(monkeypatch):
         pass
 
     assert pool_closed["v"] is True
+
+
+def test_first_import_has_no_incomplete_lifespan_warning(tmp_path):
+    """A fresh process catches the first Settings construction, not a cached import."""
+    code = """
+import warnings
+warnings.filterwarnings('error', message="Field 'lifespan' has an incomplete definition")
+from portal_mcp_server import cli
+assert cli.mcp.settings.lifespan is cli._server_lifespan
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", code],
+        env={**os.environ, "XDG_STATE_HOME": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_server_constructed_with_lifespan():

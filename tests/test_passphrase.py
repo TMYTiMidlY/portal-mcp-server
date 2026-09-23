@@ -7,6 +7,7 @@ use_ssh_agent gives explicit control over the agent.
 """
 from __future__ import annotations
 
+import asyncssh
 import pytest
 
 from portal_mcp_server import connection_manager as cm
@@ -70,6 +71,7 @@ async def test_cached_value_used_as_passphrase_on_key_host(tmp_path):
         kwargs = await m._build_connect_kwargs(cfg)
         assert kwargs["passphrase"] == "unlock-me"
         assert kwargs["client_keys"] == ["/tmp/fake_key"]
+        assert "ignore_encrypted" not in kwargs
     finally:
         passphrase_creds.clear_passphrase()
 
@@ -111,6 +113,7 @@ async def test_use_ssh_agent_false_disables_agent(tmp_path):
     kwargs = await m._build_connect_kwargs(cfg)
     assert kwargs["agent_path"] is None
     assert kwargs["client_keys"] == ["/tmp/fake_key"]
+    assert "ignore_encrypted" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -119,7 +122,30 @@ async def test_use_ssh_agent_auto_leaves_agent_alone(tmp_path):
     passphrase_creds.clear_passphrase()
     cfg = cm.HostConfig(name="web01", host="1.2.3.4", key="/tmp/fake_key")
     kwargs = await m._build_connect_kwargs(cfg)
-    assert "agent_path" not in kwargs  # asyncssh default (uses SSH_AUTH_SOCK)
+    assert "agent_path" not in kwargs  # ssh_config IdentityAgent / SSH_AUTH_SOCK
+    assert kwargs["client_keys"] == ["/tmp/fake_key"]
+    assert kwargs["ignore_encrypted"] is True  # agent can sign encrypted key
+
+
+@pytest.mark.asyncio
+async def test_explicit_encrypted_key_does_not_block_agent(tmp_path):
+    """Exercise AsyncSSH's real key loader, not just the forwarded kwargs."""
+    key = tmp_path / "key"
+    key.write_bytes(asyncssh.generate_private_key("ssh-ed25519").export_private_key(
+        "openssh", "test-only-passphrase"))
+    m = _mgr(tmp_path)
+    passphrase_creds.clear_passphrase()
+    cfg = cm.HostConfig(name="web01", host="1.2.3.4", key=str(key))
+    kwargs = await m._build_connect_kwargs(cfg)
+
+    with pytest.raises(asyncssh.KeyImportError, match="Passphrase must be specified"):
+        asyncssh.SSHClientConnectionOptions(client_keys=[str(key)], config=[], agent_path="")
+    options = asyncssh.SSHClientConnectionOptions(
+        client_keys=kwargs["client_keys"],
+        ignore_encrypted=kwargs["ignore_encrypted"],
+        config=[], agent_path="",
+    )
+    assert not options.client_keys  # encrypted key skipped; agent stays eligible
 
 
 def test_use_ssh_agent_read_from_yaml(tmp_path):

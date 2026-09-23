@@ -16,6 +16,7 @@ from typing import Literal
 
 from mcp.server.fastmcp import FastMCP, Context
 from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.fastmcp.server import Settings as FastMCPSettings
 from .paths import default_log_dir
 from .connection_manager import get_manager
 from .shell_engine import ssh_exec
@@ -92,6 +93,10 @@ async def _server_lifespan(_server: "FastMCP"):
             logger.debug("pool close_all on shutdown failed", exc_info=True)
 
 
+# MCP SDK 1.x defines Settings.lifespan before FastMCP exists. Rebuild the
+# forward reference before pydantic-settings inspects the first Settings instance
+# (otherwise its newer releases emit IncompleteFieldDefinitionWarning).
+FastMCPSettings.model_rebuild()
 mcp = FastMCP("portal-mcp-server", lifespan=_server_lifespan)
 
 # ═══════════════════════════════════════════════════════════════════

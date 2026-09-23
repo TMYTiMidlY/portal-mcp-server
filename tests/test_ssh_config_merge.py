@@ -84,10 +84,19 @@ async def test_merge_explicit_key_overrides(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_explicit_host_still_enumerates_default_keys(monkeypatch, tmp_path):
-    """Non-merge host with no key still enumerates default key files (the merge
-    skip must not leak into the ordinary path)."""
+async def test_explicit_host_defers_default_keys_to_asyncssh(monkeypatch, tmp_path):
+    """A registered host must not eagerly decrypt an encrypted default key.
+
+    AsyncSSH can skip that key and authenticate with the agent instead, but
+    passing the file explicitly as client_keys raises before agent auth.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    ssh_dir = tmp_path / ".ssh"
+    ssh_dir.mkdir()
+    (ssh_dir / "id_ed25519").write_text("encrypted private key placeholder")
     m = _mgr(monkeypatch, tmp_path)
     cfg = cm.HostConfig(name="web01", host="10.0.0.1")  # use_ssh_config False
     kw = await m._build_connect_kwargs(cfg)
     assert kw["host"] == "10.0.0.1" and kw["username"] == "root" and kw["port"] == 22
+    assert "client_keys" not in kw  # AsyncSSH defaults (files + agent)
+    assert "agent_path" not in kw     # ssh_config IdentityAgent / SSH_AUTH_SOCK

@@ -1079,20 +1079,12 @@ class ConnectionManager:
             pass
         elif cfg.key:
             kwargs["client_keys"] = [cfg.key]
-        elif not cfg.use_ssh_config:
-            # No explicit key file (and not a merge host): enumerate the usual
-            # default keys. NOTE: asyncssh ALSO consults the ssh-agent
-            # (SSH_AUTH_SOCK) by default, so an agent-held key authenticates here
-            # too even though this loop only lists files. A merge host is skipped
-            # on purpose so asyncssh reads IdentityFile / IdentityAgent from the
-            # ssh config instead of being pinned to the default key files.
-            default_keys = []
-            for k in ["~/.ssh/id_ed25519", "~/.ssh/id_rsa", "~/.ssh/id_ecdsa"]:
-                kp = Path(k).expanduser()
-                if kp.exists():
-                    default_keys.append(str(kp))
-            if default_keys:
-                kwargs["client_keys"] = default_keys
+        # With no explicit key, defer default key files and ssh_config's
+        # IdentityFile / IdentityAgent to AsyncSSH. Passing an enumerated list
+        # as client_keys would make AsyncSSH try to decrypt *every* file first:
+        # an encrypted default key then raises KeyImportError even if an agent
+        # can authenticate without a passphrase. AsyncSSH skips encrypted
+        # defaults when client_keys is omitted and still tries the agent.
 
         # Encrypted private keys: resolve a passphrase through its own side
         # channel (agent cache → passphrase_command).
@@ -1102,6 +1094,13 @@ class ConnectionManager:
             passphrase = await self._resolve_ssh_passphrase(cfg)
             if passphrase is not None:
                 kwargs["passphrase"] = passphrase
+            elif cfg.key and cfg.use_ssh_agent is not False:
+                # An explicit encrypted key would otherwise fail during
+                # load_keypairs(), before the agent gets a chance to sign.
+                # Skip only keys that need a passphrase; preserve errors for
+                # missing/invalid files. With the agent disabled, retain the
+                # original error so the missing passphrase is actionable.
+                kwargs["ignore_encrypted"] = True
 
         return kwargs
 
